@@ -519,13 +519,7 @@ fn start_ident_sequence(c1: char, c2: char, c3: char) -> bool {
 }
 
 fn are_valid_escape(c1: char, c2: char) -> bool {
-    if c1 != C_REVERSE_SOLIDUS {
-        return false;
-    }
-    if is_new_line(c2) {
-        return false;
-    }
-    true
+    c1 == C_REVERSE_SOLIDUS && !is_new_line(c2)
 }
 
 fn start_number(c1: char, c2: char, c3: char) -> bool {
