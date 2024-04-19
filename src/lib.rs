@@ -1,7 +1,4 @@
-use std::{borrow::Cow, str::CharIndices};
-
-use once_cell::sync::Lazy;
-use regex::{Captures, Regex};
+use std::str::CharIndices;
 
 const C_LINE_FEED: char = '\n';
 const C_CARRIAGE_RETURN: char = '\r';
