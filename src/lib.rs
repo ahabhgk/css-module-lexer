@@ -1,4 +1,7 @@
-use std::str::CharIndices;
+use std::{borrow::Cow, str::CharIndices};
+
+use once_cell::sync::Lazy;
+use regex::{Captures, Regex};
 
 const C_LINE_FEED: char = '\n';
 const C_CARRIAGE_RETURN: char = '\r';
@@ -47,7 +50,7 @@ const C_HYPHEN_MINUS: char = '-';
 const C_LESS_THAN_SIGN: char = '<';
 const C_GREATER_THAN_SIGN: char = '>';
 
-pub trait Handler {
+pub trait Visitor {
     fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn url(
@@ -69,10 +72,11 @@ pub trait Handler {
     fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn left_curly(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn right_curly(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
 }
 
+#[derive(Debug, Clone)]
 pub struct Lexer<'s> {
     value: &'s str,
     iter: CharIndices<'s>,
@@ -139,11 +143,11 @@ impl Lexer<'_> {
 }
 
 impl Lexer<'_> {
-    pub fn lex<T: Handler>(&mut self, handler: &mut T) {
-        self.lex_impl(handler);
+    pub fn lex<T: Visitor>(&mut self, visitor: &mut T) {
+        self.lex_impl(visitor);
     }
 
-    fn lex_impl<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn lex_impl<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         while !self.is_eof() {
             self.consume_comments()?;
@@ -152,26 +156,26 @@ impl Lexer<'_> {
                 // https://drafts.csswg.org/css-syntax/#consume-token
                 match c {
                     c if is_white_space(c) => self.consume_space()?,
-                    C_QUOTATION_MARK => self.consume_string(handler, C_QUOTATION_MARK)?,
-                    C_NUMBER_SIGN => self.consume_number_sign(handler)?,
-                    C_APOSTROPHE => self.consume_string(handler, C_APOSTROPHE)?,
-                    C_LEFT_PARENTHESIS => self.consume_left_parenthesis(handler)?,
-                    C_RIGHT_PARENTHESIS => self.consume_right_parenthesis(handler)?,
+                    C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
+                    C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
+                    C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
+                    C_LEFT_PARENTHESIS => self.consume_left_parenthesis(visitor)?,
+                    C_RIGHT_PARENTHESIS => self.consume_right_parenthesis(visitor)?,
                     C_PLUS_SIGN => self.consume_plus_sign()?,
-                    C_COMMA => self.consume_comma(handler)?,
-                    C_HYPHEN_MINUS => self.consume_minus(handler)?,
-                    C_FULL_STOP => self.consume_full_stop(handler)?,
-                    C_COLON => self.consume_potential_pseudo(handler)?,
-                    C_SEMICOLON => self.consume_semicolon(handler)?,
+                    C_COMMA => self.consume_comma(visitor)?,
+                    C_HYPHEN_MINUS => self.consume_minus(visitor)?,
+                    C_FULL_STOP => self.consume_full_stop(visitor)?,
+                    C_COLON => self.consume_potential_pseudo(visitor)?,
+                    C_SEMICOLON => self.consume_semicolon(visitor)?,
                     C_LESS_THAN_SIGN => self.consume_less_than_sign()?,
-                    C_AT_SIGN => self.consume_at_sign(handler)?,
+                    C_AT_SIGN => self.consume_at_sign(visitor)?,
                     C_LEFT_SQUARE => self.consume_delim()?,
-                    C_REVERSE_SOLIDUS => self.consume_reverse_solidus(handler)?,
+                    C_REVERSE_SOLIDUS => self.consume_reverse_solidus(visitor)?,
                     C_RIGHT_SQUARE => self.consume_delim()?,
-                    C_LEFT_CURLY => self.consume_left_curly(handler)?,
-                    C_RIGHT_CURLY => self.consume_right_curly(handler)?,
+                    C_LEFT_CURLY => self.consume_left_curly(visitor)?,
+                    C_RIGHT_CURLY => self.consume_right_curly(visitor)?,
                     c if is_digit(c) => self.consume_numeric_token()?,
-                    c if is_ident_start(c) => self.consume_ident_like(handler)?,
+                    c if is_ident_start(c) => self.consume_ident_like(visitor)?,
                     _ => self.consume_delim()?,
                 }
             }
@@ -273,7 +277,7 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_ident_like<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_ident_like<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         self.consume_ident_sequence()?;
         let peek_pos = self.peek_pos()?;
@@ -283,19 +287,19 @@ impl Lexer<'_> {
             while is_white_space(self.consume()?) {}
             let c = self.cur()?;
             if c == C_QUOTATION_MARK || c == C_APOSTROPHE {
-                handler.function(self, start, peek_pos)
+                visitor.function(self, start, peek_pos)
             } else {
-                self.consume_url(handler, start)
+                self.consume_url(visitor, start)
             }
         } else if self.cur()? == C_LEFT_PARENTHESIS {
             self.consume()?;
-            handler.function(self, start, self.cur_pos()?)
+            visitor.function(self, start, self.cur_pos()?)
         } else {
-            handler.ident(self, start, self.cur_pos()?)
+            visitor.ident(self, start, self.cur_pos()?)
         }
     }
 
-    fn consume_url<T: Handler>(&mut self, handler: &mut T, start: usize) -> Option<()> {
+    fn consume_url<T: Visitor>(&mut self, visitor: &mut T, start: usize) -> Option<()> {
         let content_start = self.cur_pos()?;
         loop {
             let c = self.cur()?;
@@ -309,11 +313,11 @@ impl Lexer<'_> {
                     return Some(());
                 }
                 self.consume()?;
-                return handler.url(self, start, self.cur_pos()?, content_start, content_end);
+                return visitor.url(self, start, self.cur_pos()?, content_start, content_end);
             } else if c == C_RIGHT_PARENTHESIS {
                 let content_end = self.cur_pos()?;
                 self.consume()?;
-                return handler.url(self, start, self.cur_pos()?, content_start, content_end);
+                return visitor.url(self, start, self.cur_pos()?, content_start, content_end);
             } else if c == C_LEFT_PARENTHESIS {
                 return Some(());
             } else {
@@ -322,7 +326,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_string<T: Handler>(&mut self, handler: &mut T, end: char) -> Option<()> {
+    fn consume_string<T: Visitor>(&mut self, visitor: &mut T, end: char) -> Option<()> {
         let start = self.cur_pos()?;
         while let Some(c) = self.consume() {
             if c == end {
@@ -341,17 +345,17 @@ impl Lexer<'_> {
                 }
             }
         }
-        handler.string(self, start, self.cur_pos()?)
+        visitor.string(self, start, self.cur_pos()?)
     }
 
-    fn consume_number_sign<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_number_sign<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let c2 = self.peek()?;
         if is_ident(c2) || are_valid_escape(c2, self.peek2()?) {
             let start = self.cur_pos()?;
             let c = self.consume()?;
-            if handler.is_selector(self)? && start_ident_sequence(c, self.peek()?, self.peek2()?) {
+            if visitor.is_selector(self)? && start_ident_sequence(c, self.peek()?, self.peek2()?) {
                 self.consume_ident_sequence()?;
-                return handler.id(self, start, self.cur_pos()?);
+                return visitor.id(self, start, self.cur_pos()?);
             }
         } else {
             return self.consume_delim();
@@ -359,16 +363,16 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_left_parenthesis<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_left_parenthesis<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.left_parenthesis(self, end - 1, end)
+        visitor.left_parenthesis(self, end - 1, end)
     }
 
-    fn consume_right_parenthesis<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_right_parenthesis<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.right_parenthesis(self, end - 1, end)
+        visitor.right_parenthesis(self, end - 1, end)
     }
 
     fn consume_plus_sign(&mut self) -> Option<()> {
@@ -379,13 +383,13 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_comma<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_comma<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.comma(self, end - 1, end)
+        visitor.comma(self, end - 1, end)
     }
 
-    fn consume_minus<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_minus<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -396,13 +400,13 @@ impl Lexer<'_> {
             self.consume()?;
             Some(())
         } else if start_ident_sequence(c, c2, c3) {
-            self.consume_ident_like(handler)
+            self.consume_ident_like(visitor)
         } else {
             self.consume_delim()
         }
     }
 
-    fn consume_full_stop<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_full_stop<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -411,32 +415,32 @@ impl Lexer<'_> {
         }
         let start = self.cur_pos()?;
         self.consume()?;
-        if !handler.is_selector(self)? || !start_ident_sequence(c2, c3, self.peek2()?) {
+        if !visitor.is_selector(self)? || !start_ident_sequence(c2, c3, self.peek2()?) {
             return self.consume_delim();
         }
         self.consume_ident_sequence()?;
-        handler.class(self, start, self.cur_pos()?)
+        visitor.class(self, start, self.cur_pos()?)
     }
 
-    fn consume_potential_pseudo<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_potential_pseudo<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
-        if !handler.is_selector(self)? || !start_ident_sequence(c, self.peek()?, self.peek2()?) {
+        if !visitor.is_selector(self)? || !start_ident_sequence(c, self.peek()?, self.peek2()?) {
             return Some(());
         }
         self.consume_ident_sequence()?;
         if self.cur()? == C_LEFT_PARENTHESIS {
             self.consume()?;
-            handler.pseudo_function(self, start, self.cur_pos()?)
+            visitor.pseudo_function(self, start, self.cur_pos()?)
         } else {
-            handler.pseudo_class(self, start, self.cur_pos()?)
+            visitor.pseudo_class(self, start, self.cur_pos()?)
         }
     }
 
-    fn consume_semicolon<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_semicolon<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.semicolon(self, end - 1, end)
+        visitor.semicolon(self, end - 1, end)
     }
 
     fn consume_less_than_sign(&mut self) -> Option<()> {
@@ -448,34 +452,48 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_at_sign<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_at_sign<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
         if start_ident_sequence(c, self.peek()?, self.peek2()?) {
             self.consume_ident_sequence()?;
-            return handler.at_keyword(self, start, self.cur_pos()?);
+            return visitor.at_keyword(self, start, self.cur_pos()?);
         }
         Some(())
     }
 
-    fn consume_reverse_solidus<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_reverse_solidus<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         if are_valid_escape(self.cur()?, self.peek()?) {
-            self.consume_ident_like(handler)
+            self.consume_ident_like(visitor)
         } else {
             self.consume_delim()
         }
     }
 
-    fn consume_left_curly<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_left_curly<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.left_curly(self, end - 1, end)
+        visitor.left_curly_bracket(self, end - 1, end)
     }
 
-    fn consume_right_curly<T: Handler>(&mut self, handler: &mut T) -> Option<()> {
+    fn consume_right_curly<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
-        handler.right_curly(self, end - 1, end)
+        visitor.right_curly_bracket(self, end - 1, end)
+    }
+}
+
+impl Lexer<'_> {
+    pub fn eat_white_space_and_comments(&mut self) -> Option<()> {
+        loop {
+            self.consume_comments()?;
+            if is_white_space(self.cur()?) {
+                self.consume_space()?;
+            } else {
+                break;
+            }
+        }
+        Some(())
     }
 }
 
@@ -530,6 +548,271 @@ fn start_number(c1: char, c2: char, c3: char) -> bool {
     }
 }
 
+enum CssMode {
+    TopLevel,
+    InBlock,
+    InAtImport(ImportData),
+    AtImportInvalid,
+    AtNamespaceInvalid,
+}
+
+pub struct Range {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Range {
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+}
+
+pub enum Dependency {
+    Url {
+        request: String,
+        range: Range,
+        kind: UrlKind,
+    },
+}
+
+pub enum UrlKind {
+    Url,
+    String,
+}
+
+struct ImportData {
+    start: usize,
+    url: Option<ImportDataUrl>,
+}
+
+impl ImportData {
+    pub fn new(start: usize) -> Self {
+        Self { start, url: None }
+    }
+}
+
+struct ImportDataUrl {
+    request: String,
+    range: Range,
+}
+
+pub enum Warning {
+    DuplicateUrl(Range),
+    NamespaceNotSupportedInBundledCss(Range),
+    NotPrecededAtImport(Range),
+}
+
+pub struct CollectDependencies {
+    // allow_mode_switch: bool,
+    scope: CssMode,
+    block_nesting_level: u32,
+    allow_import_at_rule: bool,
+    is_next_rule_prelude: bool,
+    dependencies: Vec<Dependency>,
+    warnings: Vec<Warning>,
+}
+
+impl CollectDependencies {
+    pub fn new(allow_mode_switch: bool) -> Self {
+        Self {
+            // allow_mode_switch,
+            scope: CssMode::TopLevel,
+            block_nesting_level: 0,
+            allow_import_at_rule: true,
+            is_next_rule_prelude: true,
+            dependencies: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn is_next_nested_syntax(&self, lexer: &mut Lexer) -> Option<bool> {
+        let mut lexer = lexer.clone();
+        lexer.eat_white_space_and_comments()?;
+        let c = lexer.cur()?;
+        if c == C_LEFT_CURLY {
+            return Some(false);
+        }
+        Some(!is_ident_start(c))
+    }
+}
+
+impl Visitor for CollectDependencies {
+    fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
+        Some(self.is_next_rule_prelude)
+    }
+
+    fn url(
+        &mut self,
+        lexer: &mut Lexer,
+        start: usize,
+        end: usize,
+        content_start: usize,
+        content_end: usize,
+    ) -> Option<()> {
+        let value = normalize_url(lexer.slice(content_start, content_end)?, false);
+        match self.scope {
+            CssMode::InAtImport(ref mut import_data) => {
+                // TODO: url in supports
+                if import_data.url.is_some() {
+                    self.warnings
+                        .push(Warning::DuplicateUrl(Range::new(import_data.start, end)));
+                    return Some(());
+                }
+                import_data.url = Some(ImportDataUrl {
+                    request: value,
+                    range: Range::new(start, end),
+                })
+            }
+            CssMode::InBlock if !value.is_empty() => self.dependencies.push(Dependency::Url {
+                request: value,
+                range: Range::new(start, end),
+                kind: UrlKind::Url,
+            }),
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn string(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        let name = lexer.slice(start, end)?.to_ascii_lowercase();
+        if name == "@namespace" {
+            self.scope = CssMode::AtNamespaceInvalid;
+            self.warnings
+                .push(Warning::NamespaceNotSupportedInBundledCss(Range::new(
+                    start, end,
+                )));
+        } else if name == "@import" {
+            if !self.allow_import_at_rule {
+                self.scope = CssMode::AtImportInvalid;
+                self.warnings
+                    .push(Warning::NotPrecededAtImport(Range::new(start, end)));
+                return Some(());
+            }
+            self.scope = CssMode::InAtImport(ImportData::new(start));
+        } else if name == "@media"
+            || name == "@supports"
+            || name == "@layer"
+            || name == "@container"
+        {
+            self.is_next_rule_prelude = true;
+        }
+        // else if self.allow_mode_switch {
+        //     self.is_next_rule_prelude = false;
+        // }
+        Some(())
+    }
+
+    fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn id(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
+        match self.scope {
+            CssMode::TopLevel => {
+                self.allow_import_at_rule = false;
+                self.scope = CssMode::InBlock;
+                self.block_nesting_level = 1;
+                // if self.allow_mode_switch {
+                //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                // }
+            }
+            CssMode::InBlock => {
+                self.block_nesting_level += 1;
+                // if self.allow_mode_switch {
+                //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                // }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
+        if matches!(self.scope, CssMode::InBlock) {
+            self.block_nesting_level -= 1;
+            if self.block_nesting_level == 0 {
+                // TODO: if isLocalMode
+                self.scope = CssMode::TopLevel;
+                // if self.allow_mode_switch {
+                //     self.is_next_rule_prelude = true;
+                // }
+            }
+            // else if self.allow_mode_switch {
+            //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+            // }
+        }
+        Some(())
+    }
+
+    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        todo!()
+    }
+
+    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        Some(())
+    }
+
+    fn right_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        Some(())
+    }
+}
+
+static STRING_MULTILINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\[\n\r\f]").unwrap());
+static UNESCAPE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\\([0-9a-fA-F]{1,6}[ \t\n\r\f]?|[\s\S])").unwrap());
+
+fn normalize_url(s: &str, is_string: bool) -> String {
+    let s = if is_string {
+        STRING_MULTILINE.replace_all(&s, "")
+    } else {
+        Cow::Borrowed(s)
+    };
+    let s = s.trim_matches(|c| is_white_space(c));
+    let s = UNESCAPE.replace_all(s, |caps: &Captures| {
+        char::from_u32(u32::from_str_radix(caps[1].trim(), 16).unwrap())
+            .unwrap()
+            .to_string()
+    });
+    if matches!(s.get(..5), Some(s) if s.to_ascii_lowercase().starts_with("data:")) {
+        return s.into_owned();
+    }
+    if s.contains('%') {
+        match urlencoding::decode(&s) {
+            Ok(s) => return s.into_owned(),
+            Err(_) => {}
+        }
+    }
+    s.into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -537,11 +820,11 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct SnapshotHandler {
+    struct Snapshot {
         results: Vec<(String, String)>,
     }
 
-    impl SnapshotHandler {
+    impl Snapshot {
         pub fn add(&mut self, key: &str, value: &str) {
             self.results.push((key.to_string(), value.to_string()))
         }
@@ -554,7 +837,7 @@ mod tests {
         }
     }
 
-    impl Handler for SnapshotHandler {
+    impl Visitor for Snapshot {
         fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
             self.add("function", lexer.slice(start, end)?);
             Some(())
@@ -631,12 +914,22 @@ mod tests {
             Some(())
         }
 
-        fn left_curly(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        fn left_curly_bracket(
+            &mut self,
+            lexer: &mut Lexer,
+            start: usize,
+            end: usize,
+        ) -> Option<()> {
             self.add("left_curly", lexer.slice(start, end)?);
             Some(())
         }
 
-        fn right_curly(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        fn right_curly_bracket(
+            &mut self,
+            lexer: &mut Lexer,
+            start: usize,
+            end: usize,
+        ) -> Option<()> {
             self.add("right_curly", lexer.slice(start, end)?);
             Some(())
         }
@@ -644,7 +937,7 @@ mod tests {
 
     #[test]
     fn parse_urls() {
-        let mut h = SnapshotHandler::default();
+        let mut s = Snapshot::default();
         let mut l = Lexer::from(indoc! {r#"
             body {
                 background: url(
@@ -656,10 +949,10 @@ mod tests {
                 background: url(  "https://example.com/some url \"with\" 'spaces'.png"   )  url('https://example.com/\'"quotes"\'.png');
             }
         "#});
-        l.lex(&mut h);
+        l.lex(&mut s);
         assert!(l.cur().is_none());
         assert_eq!(
-            h.snapshot(),
+            s.snapshot(),
             indoc! {r#"
                 ident: body
                 left_curly: {
@@ -686,15 +979,15 @@ mod tests {
 
     #[test]
     fn parse_pseudo_functions() {
-        let mut h = SnapshotHandler::default();
+        let mut s = Snapshot::default();
         let mut l = Lexer::from(indoc! {r#"
             :local(.class#id, .class:not(*:hover)) { color: red; }
             :import(something from ":somewhere") {}
         "#});
-        l.lex(&mut h);
+        l.lex(&mut s);
         assert!(l.cur().is_none());
         assert_eq!(
-            h.snapshot(),
+            s.snapshot(),
             indoc! {r#"
                 pseudo_function: :local(
                 class: .class
@@ -723,18 +1016,18 @@ mod tests {
 
     #[test]
     fn parse_at_rules() {
-        let mut h = SnapshotHandler::default();
+        let mut s = Snapshot::default();
         let mut l = Lexer::from(indoc! {r#"
             @media (max-size: 100px) {
                 @import "external.css";
                 body { color: red; }
             }
         "#});
-        l.lex(&mut h);
+        l.lex(&mut s);
         assert!(l.cur().is_none());
-        println!("{}", h.snapshot());
+        println!("{}", s.snapshot());
         assert_eq!(
-            h.snapshot(),
+            s.snapshot(),
             indoc! {r#"
                 at_keyword: @media
                 left_parenthesis: (

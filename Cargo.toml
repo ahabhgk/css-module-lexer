@@ -5,5 +5,10 @@ edition = "2021"
 description = "Lexes CSS modules returning their dependencies metadata"
 license = "MIT"
 
+[dependencies]
+regex = "1"
+once_cell = "1"
+urlencoding = "2"
+
 [dev-dependencies]
 indoc = "2"
