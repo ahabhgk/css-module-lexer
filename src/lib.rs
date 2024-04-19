@@ -50,12 +50,12 @@ const C_HYPHEN_MINUS: char = '-';
 const C_LESS_THAN_SIGN: char = '<';
 const C_GREATER_THAN_SIGN: char = '>';
 
-pub trait Visitor {
+pub trait Visitor<'s> {
     fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
     fn url(
         &mut self,
-        lexer: &mut Lexer,
+        lexer: &mut Lexer<'s>,
         start: usize,
         end: usize,
         content_start: usize,
@@ -100,7 +100,7 @@ impl<'s> From<&'s str> for Lexer<'s> {
     }
 }
 
-impl Lexer<'_> {
+impl<'s> Lexer<'s> {
     #[must_use]
     pub fn consume(&mut self) -> Option<char> {
         self.cur = self.peek;
@@ -133,7 +133,7 @@ impl Lexer<'_> {
         self.peek2.map(|(_, c)| c)
     }
 
-    pub fn slice(&self, start: usize, end: usize) -> Option<&str> {
+    pub fn slice(&self, start: usize, end: usize) -> Option<&'s str> {
         self.value.get(start..end)
     }
 
@@ -142,12 +142,12 @@ impl Lexer<'_> {
     }
 }
 
-impl Lexer<'_> {
-    pub fn lex<T: Visitor>(&mut self, visitor: &mut T) {
+impl<'s> Lexer<'s> {
+    pub fn lex<T: Visitor<'s>>(&mut self, visitor: &mut T) {
         self.lex_impl(visitor);
     }
 
-    fn lex_impl<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         while !self.is_eof() {
             self.consume_comments()?;
@@ -277,7 +277,7 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_ident_like<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_ident_like<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         self.consume_ident_sequence()?;
         let peek_pos = self.peek_pos()?;
@@ -299,7 +299,11 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_url<T: Visitor>(&mut self, visitor: &mut T, start: usize) -> Option<()> {
+    fn consume_url<T: Visitor<'s>>(
+        self: &mut Lexer<'s>,
+        visitor: &mut T,
+        start: usize,
+    ) -> Option<()> {
         let content_start = self.cur_pos()?;
         loop {
             let c = self.cur()?;
@@ -326,7 +330,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_string<T: Visitor>(&mut self, visitor: &mut T, end: char) -> Option<()> {
+    fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
         let start = self.cur_pos()?;
         while let Some(c) = self.consume() {
             if c == end {
@@ -348,7 +352,7 @@ impl Lexer<'_> {
         visitor.string(self, start, self.cur_pos()?)
     }
 
-    fn consume_number_sign<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_number_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c2 = self.peek()?;
         if is_ident(c2) || are_valid_escape(c2, self.peek2()?) {
             let start = self.cur_pos()?;
@@ -363,13 +367,13 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_left_parenthesis<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_left_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.left_parenthesis(self, end - 1, end)
     }
 
-    fn consume_right_parenthesis<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_right_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.right_parenthesis(self, end - 1, end)
@@ -383,13 +387,13 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_comma<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_comma<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.comma(self, end - 1, end)
     }
 
-    fn consume_minus<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_minus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -406,7 +410,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_full_stop<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_full_stop<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -422,7 +426,7 @@ impl Lexer<'_> {
         visitor.class(self, start, self.cur_pos()?)
     }
 
-    fn consume_potential_pseudo<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_potential_pseudo<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
         if !visitor.is_selector(self)? || !start_ident_sequence(c, self.peek()?, self.peek2()?) {
@@ -437,7 +441,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_semicolon<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_semicolon<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.semicolon(self, end - 1, end)
@@ -452,7 +456,7 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_at_sign<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_at_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
         if start_ident_sequence(c, self.peek()?, self.peek2()?) {
@@ -462,7 +466,7 @@ impl Lexer<'_> {
         Some(())
     }
 
-    fn consume_reverse_solidus<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_reverse_solidus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         if are_valid_escape(self.cur()?, self.peek()?) {
             self.consume_ident_like(visitor)
         } else {
@@ -470,13 +474,13 @@ impl Lexer<'_> {
         }
     }
 
-    fn consume_left_curly<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_left_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.left_curly_bracket(self, end - 1, end)
     }
 
-    fn consume_right_curly<T: Visitor>(&mut self, visitor: &mut T) -> Option<()> {
+    fn consume_right_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.right_curly_bracket(self, end - 1, end)
@@ -548,14 +552,34 @@ fn start_number(c1: char, c2: char, c3: char) -> bool {
     }
 }
 
-enum CssMode {
+#[derive(Debug)]
+enum CssMode<'s> {
     TopLevel,
     InBlock,
-    InAtImport(ImportData),
+    InAtImport(ImportData<'s>),
     AtImportInvalid,
     AtNamespaceInvalid,
 }
 
+#[derive(Debug)]
+struct ImportData<'s> {
+    start: usize,
+    url: Option<ImportDataUrl<'s>>,
+}
+
+impl ImportData<'_> {
+    pub fn new(start: usize) -> Self {
+        Self { start, url: None }
+    }
+}
+
+#[derive(Debug)]
+struct ImportDataUrl<'s> {
+    request: &'s str,
+    range: Range,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
     pub start: usize,
     pub end: usize,
@@ -567,52 +591,62 @@ impl Range {
     }
 }
 
-pub enum Dependency {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Dependency<'s> {
     Url {
-        request: String,
+        request: &'s str,
         range: Range,
         kind: UrlKind,
     },
+    Import,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UrlKind {
     Url,
     String,
 }
 
-struct ImportData {
-    start: usize,
-    url: Option<ImportDataUrl>,
-}
-
-impl ImportData {
-    pub fn new(start: usize) -> Self {
-        Self { start, url: None }
-    }
-}
-
-struct ImportDataUrl {
-    request: String,
-    range: Range,
-}
-
+#[derive(Debug, Clone)]
 pub enum Warning {
     DuplicateUrl(Range),
     NamespaceNotSupportedInBundledCss(Range),
     NotPrecededAtImport(Range),
 }
 
-pub struct CollectDependencies {
+#[derive(Debug, Clone)]
+pub struct Collection<'s> {
+    pub dependencies: Vec<Dependency<'s>>,
+    pub warnings: Vec<Warning>,
+}
+
+impl<'s> From<CollectDependencies<'s>> for Collection<'s> {
+    fn from(collector: CollectDependencies<'s>) -> Self {
+        Self {
+            dependencies: collector.dependencies,
+            warnings: collector.warnings,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CollectDependencies<'s> {
     // allow_mode_switch: bool,
-    scope: CssMode,
+    scope: CssMode<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
     is_next_rule_prelude: bool,
-    dependencies: Vec<Dependency>,
+    dependencies: Vec<Dependency<'s>>,
     warnings: Vec<Warning>,
 }
 
-impl CollectDependencies {
+impl Default for CollectDependencies<'_> {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl CollectDependencies<'_> {
     pub fn new(allow_mode_switch: bool) -> Self {
         Self {
             // allow_mode_switch,
@@ -636,20 +670,22 @@ impl CollectDependencies {
     }
 }
 
-impl Visitor for CollectDependencies {
+impl<'s> Visitor<'s> for CollectDependencies<'s> {
     fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
         Some(self.is_next_rule_prelude)
     }
 
     fn url(
         &mut self,
-        lexer: &mut Lexer,
+        lexer: &mut Lexer<'s>,
         start: usize,
         end: usize,
         content_start: usize,
         content_end: usize,
     ) -> Option<()> {
-        let value = normalize_url(lexer.slice(content_start, content_end)?, false);
+        let value = lexer
+            .slice(content_start, content_end)?
+            .trim_matches(|c| is_white_space(c));
         match self.scope {
             CssMode::InAtImport(ref mut import_data) => {
                 // TODO: url in supports
@@ -674,7 +710,7 @@ impl Visitor for CollectDependencies {
     }
 
     fn string(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
@@ -707,15 +743,15 @@ impl Visitor for CollectDependencies {
     }
 
     fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn id(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
@@ -757,23 +793,23 @@ impl Visitor for CollectDependencies {
     }
 
     fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        todo!()
+        Some(())
     }
 
     fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
@@ -783,34 +819,6 @@ impl Visitor for CollectDependencies {
     fn right_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
         Some(())
     }
-}
-
-static STRING_MULTILINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\[\n\r\f]").unwrap());
-static UNESCAPE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\\([0-9a-fA-F]{1,6}[ \t\n\r\f]?|[\s\S])").unwrap());
-
-fn normalize_url(s: &str, is_string: bool) -> String {
-    let s = if is_string {
-        STRING_MULTILINE.replace_all(&s, "")
-    } else {
-        Cow::Borrowed(s)
-    };
-    let s = s.trim_matches(|c| is_white_space(c));
-    let s = UNESCAPE.replace_all(s, |caps: &Captures| {
-        char::from_u32(u32::from_str_radix(caps[1].trim(), 16).unwrap())
-            .unwrap()
-            .to_string()
-    });
-    if matches!(s.get(..5), Some(s) if s.to_ascii_lowercase().starts_with("data:")) {
-        return s.into_owned();
-    }
-    if s.contains('%') {
-        match urlencoding::decode(&s) {
-            Ok(s) => return s.into_owned(),
-            Err(_) => {}
-        }
-    }
-    s.into_owned()
 }
 
 #[cfg(test)]
@@ -837,7 +845,7 @@ mod tests {
         }
     }
 
-    impl Visitor for Snapshot {
+    impl Visitor<'_> for Snapshot {
         fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
             self.add("function", lexer.slice(start, end)?);
             Some(())
@@ -1045,6 +1053,39 @@ mod tests {
                 right_curly: }
                 right_curly: }
             "#}
+        );
+    }
+
+    #[test]
+    fn collect_url_from_url() {
+        let mut v = CollectDependencies::default();
+        let mut l = Lexer::from(indoc! {r#"
+            body {
+                background: url(
+                    https://example\2f4a8f.com\
+            /image.png
+                )
+            }
+        "#});
+        l.lex(&mut v);
+        let Collection {
+            dependencies,
+            warnings,
+        } = v.into();
+        assert!(warnings.is_empty());
+        let Dependency::Url {
+            request,
+            range,
+            kind,
+        } = &dependencies[0]
+        else {
+            panic!()
+        };
+        assert_eq!(*request, "https://example\\2f4a8f.com\\\n/image.png");
+        assert_eq!(*kind, UrlKind::Url);
+        assert_eq!(
+            l.slice(range.start, range.end).unwrap(),
+            "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )"
         );
     }
 }
