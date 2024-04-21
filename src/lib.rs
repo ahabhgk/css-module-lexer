@@ -659,41 +659,37 @@ pub enum Warning {
     ExpectedUrl(Range),
 }
 
-#[derive(Debug, Clone)]
-pub struct Collection<'s> {
-    pub dependencies: Vec<Dependency<'s>>,
-    pub warnings: Vec<Warning>,
+pub fn lex_css_dependencies<'s>(
+    input: &'s str,
+    handle_dependency: impl FnMut(Dependency<'s>),
+    handle_warning: impl FnMut(Warning),
+) {
+    let mut lexer = Lexer::from(input);
+    let mut visitor = LexDependencies::new(handle_dependency, handle_warning, false);
+    lexer.lex(&mut visitor);
 }
 
-impl<'s> From<CollectDependencies<'s>> for Collection<'s> {
-    fn from(collector: CollectDependencies<'s>) -> Self {
-        Self {
-            dependencies: collector.dependencies,
-            warnings: collector.warnings,
-        }
-    }
+pub fn collect_css_dependencies<'s>(input: &'s str) -> (Vec<Dependency<'s>>, Vec<Warning>) {
+    let mut dependencies = Vec::new();
+    let mut warnings = Vec::new();
+    lex_css_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
+    (dependencies, warnings)
 }
 
 #[derive(Debug)]
-pub struct CollectDependencies<'s> {
+pub struct LexDependencies<'s, D, W> {
     // allow_mode_switch: bool,
     scope: CssMode<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
     balanced: Vec<BalancedItem>,
     is_next_rule_prelude: bool,
-    dependencies: Vec<Dependency<'s>>,
-    warnings: Vec<Warning>,
+    handle_dependency: D,
+    handle_warning: W,
 }
 
-impl Default for CollectDependencies<'_> {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
-impl CollectDependencies<'_> {
-    pub fn new(allow_mode_switch: bool) -> Self {
+impl<'s, D, W> LexDependencies<'s, D, W> {
+    pub fn new(handle_dependency: D, handle_warning: W, allow_mode_switch: bool) -> Self {
         Self {
             // allow_mode_switch,
             scope: CssMode::TopLevel,
@@ -701,8 +697,8 @@ impl CollectDependencies<'_> {
             allow_import_at_rule: true,
             balanced: Vec::new(),
             is_next_rule_prelude: true,
-            dependencies: Vec::new(),
-            warnings: Vec::new(),
+            handle_dependency,
+            handle_warning,
         }
     }
 
@@ -717,7 +713,7 @@ impl CollectDependencies<'_> {
     }
 }
 
-impl<'s> Visitor<'s> for CollectDependencies<'s> {
+impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDependencies<'s, D, W> {
     fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
         Some(self.is_next_rule_prelude)
     }
@@ -735,14 +731,16 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
             CssMode::InAtImport(ref mut import_data) => {
                 // TODO: url in supports
                 if import_data.url.is_some() {
-                    self.warnings
-                        .push(Warning::DuplicateUrl(Range::new(import_data.start, end)));
+                    (self.handle_warning)(Warning::DuplicateUrl(Range::new(
+                        import_data.start,
+                        end,
+                    )));
                     return Some(());
                 }
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
             }
-            CssMode::InBlock => self.dependencies.push(Dependency::Url {
+            CssMode::InBlock => (self.handle_dependency)(Dependency::Url {
                 request: value,
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
@@ -766,8 +764,10 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
                 }
 
                 if inside_url && import_data.url.is_some() {
-                    self.warnings
-                        .push(Warning::DuplicateUrl(Range::new(import_data.start, end)));
+                    (self.handle_warning)(Warning::DuplicateUrl(Range::new(
+                        import_data.start,
+                        end,
+                    )));
                     return Some(());
                 }
 
@@ -787,7 +787,7 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
                     _ => return Some(()),
                 };
                 let value = lexer.slice(start + 1, end - 1)?;
-                self.dependencies.push(Dependency::Url {
+                (self.handle_dependency)(Dependency::Url {
                     request: value,
                     range: Range::new(start, end),
                     kind,
@@ -802,15 +802,13 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
             self.scope = CssMode::AtNamespaceInvalid;
-            self.warnings
-                .push(Warning::NamespaceNotSupportedInBundledCss(Range::new(
-                    start, end,
-                )));
+            (self.handle_warning)(Warning::NamespaceNotSupportedInBundledCss(Range::new(
+                start, end,
+            )));
         } else if name == "@import" {
             if !self.allow_import_at_rule {
                 self.scope = CssMode::AtImportInvalid;
-                self.warnings
-                    .push(Warning::NotPrecededAtImport(Range::new(start, end)));
+                (self.handle_warning)(Warning::NotPrecededAtImport(Range::new(start, end)));
                 return Some(());
             }
             self.scope = CssMode::InAtImport(ImportData::new(start));
@@ -831,11 +829,10 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
         match self.scope {
             CssMode::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
-                    self.warnings
-                        .push(Warning::ExpectedUrl(Range::new(import_data.start, end)));
+                    (self.handle_warning)(Warning::ExpectedUrl(Range::new(import_data.start, end)));
                     return Some(());
                 };
-                self.dependencies.push(Dependency::Import {
+                (self.handle_dependency)(Dependency::Import {
                     request: url,
                     range: Range::new(import_data.start, end),
                     layer: None,
