@@ -253,7 +253,7 @@ impl<'s> Lexer<'s> {
     fn consume_ident_sequence(&mut self) -> Option<()> {
         loop {
             let c = self.cur()?;
-            if are_valid_escape(c, self.peek()?) {
+            if maybe_valid_escape(c) {
                 self.consume()?;
                 self.consume_escaped()?;
             } else if is_ident(c) {
@@ -310,9 +310,9 @@ impl<'s> Lexer<'s> {
         let content_start = self.cur_pos()?;
         loop {
             let c = self.cur()?;
-            if c == C_REVERSE_SOLIDUS {
+            if maybe_valid_escape(c) {
                 self.consume()?;
-                self.consume()?;
+                self.consume_escaped()?;
             } else if is_white_space(c) {
                 let content_end = self.cur_pos()?;
                 while is_white_space(self.consume()?) {}
@@ -543,6 +543,10 @@ fn start_ident_sequence(c1: char, c2: char, c3: char) -> bool {
     }
 }
 
+fn maybe_valid_escape(c: char) -> bool {
+    c == C_REVERSE_SOLIDUS
+}
+
 fn are_valid_escape(c1: char, c2: char) -> bool {
     c1 == C_REVERSE_SOLIDUS && !is_new_line(c2)
 }
@@ -751,10 +755,10 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
     fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         match self.scope {
             CssMode::InAtImport(ref mut import_data) => {
-                let Some(last) = self.balanced.last() else {
-                    return Some(());
-                };
-                let inside_url = matches!(last.kind, BalancedItemKind::Url);
+                let inside_url = matches!(
+                    self.balanced.last(),
+                    Some(last) if matches!(last.kind, BalancedItemKind::Url)
+                );
 
                 // Do not parse URLs in `supports(...)` and other strings if we already have a URL
                 if !inside_url && import_data.url.is_some() {
@@ -823,13 +827,21 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
         Some(())
     }
 
-    fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn semicolon(&mut self, lexer: &mut Lexer, _: usize, end: usize) -> Option<()> {
         match self.scope {
             CssMode::InAtImport(ref import_data) => {
-                if import_data.url.is_none() {
+                let Some(url) = import_data.url else {
                     self.warnings
                         .push(Warning::ExpectedUrl(Range::new(import_data.start, end)));
-                }
+                    return Some(());
+                };
+                self.dependencies.push(Dependency::Import {
+                    request: url,
+                    range: Range::new(import_data.start, end),
+                    layer: None,
+                    supports: None,
+                    media: None,
+                });
                 self.scope = CssMode::TopLevel;
             }
             CssMode::AtImportInvalid | CssMode::AtNamespaceInvalid => {

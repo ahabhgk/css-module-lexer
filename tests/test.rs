@@ -140,6 +140,32 @@ fn assert_url_dependency(
     assert_eq!(lexer.slice(range.start, range.end).unwrap(), range_content);
 }
 
+fn assert_import_dependency(
+    lexer: &Lexer,
+    dependency: &Dependency,
+    request: &str,
+    layer: Option<&str>,
+    supports: Option<&str>,
+    media: Option<&str>,
+    range_content: &str,
+) {
+    let Dependency::Import {
+        request: actual_request,
+        range,
+        layer: actual_layer,
+        supports: actual_supports,
+        media: actual_media,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_request, request);
+    assert_eq!(*actual_layer, layer);
+    assert_eq!(*actual_supports, supports);
+    assert_eq!(*actual_media, media);
+    assert_eq!(lexer.slice(range.start, range.end).unwrap(), range_content);
+}
+
 #[test]
 fn parse_urls() {
     let mut s = Snapshot::default();
@@ -254,6 +280,38 @@ fn parse_at_rules() {
 }
 
 #[test]
+fn parse_escape() {
+    let mut s = Snapshot::default();
+    let mut l = Lexer::from(indoc! {r#"
+        body {
+            a\
+        a: \
+        url(https://example\2f4a8f.com\
+        /image.png)
+            b: url(#\
+        hash)
+        }
+    "#});
+    l.lex(&mut s);
+    assert!(l.cur().is_none());
+    assert_eq!(
+        s.snapshot(),
+        indoc! {r#"
+            ident: body
+            left_curly: {
+            ident: a\
+            a
+            url: https://example\2f4a8f.com\
+            /image.png
+            ident: b
+            url: #\
+            hash
+            right_curly: }
+        "#}
+    );
+}
+
+#[test]
 fn url() {
     let mut v = CollectDependencies::default();
     let mut l = Lexer::from(indoc! {r#"
@@ -289,11 +347,7 @@ fn duplicate_url() {
         @import url("./a.css") url("./a.css");
     "#});
     l.lex(&mut v);
-    let Collection {
-        dependencies,
-        warnings,
-    } = v.into();
-    assert!(dependencies.is_empty());
+    let Collection { warnings, .. } = v.into();
     assert_warning(&l, &warnings[0], "@import url(./a.css) url(./a.css)");
     assert_warning(&l, &warnings[1], "@import url(./a.css) url(\"./a.css\"");
     assert_warning(&l, &warnings[2], "@import url(\"./a.css\") url(./a.css)");
@@ -385,7 +439,7 @@ fn empty() {
         body {
             a: url();
             b: url("");
-            c: image-set();
+            c: image-set(); // not an dependency
             d: image-set("");
             e: image-set(url());
             f: image-set(url(""));
@@ -397,9 +451,80 @@ fn empty() {
         warnings,
     } = v.into();
     assert!(warnings.is_empty());
-    assert_url_dependency(&l, &dependencies[0], "", UrlRangeKind::Function, "url()");
-    assert_url_dependency(&l, &dependencies[1], "", UrlRangeKind::String, "\"\"");
-    assert_url_dependency(&l, &dependencies[2], "", UrlRangeKind::Function, "\"\"");
-    assert_url_dependency(&l, &dependencies[3], "", UrlRangeKind::Function, "url()");
-    assert_url_dependency(&l, &dependencies[4], "", UrlRangeKind::String, "\"\"");
+    assert_import_dependency(&l, &dependencies[0], "", None, None, None, "@import url();");
+    assert_import_dependency(
+        &l,
+        &dependencies[1],
+        "",
+        None,
+        None,
+        None,
+        "@import url(\"\");",
+    );
+    assert_url_dependency(&l, &dependencies[2], "", UrlRangeKind::Function, "url()");
+    assert_url_dependency(&l, &dependencies[3], "", UrlRangeKind::String, "\"\"");
+    assert_url_dependency(&l, &dependencies[4], "", UrlRangeKind::Function, "\"\"");
+    assert_url_dependency(&l, &dependencies[5], "", UrlRangeKind::Function, "url()");
+    assert_url_dependency(&l, &dependencies[6], "", UrlRangeKind::String, "\"\"");
+}
+
+#[test]
+fn expect_url() {
+    let mut v = CollectDependencies::default();
+    let mut l = Lexer::from(indoc! {r#"
+        @import ;
+    "#});
+    l.lex(&mut v);
+    let Collection {
+        dependencies,
+        warnings,
+    } = v.into();
+    assert!(dependencies.is_empty());
+    assert_warning(&l, &warnings[0], "@import ;");
+}
+
+#[test]
+fn import() {
+    let mut v = CollectDependencies::default();
+    let mut l = Lexer::from(indoc! {r#"
+        @import 'https://example\2f4a8f.com\
+        /style.css';
+        @import url(https://example\2f4a8f.com\
+        /style.css);
+        @import url('https://example\2f4a8f.com\
+        /style.css') /* */;
+    "#});
+    l.lex(&mut v);
+    let Collection {
+        dependencies,
+        warnings,
+    } = v.into();
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        &l,
+        &dependencies[0],
+        "https://example\\2f4a8f.com\\\n/style.css",
+        None,
+        None,
+        None,
+        "@import 'https://example\\2f4a8f.com\\\n/style.css';",
+    );
+    assert_import_dependency(
+        &l,
+        &dependencies[1],
+        "https://example\\2f4a8f.com\\\n/style.css",
+        None,
+        None,
+        None,
+        "@import url(https://example\\2f4a8f.com\\\n/style.css);",
+    );
+    assert_import_dependency(
+        &l,
+        &dependencies[2],
+        "https://example\\2f4a8f.com\\\n/style.css",
+        None,
+        None,
+        None,
+        "@import url('https://example\\2f4a8f.com\\\n/style.css') /* */;",
+    );
 }
