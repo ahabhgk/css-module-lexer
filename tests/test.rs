@@ -1,5 +1,5 @@
 use css_module_lexer::{
-    CollectDependencies, Collection, Dependency, Lexer, UrlKind, Visitor, Warning,
+    CollectDependencies, Collection, Dependency, Lexer, UrlRangeKind, Visitor, Warning,
 };
 use indoc::indoc;
 
@@ -109,11 +109,22 @@ impl Visitor<'_> for Snapshot {
     }
 }
 
+fn assert_warning(lexer: &Lexer, warning: &Warning, range_content: &str) {
+    match warning {
+        Warning::DuplicateUrl(range)
+        | Warning::NamespaceNotSupportedInBundledCss(range)
+        | Warning::NotPrecededAtImport(range)
+        | Warning::ExpectedUrl(range) => {
+            assert_eq!(lexer.slice(range.start, range.end).unwrap(), range_content);
+        }
+    }
+}
+
 fn assert_url_dependency(
     lexer: &Lexer,
     dependency: &Dependency,
     request: &str,
-    kind: UrlKind,
+    kind: UrlRangeKind,
     range_content: &str,
 ) {
     let Dependency::Url {
@@ -263,7 +274,7 @@ fn url() {
         &l,
         &dependencies[0],
         "https://example\\2f4a8f.com\\\n/image.png",
-        UrlKind::Url,
+        UrlRangeKind::Function,
         "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )",
     );
 }
@@ -273,6 +284,9 @@ fn duplicate_url() {
     let mut v = CollectDependencies::default();
     let mut l = Lexer::from(indoc! {r#"
         @import url(./a.css) url(./a.css);
+        @import url(./a.css) url("./a.css");
+        @import url("./a.css") url(./a.css);
+        @import url("./a.css") url("./a.css");
     "#});
     l.lex(&mut v);
     let Collection {
@@ -280,13 +294,10 @@ fn duplicate_url() {
         warnings,
     } = v.into();
     assert!(dependencies.is_empty());
-    let Warning::DuplicateUrl(range) = &warnings[0] else {
-        return assert!(false);
-    };
-    assert_eq!(
-        l.slice(range.start, range.end).unwrap(),
-        "@import url(./a.css) url(./a.css)"
-    );
+    assert_warning(&l, &warnings[0], "@import url(./a.css) url(./a.css)");
+    assert_warning(&l, &warnings[1], "@import url(./a.css) url(\"./a.css\"");
+    assert_warning(&l, &warnings[2], "@import url(\"./a.css\") url(./a.css)");
+    assert_warning(&l, &warnings[3], "@import url(\"./a.css\") url(\"./a.css\"");
 }
 
 #[test]
@@ -302,10 +313,7 @@ fn not_preceded_at_import() {
         warnings,
     } = v.into();
     assert!(dependencies.is_empty());
-    let Warning::NotPrecededAtImport(range) = &warnings[0] else {
-        return assert!(false);
-    };
-    assert_eq!(l.slice(range.start, range.end).unwrap(), "@import");
+    assert_warning(&l, &warnings[0], "@import");
 }
 
 #[test]
@@ -320,7 +328,7 @@ fn url_string() {
                 "image2.png" 2x
             );
             c: image-set(
-                url("image1.avif") type("image/avif"),
+                url(image1.avif) type("image/avif"),
                 url("image2.jpg") type("image/jpeg")
             );
         }
@@ -335,35 +343,63 @@ fn url_string() {
         &l,
         &dependencies[0],
         "https://example\\2f4a8f.com\\\n    /image.png",
-        UrlKind::Url,
+        UrlRangeKind::String,
         "\"https://example\\2f4a8f.com\\\n    /image.png\"",
     );
     assert_url_dependency(
         &l,
         &dependencies[1],
         "image1.png",
-        UrlKind::String,
+        UrlRangeKind::Function,
         "\"image1.png\"",
     );
     assert_url_dependency(
         &l,
         &dependencies[2],
         "image2.png",
-        UrlKind::String,
+        UrlRangeKind::Function,
         "\"image2.png\"",
     );
     assert_url_dependency(
         &l,
         &dependencies[3],
         "image1.avif",
-        UrlKind::Url,
-        "\"image1.avif\"",
+        UrlRangeKind::Function,
+        "url(image1.avif)",
     );
     assert_url_dependency(
         &l,
         &dependencies[4],
         "image2.jpg",
-        UrlKind::Url,
+        UrlRangeKind::String,
         "\"image2.jpg\"",
     );
+}
+
+#[test]
+fn empty() {
+    let mut v = CollectDependencies::default();
+    let mut l = Lexer::from(indoc! {r#"
+        @import url();
+        @import url("");
+        body {
+            a: url();
+            b: url("");
+            c: image-set();
+            d: image-set("");
+            e: image-set(url());
+            f: image-set(url(""));
+        }
+    "#});
+    l.lex(&mut v);
+    let Collection {
+        dependencies,
+        warnings,
+    } = v.into();
+    assert!(warnings.is_empty());
+    assert_url_dependency(&l, &dependencies[0], "", UrlRangeKind::Function, "url()");
+    assert_url_dependency(&l, &dependencies[1], "", UrlRangeKind::String, "\"\"");
+    assert_url_dependency(&l, &dependencies[2], "", UrlRangeKind::Function, "\"\"");
+    assert_url_dependency(&l, &dependencies[3], "", UrlRangeKind::Function, "url()");
+    assert_url_dependency(&l, &dependencies[4], "", UrlRangeKind::String, "\"\"");
 }

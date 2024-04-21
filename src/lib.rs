@@ -567,19 +567,18 @@ enum CssMode<'s> {
 #[derive(Debug)]
 struct ImportData<'s> {
     start: usize,
-    url: Option<ImportDataUrl<'s>>,
+    url: Option<&'s str>,
+    url_range: Option<Range>,
 }
 
 impl ImportData<'_> {
     pub fn new(start: usize) -> Self {
-        Self { start, url: None }
+        Self {
+            start,
+            url: None,
+            url_range: None,
+        }
     }
-}
-
-#[derive(Debug)]
-struct ImportDataUrl<'s> {
-    request: &'s str,
-    range: Range,
 }
 
 #[derive(Debug)]
@@ -631,14 +630,20 @@ pub enum Dependency<'s> {
     Url {
         request: &'s str,
         range: Range,
-        kind: UrlKind,
+        kind: UrlRangeKind,
     },
-    Import,
+    Import {
+        request: &'s str,
+        range: Range,
+        layer: Option<&'s str>,
+        supports: Option<&'s str>,
+        media: Option<&'s str>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UrlKind {
-    Url,
+pub enum UrlRangeKind {
+    Function,
     String,
 }
 
@@ -721,9 +726,7 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
         content_start: usize,
         content_end: usize,
     ) -> Option<()> {
-        let value = lexer
-            .slice(content_start, content_end)?
-            .trim_matches(is_white_space);
+        let value = lexer.slice(content_start, content_end)?;
         match self.scope {
             CssMode::InAtImport(ref mut import_data) => {
                 // TODO: url in supports
@@ -732,15 +735,13 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
                         .push(Warning::DuplicateUrl(Range::new(import_data.start, end)));
                     return Some(());
                 }
-                import_data.url = Some(ImportDataUrl {
-                    request: value,
-                    range: Range::new(start, end),
-                })
+                import_data.url = Some(value);
+                import_data.url_range = Some(Range::new(start, end));
             }
-            CssMode::InBlock if !value.is_empty() => self.dependencies.push(Dependency::Url {
+            CssMode::InBlock => self.dependencies.push(Dependency::Url {
                 request: value,
                 range: Range::new(start, end),
-                kind: UrlKind::Url,
+                kind: UrlRangeKind::Function,
             }),
             _ => {}
         }
@@ -749,22 +750,39 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
 
     fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         match self.scope {
-            CssMode::InAtImport(_) => todo!(),
+            CssMode::InAtImport(ref mut import_data) => {
+                let Some(last) = self.balanced.last() else {
+                    return Some(());
+                };
+                let inside_url = matches!(last.kind, BalancedItemKind::Url);
+
+                // Do not parse URLs in `supports(...)` and other strings if we already have a URL
+                if !inside_url && import_data.url.is_some() {
+                    return Some(());
+                }
+
+                if inside_url && import_data.url.is_some() {
+                    self.warnings
+                        .push(Warning::DuplicateUrl(Range::new(import_data.start, end)));
+                    return Some(());
+                }
+
+                let value = lexer.slice(start + 1, end - 1)?;
+                import_data.url = Some(value);
+                if !inside_url {
+                    import_data.url_range = Some(Range::new(start, end));
+                }
+            }
             CssMode::InBlock => {
                 let Some(last) = self.balanced.last() else {
                     return Some(());
                 };
                 let kind = match last.kind {
-                    BalancedItemKind::Url => UrlKind::Url,
-                    BalancedItemKind::ImageSet => UrlKind::String,
+                    BalancedItemKind::Url => UrlRangeKind::String,
+                    BalancedItemKind::ImageSet => UrlRangeKind::Function,
                     _ => return Some(()),
                 };
-                let value = lexer
-                    .slice(start + 1, end - 1)?
-                    .trim_matches(|c| is_white_space(c));
-                if value.is_empty() {
-                    return Some(());
-                }
+                let value = lexer.slice(start + 1, end - 1)?;
                 self.dependencies.push(Dependency::Url {
                     request: value,
                     range: Range::new(start, end),
