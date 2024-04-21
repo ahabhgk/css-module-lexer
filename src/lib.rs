@@ -48,8 +48,8 @@ const C_LESS_THAN_SIGN: char = '<';
 const C_GREATER_THAN_SIGN: char = '>';
 
 pub trait Visitor<'s> {
-    fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
+    fn function(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn ident(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
     fn url(
         &mut self,
         lexer: &mut Lexer<'s>,
@@ -58,19 +58,25 @@ pub trait Visitor<'s> {
         content_start: usize,
         content_end: usize,
     ) -> Option<()>;
-    fn string(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn is_selector(&mut self, lexer: &mut Lexer) -> Option<bool>;
-    fn id(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn right_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()>;
+    fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool>;
+    fn id(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn comma(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize)
+        -> Option<()>;
+    fn right_curly_bracket(
+        &mut self,
+        lexer: &mut Lexer<'s>,
+        start: usize,
+        end: usize,
+    ) -> Option<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +582,38 @@ struct ImportDataUrl<'s> {
     range: Range,
 }
 
+#[derive(Debug)]
+struct BalancedItem {
+    kind: BalancedItemKind,
+    range: Range,
+}
+
+impl BalancedItem {
+    pub fn new(name: &str, start: usize, end: usize) -> Self {
+        Self {
+            kind: BalancedItemKind::new(name),
+            range: Range::new(start, end),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum BalancedItemKind {
+    Url,
+    ImageSet,
+    Other,
+}
+
+impl BalancedItemKind {
+    pub fn new(name: &str) -> Self {
+        match name {
+            "url" => Self::Url,
+            "image-set" => Self::ImageSet,
+            _ => Self::Other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
     pub start: usize,
@@ -633,6 +671,7 @@ pub struct CollectDependencies<'s> {
     scope: CssMode<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
+    balanced: Vec<BalancedItem>,
     is_next_rule_prelude: bool,
     dependencies: Vec<Dependency<'s>>,
     warnings: Vec<Warning>,
@@ -651,6 +690,7 @@ impl CollectDependencies<'_> {
             scope: CssMode::TopLevel,
             block_nesting_level: 0,
             allow_import_at_rule: true,
+            balanced: Vec::new(),
             is_next_rule_prelude: true,
             dependencies: Vec::new(),
             warnings: Vec::new(),
@@ -707,7 +747,32 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
         Some(())
     }
 
-    fn string(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+        match self.scope {
+            CssMode::InAtImport(_) => todo!(),
+            CssMode::InBlock => {
+                let Some(last) = self.balanced.last() else {
+                    return Some(());
+                };
+                let kind = match last.kind {
+                    BalancedItemKind::Url => UrlKind::Url,
+                    BalancedItemKind::ImageSet => UrlKind::String,
+                    _ => return Some(()),
+                };
+                let value = lexer
+                    .slice(start + 1, end - 1)?
+                    .trim_matches(|c| is_white_space(c));
+                if value.is_empty() {
+                    return Some(());
+                }
+                self.dependencies.push(Dependency::Url {
+                    request: value,
+                    range: Range::new(start, end),
+                    kind,
+                });
+            }
+            _ => {}
+        }
         Some(())
     }
 
@@ -761,6 +826,8 @@ impl<'s> Visitor<'s> for CollectDependencies<'s> {
     }
 
     fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
+        self.balanced.push(BalancedItem::new(&name, start, end));
         Some(())
     }
 

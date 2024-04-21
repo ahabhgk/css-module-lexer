@@ -109,6 +109,26 @@ impl Visitor<'_> for Snapshot {
     }
 }
 
+fn assert_url_dependency(
+    lexer: &Lexer,
+    dependency: &Dependency,
+    request: &str,
+    kind: UrlKind,
+    range_content: &str,
+) {
+    let Dependency::Url {
+        request: req,
+        range,
+        kind: k,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*req, request);
+    assert_eq!(*k, kind);
+    assert_eq!(lexer.slice(range.start, range.end).unwrap(), range_content);
+}
+
 #[test]
 fn parse_urls() {
     let mut s = Snapshot::default();
@@ -223,7 +243,7 @@ fn parse_at_rules() {
 }
 
 #[test]
-fn collect_url_from_url() {
+fn url() {
     let mut v = CollectDependencies::default();
     let mut l = Lexer::from(indoc! {r#"
         body {
@@ -239,19 +259,12 @@ fn collect_url_from_url() {
         warnings,
     } = v.into();
     assert!(warnings.is_empty());
-    let Dependency::Url {
-        request,
-        range,
-        kind,
-    } = &dependencies[0]
-    else {
-        panic!()
-    };
-    assert_eq!(*request, "https://example\\2f4a8f.com\\\n/image.png");
-    assert_eq!(*kind, UrlKind::Url);
-    assert_eq!(
-        l.slice(range.start, range.end).unwrap(),
-        "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )"
+    assert_url_dependency(
+        &l,
+        &dependencies[0],
+        "https://example\\2f4a8f.com\\\n/image.png",
+        UrlKind::Url,
+        "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )",
     );
 }
 
@@ -268,7 +281,7 @@ fn duplicate_url() {
     } = v.into();
     assert!(dependencies.is_empty());
     let Warning::DuplicateUrl(range) = &warnings[0] else {
-        panic!()
+        return assert!(false);
     };
     assert_eq!(
         l.slice(range.start, range.end).unwrap(),
@@ -290,7 +303,67 @@ fn not_preceded_at_import() {
     } = v.into();
     assert!(dependencies.is_empty());
     let Warning::NotPrecededAtImport(range) = &warnings[0] else {
-        panic!()
+        return assert!(false);
     };
     assert_eq!(l.slice(range.start, range.end).unwrap(), "@import");
+}
+
+#[test]
+fn url_string() {
+    let mut v = CollectDependencies::default();
+    let mut l = Lexer::from(indoc! {r#"
+        body {
+            a: url("https://example\2f4a8f.com\
+            /image.png");
+            b: image-set(
+                "image1.png" 1x,
+                "image2.png" 2x
+            );
+            c: image-set(
+                url("image1.avif") type("image/avif"),
+                url("image2.jpg") type("image/jpeg")
+            );
+        }
+    "#});
+    l.lex(&mut v);
+    let Collection {
+        dependencies,
+        warnings,
+    } = v.into();
+    assert!(warnings.is_empty());
+    assert_url_dependency(
+        &l,
+        &dependencies[0],
+        "https://example\\2f4a8f.com\\\n    /image.png",
+        UrlKind::Url,
+        "\"https://example\\2f4a8f.com\\\n    /image.png\"",
+    );
+    assert_url_dependency(
+        &l,
+        &dependencies[1],
+        "image1.png",
+        UrlKind::String,
+        "\"image1.png\"",
+    );
+    assert_url_dependency(
+        &l,
+        &dependencies[2],
+        "image2.png",
+        UrlKind::String,
+        "\"image2.png\"",
+    );
+    assert_url_dependency(
+        &l,
+        &dependencies[3],
+        "image1.avif",
+        UrlKind::Url,
+        "\"image1.avif\"",
+    );
+    assert_url_dependency(
+        &l,
+        &dependencies[4],
+        "image2.jpg",
+        UrlKind::Url,
+        "\"image2.jpg\"",
+    );
 }
