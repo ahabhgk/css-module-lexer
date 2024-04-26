@@ -1,3 +1,5 @@
+#![feature(char_indices_offset)]
+
 use std::str::CharIndices;
 
 const C_LINE_FEED: char = '\n';
@@ -113,6 +115,9 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn cur_pos(&self) -> Option<usize> {
+        if self.is_eof() {
+            return Some(self.value.len());
+        }
         self.cur.map(|(p, _)| p)
     }
 
@@ -141,6 +146,7 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn is_eof(&self) -> bool {
+        debug_assert!(self.iter.offset() > 0);
         self.cur.is_none()
     }
 }
@@ -502,6 +508,25 @@ impl Lexer<'_> {
         }
         Some(())
     }
+
+    pub fn eat_while_line(&mut self) -> Option<()> {
+        loop {
+            let c = self.cur()?;
+            if is_space(c) {
+                self.consume()?;
+                continue;
+            }
+            if is_new_line(c) {
+                self.consume()?;
+            }
+            // For \r\n
+            if self.cur()? == C_CARRIAGE_RETURN && self.peek()? == C_LINE_FEED {
+                self.consume()?;
+            }
+            break;
+        }
+        Some(())
+    }
 }
 
 fn is_new_line(c: char) -> bool {
@@ -573,6 +598,8 @@ struct ImportData<'s> {
     start: usize,
     url: Option<&'s str>,
     url_range: Option<Range>,
+    supports: ImportDataSupports<'s>,
+    layer: ImportDataLayer<'s>,
 }
 
 impl ImportData<'_> {
@@ -581,8 +608,41 @@ impl ImportData<'_> {
             start,
             url: None,
             url_range: None,
+            supports: ImportDataSupports::None,
+            layer: ImportDataLayer::None,
         }
     }
+
+    pub fn in_supports(&self) -> bool {
+        matches!(self.supports, ImportDataSupports::InSupports { .. })
+    }
+
+    pub fn layer_range(&self) -> Option<&Range> {
+        let ImportDataLayer::EndLayer { range, .. } = &self.layer else {
+            return None;
+        };
+        Some(range)
+    }
+
+    pub fn supports_range(&self) -> Option<&Range> {
+        let ImportDataSupports::EndSupports { range, .. } = &self.supports else {
+            return None;
+        };
+        Some(range)
+    }
+}
+
+#[derive(Debug)]
+enum ImportDataSupports<'s> {
+    None,
+    InSupports { start: usize },
+    EndSupports { value: &'s str, range: Range },
+}
+
+#[derive(Debug)]
+enum ImportDataLayer<'s> {
+    None,
+    EndLayer { value: &'s str, range: Range },
 }
 
 #[derive(Debug)]
@@ -598,12 +658,21 @@ impl BalancedItem {
             range: Range::new(start, end),
         }
     }
+
+    pub fn new_other(start: usize, end: usize) -> Self {
+        Self {
+            kind: BalancedItemKind::Other,
+            range: Range::new(start, end),
+        }
+    }
 }
 
 #[derive(Debug)]
 enum BalancedItemKind {
     Url,
     ImageSet,
+    Layer,
+    Supports,
     Other,
 }
 
@@ -612,6 +681,8 @@ impl BalancedItemKind {
         match name {
             "url" => Self::Url,
             "image-set" => Self::ImageSet,
+            "layer" => Self::Layer,
+            "supports" => Self::Supports,
             _ => Self::Other,
         }
     }
@@ -653,10 +724,12 @@ pub enum UrlRangeKind {
 
 #[derive(Debug, Clone)]
 pub enum Warning {
-    DuplicateUrl(Range),
-    NamespaceNotSupportedInBundledCss(Range),
-    NotPrecededAtImport(Range),
-    ExpectedUrl(Range),
+    Unexpected { unexpected: Range, range: Range },
+    DuplicateUrl { range: Range },
+    NamespaceNotSupportedInBundledCss { range: Range },
+    NotPrecededAtImport { range: Range },
+    ExpectedUrl { range: Range },
+    ExpectedBefore { should_after: Range, range: Range },
 }
 
 pub fn lex_css_dependencies<'s>(
@@ -702,7 +775,7 @@ impl<'s, D, W> LexDependencies<'s, D, W> {
         }
     }
 
-    pub fn is_next_nested_syntax(&self, lexer: &mut Lexer) -> Option<bool> {
+    pub fn is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
         let mut lexer = lexer.clone();
         lexer.eat_white_space_and_comments()?;
         let c = lexer.cur()?;
@@ -710,6 +783,14 @@ impl<'s, D, W> LexDependencies<'s, D, W> {
             return Some(false);
         }
         Some(!is_ident_start(c))
+    }
+
+    pub fn get_media(&self, lexer: &Lexer<'s>, start: usize, end: usize) -> Option<&'s str> {
+        let media = lexer.slice(start, end)?;
+        let mut media_lexer = Lexer::from(media);
+        media_lexer.consume()?;
+        media_lexer.eat_white_space_and_comments()?;
+        Some(media)
     }
 }
 
@@ -729,12 +810,13 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         let value = lexer.slice(content_start, content_end)?;
         match self.scope {
             CssMode::InAtImport(ref mut import_data) => {
-                // TODO: url in supports
+                if import_data.in_supports() {
+                    return Some(());
+                }
                 if import_data.url.is_some() {
-                    (self.handle_warning)(Warning::DuplicateUrl(Range::new(
-                        import_data.start,
-                        end,
-                    )));
+                    (self.handle_warning)(Warning::DuplicateUrl {
+                        range: Range::new(import_data.start, end),
+                    });
                     return Some(());
                 }
                 import_data.url = Some(value);
@@ -759,20 +841,20 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 );
 
                 // Do not parse URLs in `supports(...)` and other strings if we already have a URL
-                if !inside_url && import_data.url.is_some() {
+                if import_data.in_supports() || (!inside_url && import_data.url.is_some()) {
                     return Some(());
                 }
 
                 if inside_url && import_data.url.is_some() {
-                    (self.handle_warning)(Warning::DuplicateUrl(Range::new(
-                        import_data.start,
-                        end,
-                    )));
+                    (self.handle_warning)(Warning::DuplicateUrl {
+                        range: Range::new(import_data.start, end),
+                    });
                     return Some(());
                 }
 
                 let value = lexer.slice(start + 1, end - 1)?;
                 import_data.url = Some(value);
+                // For url("inside_url") url_range will determined in right_parenthesis
                 if !inside_url {
                     import_data.url_range = Some(Range::new(start, end));
                 }
@@ -802,13 +884,15 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
             self.scope = CssMode::AtNamespaceInvalid;
-            (self.handle_warning)(Warning::NamespaceNotSupportedInBundledCss(Range::new(
-                start, end,
-            )));
+            (self.handle_warning)(Warning::NamespaceNotSupportedInBundledCss {
+                range: Range::new(start, end),
+            });
         } else if name == "@import" {
             if !self.allow_import_at_rule {
                 self.scope = CssMode::AtImportInvalid;
-                (self.handle_warning)(Warning::NotPrecededAtImport(Range::new(start, end)));
+                (self.handle_warning)(Warning::NotPrecededAtImport {
+                    range: Range::new(start, end),
+                });
                 return Some(());
             }
             self.scope = CssMode::InAtImport(ImportData::new(start));
@@ -825,19 +909,87 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn semicolon(&mut self, lexer: &mut Lexer, _: usize, end: usize) -> Option<()> {
+    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         match self.scope {
             CssMode::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
-                    (self.handle_warning)(Warning::ExpectedUrl(Range::new(import_data.start, end)));
+                    (self.handle_warning)(Warning::ExpectedUrl {
+                        range: Range::new(import_data.start, end),
+                    });
+                    self.scope = CssMode::TopLevel;
                     return Some(());
                 };
+                let Some(url_range) = &import_data.url_range else {
+                    (self.handle_warning)(Warning::Unexpected {
+                        unexpected: Range::new(start, end),
+                        range: Range::new(import_data.start, end),
+                    });
+                    self.scope = CssMode::TopLevel;
+                    return Some(());
+                };
+                let layer = match &import_data.layer {
+                    ImportDataLayer::None => None,
+                    ImportDataLayer::EndLayer { value, range } => {
+                        if url_range.start > range.start {
+                            (self.handle_warning)(Warning::ExpectedBefore {
+                                should_after: range.clone(),
+                                range: url_range.clone(),
+                            });
+                            self.scope = CssMode::TopLevel;
+                            return Some(());
+                        }
+                        Some(*value)
+                    }
+                };
+                let supports = match &import_data.supports {
+                    ImportDataSupports::None => None,
+                    ImportDataSupports::InSupports {
+                        start: supports_start,
+                    } => {
+                        (self.handle_warning)(Warning::Unexpected {
+                            unexpected: Range::new(start, end),
+                            range: Range::new(*supports_start, end),
+                        });
+                        None
+                    }
+                    ImportDataSupports::EndSupports { value, range } => {
+                        if url_range.start > range.start {
+                            (self.handle_warning)(Warning::ExpectedBefore {
+                                should_after: range.clone(),
+                                range: url_range.clone(),
+                            });
+                            self.scope = CssMode::TopLevel;
+                            return Some(());
+                        }
+                        Some(*value)
+                    }
+                };
+                if let Some(layer_range) = import_data.layer_range() {
+                    if let Some(supports_range) = import_data.supports_range() {
+                        if layer_range.start > supports_range.start {
+                            (self.handle_warning)(Warning::ExpectedBefore {
+                                should_after: supports_range.clone(),
+                                range: layer_range.clone(),
+                            });
+                            self.scope = CssMode::TopLevel;
+                            return Some(());
+                        }
+                    }
+                }
+                let _ = lexer.eat_while_line();
+                let end = lexer.cur_pos()?;
+                let last_end = import_data
+                    .supports_range()
+                    .or_else(|| import_data.layer_range())
+                    .unwrap_or(url_range)
+                    .end;
+                let media = self.get_media(&lexer, last_end, start);
                 (self.handle_dependency)(Dependency::Import {
                     request: url,
                     range: Range::new(import_data.start, end),
-                    layer: None,
-                    supports: None,
-                    media: None,
+                    layer,
+                    supports,
+                    media,
                 });
                 self.scope = CssMode::TopLevel;
             }
@@ -855,10 +1007,58 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
         let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
         self.balanced.push(BalancedItem::new(&name, start, end));
+
+        if let CssMode::InAtImport(ref mut import_data) = self.scope {
+            if name == "supports" {
+                import_data.supports = ImportDataSupports::InSupports { start };
+            }
+        }
+        Some(())
+    }
+
+    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        self.balanced.push(BalancedItem::new_other(start, end));
+        Some(())
+    }
+
+    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+        let Some(last) = self.balanced.pop() else {
+            return Some(());
+        };
+        if let CssMode::InAtImport(ref mut import_data) = self.scope {
+            let not_in_supports = !import_data.in_supports();
+            if matches!(last.kind, BalancedItemKind::Url) && not_in_supports {
+                import_data.url_range = Some(Range::new(last.range.start, end));
+            } else if matches!(last.kind, BalancedItemKind::Layer) && not_in_supports {
+                import_data.layer = ImportDataLayer::EndLayer {
+                    value: lexer.slice(last.range.end, end - 1)?,
+                    range: Range::new(last.range.start, end),
+                };
+            } else if matches!(last.kind, BalancedItemKind::Supports) {
+                import_data.supports = ImportDataSupports::EndSupports {
+                    value: lexer.slice(last.range.end, end - 1)?,
+                    range: Range::new(last.range.start, end),
+                }
+            }
+        }
         Some(())
     }
 
     fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        match self.scope {
+            CssMode::InBlock => {
+                // TODO: css modules
+            }
+            CssMode::InAtImport(ref mut import_data) => {
+                if lexer.slice(start, end)?.to_ascii_lowercase() == "layer" {
+                    import_data.layer = ImportDataLayer::EndLayer {
+                        value: "",
+                        range: Range::new(start, end),
+                    }
+                }
+            }
+            _ => {}
+        }
         Some(())
     }
 
@@ -917,14 +1117,6 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     }
 
     fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        Some(())
-    }
-
-    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        Some(())
-    }
-
-    fn right_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
         Some(())
     }
 }

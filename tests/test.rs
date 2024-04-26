@@ -111,10 +111,12 @@ impl Visitor<'_> for Snapshot {
 
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
     match warning {
-        Warning::DuplicateUrl(range)
-        | Warning::NamespaceNotSupportedInBundledCss(range)
-        | Warning::NotPrecededAtImport(range)
-        | Warning::ExpectedUrl(range) => {
+        Warning::Unexpected { range, .. }
+        | Warning::DuplicateUrl { range }
+        | Warning::NamespaceNotSupportedInBundledCss { range }
+        | Warning::NotPrecededAtImport { range }
+        | Warning::ExpectedUrl { range }
+        | Warning::ExpectedBefore { range, .. } => {
             assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
         }
     }
@@ -440,7 +442,7 @@ fn empty() {
         None,
         None,
         None,
-        "@import url();",
+        "@import url();\n",
     );
     assert_import_dependency(
         input,
@@ -449,7 +451,7 @@ fn empty() {
         None,
         None,
         None,
-        "@import url(\"\");",
+        "@import url(\"\");\n",
     );
     assert_url_dependency(input, &dependencies[2], "", UrlRangeKind::Function, "url()");
     assert_url_dependency(input, &dependencies[3], "", UrlRangeKind::String, "\"\"");
@@ -487,7 +489,7 @@ fn import() {
         None,
         None,
         None,
-        "@import 'https://example\\2f4a8f.com\\\n/style.css';",
+        "@import 'https://example\\2f4a8f.com\\\n/style.css';\n",
     );
     assert_import_dependency(
         input,
@@ -496,7 +498,7 @@ fn import() {
         None,
         None,
         None,
-        "@import url(https://example\\2f4a8f.com\\\n/style.css);",
+        "@import url(https://example\\2f4a8f.com\\\n/style.css);\n",
     );
     assert_import_dependency(
         input,
@@ -505,6 +507,128 @@ fn import() {
         None,
         None,
         None,
-        "@import url('https://example\\2f4a8f.com\\\n/style.css') /* */;",
+        "@import url('https://example\\2f4a8f.com\\\n/style.css') /* */;\n",
+    );
+}
+
+#[test]
+fn unexpected_semicolon_in_supports() {
+    let input = indoc! {r#"
+        @import "style.css" supports(display: flex; display: grid);
+    "#};
+    let (dependencies, warnings) = collect_css_dependencies(input);
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "style.css",
+        None,
+        None,
+        Some(" supports(display: flex"),
+        "@import \"style.css\" supports(display: flex; ",
+    );
+    assert_warning(input, &warnings[0], "supports(display: flex;");
+}
+
+#[test]
+fn unexpected_semicolon_import_url_string() {
+    let input = indoc! {r#"
+        @import url("style.css";);
+        @import url("style.css" layer;);
+    "#};
+    let (dependencies, warnings) = collect_css_dependencies(input);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], "@import url(\"style.css\";");
+    assert_warning(input, &warnings[1], "@import url(\"style.css\" layer;");
+}
+
+#[test]
+fn expected_before() {
+    let input = indoc! {r#"
+        @import layer supports(display: flex) "style.css";
+        @import supports(display: flex) "style.css";
+        @import layer "style.css";
+        @import "style.css" supports(display: flex) layer;
+    "#};
+    let (dependencies, warnings) = collect_css_dependencies(input);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], "\"style.css\"");
+    assert_warning(input, &warnings[1], "\"style.css\"");
+    assert_warning(input, &warnings[2], "\"style.css\"");
+    assert_warning(input, &warnings[3], "layer");
+}
+
+#[test]
+fn import_media() {
+    let input = indoc! {r#"
+        @import url("style.css") screen and (orientation: portrait);
+    "#};
+    let (dependencies, warnings) = collect_css_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "style.css",
+        None,
+        None,
+        Some(" screen and (orientation: portrait)"),
+        "@import url(\"style.css\") screen and (orientation: portrait);\n",
+    );
+}
+
+#[test]
+fn import_attributes() {
+    let input = indoc! {r#"
+        @import url("style.css") layer;
+        @import url("style.css") supports();
+        @import url("style.css") print;
+        @import url("style.css") layer supports() /* comments */;
+        @import url("style.css") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);
+    "#};
+    let (dependencies, warnings) = collect_css_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "style.css",
+        Some(""),
+        None,
+        None,
+        "@import url(\"style.css\") layer;\n",
+    );
+    assert_import_dependency(
+        input,
+        &dependencies[1],
+        "style.css",
+        None,
+        Some(""),
+        None,
+        "@import url(\"style.css\") supports();\n",
+    );
+    assert_import_dependency(
+        input,
+        &dependencies[2],
+        "style.css",
+        None,
+        None,
+        Some(" print"),
+        "@import url(\"style.css\") print;\n",
+    );
+    assert_import_dependency(
+        input,
+        &dependencies[3],
+        "style.css",
+        Some(""),
+        Some(""),
+        None,
+        "@import url(\"style.css\") layer supports() /* comments */;\n",
+    );
+    assert_import_dependency(
+        input,
+        &dependencies[4],
+        "style.css",
+        Some("default"),
+        Some("not (display: grid) and (display: flex)"),
+        Some(" print, /* comments */ screen and (orientation: portrait)"),
+        "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);\n",
     );
 }
