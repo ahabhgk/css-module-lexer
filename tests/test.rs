@@ -1,5 +1,6 @@
 use css_module_lexer::{
-    collect_css_dependencies, Dependency, Lexer, UrlRangeKind, Visitor, Warning,
+    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, LocalKind,
+    UrlRangeKind, Visitor, Warning,
 };
 use indoc::indoc;
 
@@ -165,6 +166,43 @@ fn assert_import_dependency(
     assert_eq!(*actual_layer, layer);
     assert_eq!(*actual_supports, supports);
     assert_eq!(*actual_media, media);
+    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+}
+
+fn assert_local_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    kind: LocalKind,
+    range_content: &str,
+) {
+    let Dependency::Local {
+        name: actual_name,
+        range,
+        kind: actual_kind,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(*actual_kind, kind);
+    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+}
+
+fn assert_replace_dependency(
+    input: &str,
+    dependency: &Dependency,
+    content: &str,
+    range_content: &str,
+) {
+    let Dependency::Replace {
+        content: actual_content,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_content, content);
     assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
 }
 
@@ -638,4 +676,35 @@ fn import_attributes() {
         Some(" print, /* comments */ screen and (orientation: portrait)"),
         "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);",
     );
+}
+
+#[test]
+fn css_modules_pseudo1() {
+    let input = ".localA :global .global-b .global-c :local(.localD.localE) .global-d";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_dependency(
+        input,
+        &dependencies[0],
+        "localA",
+        LocalKind::Ident,
+        "localA",
+    );
+    assert_replace_dependency(input, &dependencies[1], "", ":global ");
+    assert_replace_dependency(input, &dependencies[2], "", ":local(");
+    assert_local_dependency(
+        input,
+        &dependencies[3],
+        "localD",
+        LocalKind::Ident,
+        "localD",
+    );
+    assert_local_dependency(
+        input,
+        &dependencies[4],
+        "localE",
+        LocalKind::Ident,
+        "localE",
+    );
+    assert_replace_dependency(input, &dependencies[5], "", ")");
 }

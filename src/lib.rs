@@ -673,6 +673,8 @@ enum BalancedItemKind {
     ImageSet,
     Layer,
     Supports,
+    Local,
+    Global,
     Other,
 }
 
@@ -683,6 +685,8 @@ impl BalancedItemKind {
             "image-set" => Self::ImageSet,
             "layer" => Self::Layer,
             "supports" => Self::Supports,
+            ":local" => Self::Local,
+            ":global" => Self::Global,
             _ => Self::Other,
         }
     }
@@ -724,6 +728,30 @@ impl CssModulesModeData {
             current: CssModulesMode::None,
         }
     }
+
+    pub fn is_local_mode(&self) -> bool {
+        match self.current {
+            CssModulesMode::Local => true,
+            CssModulesMode::Global => false,
+            CssModulesMode::None => match self.default {
+                CssModulesMode::Local => true,
+                CssModulesMode::Global => false,
+                CssModulesMode::None => false,
+            },
+        }
+    }
+
+    pub fn set_local(&mut self) {
+        self.current = CssModulesMode::Local;
+    }
+
+    pub fn set_global(&mut self) {
+        self.current = CssModulesMode::Global;
+    }
+
+    pub fn set_none(&mut self) {
+        self.current = CssModulesMode::None;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -740,7 +768,8 @@ pub enum Dependency<'s> {
         supports: Option<&'s str>,
         media: Option<&'s str>,
     },
-    Empty {
+    Replace {
+        content: &'s str,
         range: Range,
     },
     Local {
@@ -1100,7 +1129,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn left_parenthesis(&mut self, _: &mut Lexer, start: usize, end: usize) -> Option<()> {
         self.balanced.push(BalancedItem::new_other(start, end));
         Some(())
     }
@@ -1109,6 +1138,27 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         let Some(last) = self.balanced.pop() else {
             return Some(());
         };
+        if let Some(mode_data) = &mut self.mode_data {
+            if matches!(
+                last.kind,
+                BalancedItemKind::Local | BalancedItemKind::Global
+            ) {
+                match self.balanced.last() {
+                    Some(last) if matches!(last.kind, BalancedItemKind::Local) => {
+                        mode_data.set_local()
+                    }
+                    Some(last) if matches!(last.kind, BalancedItemKind::Global) => {
+                        mode_data.set_global()
+                    }
+                    _ => mode_data.set_none(),
+                };
+                (self.handle_dependency)(Dependency::Replace {
+                    content: "",
+                    range: Range::new(start, end),
+                });
+                return Some(());
+            }
+        }
         if let Scope::InAtImport(ref mut import_data) = self.scope {
             let not_in_supports = !import_data.in_supports();
             if matches!(last.kind, BalancedItemKind::Url) && not_in_supports {
@@ -1146,7 +1196,35 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn id(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+        let Some(mode_data) = &self.mode_data else {
+            return Some(());
+        };
+        if mode_data.is_local_mode() {
+            let start = start + 1;
+            let name = lexer.slice(start, end)?;
+            (self.handle_dependency)(Dependency::Local {
+                name,
+                range: Range::new(start, end),
+                kind: LocalKind::Ident,
+            })
+        }
+        Some(())
+    }
+
+    fn id(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+        let Some(mode_data) = &self.mode_data else {
+            return Some(());
+        };
+        if mode_data.is_local_mode() {
+            let start = start + 1;
+            let name = lexer.slice(start, end)?;
+            (self.handle_dependency)(Dependency::Local {
+                name,
+                range: Range::new(start, end),
+                kind: LocalKind::Ident,
+            })
+        }
         Some(())
     }
 
@@ -1188,19 +1266,54 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        Some(())
-    }
-
-    fn class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
-        Some(())
-    }
-
     fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
+        self.balanced.push(BalancedItem::new(&name, start, end));
+        if let Some(mode_data) = &mut self.mode_data {
+            if name == ":global" {
+                mode_data.set_global();
+                (self.handle_dependency)(Dependency::Replace {
+                    content: "",
+                    range: Range::new(start, end),
+                });
+            } else if name == ":local" {
+                mode_data.set_local();
+                (self.handle_dependency)(Dependency::Replace {
+                    content: "",
+                    range: Range::new(start, end),
+                });
+            }
+        }
         Some(())
     }
 
-    fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+        let Some(mode_data) = &mut self.mode_data else {
+            return Some(())
+        };
+        let name = lexer.slice(start, end)?.to_ascii_lowercase();
+        if name == ":global" || name == ":local" {
+            lexer.eat_white_space_and_comments()?;
+            let end2 = lexer.cur_pos()?;
+            let comments = lexer.slice(end, end2)?.trim_matches(is_white_space);
+            (self.handle_dependency)(Dependency::Replace {
+                content: comments,
+                range: Range::new(start, end2),
+            });
+            if name == ":global" {
+                mode_data.set_global();
+            } else {
+                mode_data.set_local();
+            }
+            return Some(());
+        }
+        Some(())
+    }
+
+    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+        if let Some(mode_data) = &mut self.mode_data {
+            mode_data.set_none();
+        }
         Some(())
     }
 }
