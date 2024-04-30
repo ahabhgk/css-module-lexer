@@ -314,6 +314,13 @@ fn parse_escape() {
 }
 
 #[test]
+fn empty() {
+    let (dependencies, warnings) = collect_css_dependencies("");
+    assert!(warnings.is_empty());
+    assert!(dependencies.is_empty());
+}
+
+#[test]
 fn url() {
     let input = indoc! {r#"
         body {
@@ -420,7 +427,7 @@ fn url_string() {
 }
 
 #[test]
-fn empty() {
+fn empty_url() {
     let input = indoc! {r#"
         @import url();
         @import url("");
@@ -442,7 +449,7 @@ fn empty() {
         None,
         None,
         None,
-        "@import url();\n",
+        "@import url();",
     );
     assert_import_dependency(
         input,
@@ -451,7 +458,7 @@ fn empty() {
         None,
         None,
         None,
-        "@import url(\"\");\n",
+        "@import url(\"\");",
     );
     assert_url_dependency(input, &dependencies[2], "", UrlRangeKind::Function, "url()");
     assert_url_dependency(input, &dependencies[3], "", UrlRangeKind::String, "\"\"");
@@ -489,7 +496,7 @@ fn import() {
         None,
         None,
         None,
-        "@import 'https://example\\2f4a8f.com\\\n/style.css';\n",
+        "@import 'https://example\\2f4a8f.com\\\n/style.css';",
     );
     assert_import_dependency(
         input,
@@ -498,7 +505,7 @@ fn import() {
         None,
         None,
         None,
-        "@import url(https://example\\2f4a8f.com\\\n/style.css);\n",
+        "@import url(https://example\\2f4a8f.com\\\n/style.css);",
     );
     assert_import_dependency(
         input,
@@ -507,7 +514,7 @@ fn import() {
         None,
         None,
         None,
-        "@import url('https://example\\2f4a8f.com\\\n/style.css') /* */;\n",
+        "@import url('https://example\\2f4a8f.com\\\n/style.css') /* */;",
     );
 }
 
@@ -524,7 +531,7 @@ fn unexpected_semicolon_in_supports() {
         None,
         None,
         Some(" supports(display: flex"),
-        "@import \"style.css\" supports(display: flex; ",
+        "@import \"style.css\" supports(display: flex;",
     );
     assert_warning(input, &warnings[0], "supports(display: flex;");
 }
@@ -571,7 +578,7 @@ fn import_media() {
         None,
         None,
         Some(" screen and (orientation: portrait)"),
-        "@import url(\"style.css\") screen and (orientation: portrait);\n",
+        "@import url(\"style.css\") screen and (orientation: portrait);",
     );
 }
 
@@ -593,7 +600,7 @@ fn import_attributes() {
         Some(""),
         None,
         None,
-        "@import url(\"style.css\") layer;\n",
+        "@import url(\"style.css\") layer;",
     );
     assert_import_dependency(
         input,
@@ -602,7 +609,7 @@ fn import_attributes() {
         None,
         Some(""),
         None,
-        "@import url(\"style.css\") supports();\n",
+        "@import url(\"style.css\") supports();",
     );
     assert_import_dependency(
         input,
@@ -611,7 +618,7 @@ fn import_attributes() {
         None,
         None,
         Some(" print"),
-        "@import url(\"style.css\") print;\n",
+        "@import url(\"style.css\") print;",
     );
     assert_import_dependency(
         input,
@@ -620,7 +627,7 @@ fn import_attributes() {
         Some(""),
         Some(""),
         None,
-        "@import url(\"style.css\") layer supports() /* comments */;\n",
+        "@import url(\"style.css\") layer supports() /* comments */;",
     );
     assert_import_dependency(
         input,
@@ -629,6 +636,6 @@ fn import_attributes() {
         Some("default"),
         Some("not (display: grid) and (display: flex)"),
         Some(" print, /* comments */ screen and (orientation: portrait)"),
-        "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);\n",
+        "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);",
     );
 }

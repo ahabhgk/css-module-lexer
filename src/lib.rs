@@ -1,5 +1,3 @@
-#![feature(char_indices_offset)]
-
 use std::str::CharIndices;
 
 const C_LINE_FEED: char = '\n';
@@ -88,6 +86,7 @@ pub struct Lexer<'s> {
     cur: Option<(usize, char)>,
     peek: Option<(usize, char)>,
     peek2: Option<(usize, char)>,
+    start: bool,
 }
 
 impl<'s> From<&'s str> for Lexer<'s> {
@@ -101,6 +100,7 @@ impl<'s> From<&'s str> for Lexer<'s> {
             cur: None,
             peek,
             peek2,
+            start: false,
         }
     }
 }
@@ -108,6 +108,7 @@ impl<'s> From<&'s str> for Lexer<'s> {
 impl<'s> Lexer<'s> {
     #[must_use]
     pub fn consume(&mut self) -> Option<char> {
+        self.start = true;
         self.cur = self.peek;
         self.peek = self.peek2;
         self.peek2 = self.iter.next();
@@ -115,9 +116,6 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn cur_pos(&self) -> Option<usize> {
-        if self.is_eof() {
-            return Some(self.value.len());
-        }
         self.cur.map(|(p, _)| p)
     }
 
@@ -146,8 +144,10 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn is_eof(&self) -> bool {
-        debug_assert!(self.iter.offset() > 0);
-        self.cur.is_none()
+        if self.value.is_empty() {
+            return true;
+        }
+        self.start && self.cur.is_none()
     }
 }
 
@@ -509,24 +509,24 @@ impl Lexer<'_> {
         Some(())
     }
 
-    pub fn eat_while_line(&mut self) -> Option<()> {
-        loop {
-            let c = self.cur()?;
-            if is_space(c) {
-                self.consume()?;
-                continue;
-            }
-            if is_new_line(c) {
-                self.consume()?;
-            }
-            // For \r\n
-            if self.cur()? == C_CARRIAGE_RETURN && self.peek()? == C_LINE_FEED {
-                self.consume()?;
-            }
-            break;
-        }
-        Some(())
-    }
+    // pub fn eat_while_line(&mut self) -> Option<()> {
+    //     loop {
+    //         let c = self.cur()?;
+    //         if is_space(c) {
+    //             self.consume()?;
+    //             continue;
+    //         }
+    //         if is_new_line(c) {
+    //             self.consume()?;
+    //         }
+    //         // For \r\n
+    //         if self.cur()? == C_CARRIAGE_RETURN && self.peek()? == C_LINE_FEED {
+    //             self.consume()?;
+    //         }
+    //         break;
+    //     }
+    //     Some(())
+    // }
 }
 
 fn is_new_line(c: char) -> bool {
@@ -585,7 +585,7 @@ fn start_number(c1: char, c2: char, c3: char) -> bool {
 }
 
 #[derive(Debug)]
-enum CssMode<'s> {
+enum Scope<'s> {
     TopLevel,
     InBlock,
     InAtImport(ImportData<'s>),
@@ -700,6 +700,32 @@ impl Range {
     }
 }
 
+#[derive(Debug)]
+enum CssModulesMode {
+    Local,
+    Global,
+    None,
+}
+
+#[derive(Debug)]
+pub struct CssModulesModeData {
+    default: CssModulesMode,
+    current: CssModulesMode,
+}
+
+impl CssModulesModeData {
+    pub fn new(local: bool) -> Self {
+        Self {
+            default: if local {
+                CssModulesMode::Local
+            } else {
+                CssModulesMode::Global
+            },
+            current: CssModulesMode::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Dependency<'s> {
     Url {
@@ -714,12 +740,26 @@ pub enum Dependency<'s> {
         supports: Option<&'s str>,
         media: Option<&'s str>,
     },
+    Empty {
+        range: Range,
+    },
+    Local {
+        name: &'s str,
+        range: Range,
+        kind: LocalKind,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UrlRangeKind {
     Function,
     String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalKind {
+    Ident,
+    Var,
 }
 
 #[derive(Debug, Clone)]
@@ -738,21 +778,63 @@ pub fn lex_css_dependencies<'s>(
     handle_warning: impl FnMut(Warning),
 ) {
     let mut lexer = Lexer::from(input);
-    let mut visitor = LexDependencies::new(handle_dependency, handle_warning, false);
+    let mut visitor = LexDependencies::new(handle_dependency, handle_warning, None);
     lexer.lex(&mut visitor);
 }
 
-pub fn collect_css_dependencies<'s>(input: &'s str) -> (Vec<Dependency<'s>>, Vec<Warning>) {
+pub fn collect_css_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
     let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
     lex_css_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
     (dependencies, warnings)
 }
 
+pub fn lex_css_modules_dependencies<'s>(
+    input: &'s str,
+    handle_dependency: impl FnMut(Dependency<'s>),
+    handle_warning: impl FnMut(Warning),
+) {
+    let mut lexer = Lexer::from(input);
+    let mut visitor = LexDependencies::new(
+        handle_dependency,
+        handle_warning,
+        Some(CssModulesModeData::new(true)),
+    );
+    lexer.lex(&mut visitor);
+}
+
+pub fn collect_css_modules_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
+    let mut dependencies = Vec::new();
+    let mut warnings = Vec::new();
+    lex_css_modules_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
+    (dependencies, warnings)
+}
+
+pub fn lex_css_modules_global_dependencies<'s>(
+    input: &'s str,
+    handle_dependency: impl FnMut(Dependency<'s>),
+    handle_warning: impl FnMut(Warning),
+) {
+    let mut lexer = Lexer::from(input);
+    let mut visitor = LexDependencies::new(
+        handle_dependency,
+        handle_warning,
+        Some(CssModulesModeData::new(false)),
+    );
+    lexer.lex(&mut visitor);
+}
+
+pub fn collect_css_modules_global_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
+    let mut dependencies = Vec::new();
+    let mut warnings = Vec::new();
+    lex_css_modules_global_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
+    (dependencies, warnings)
+}
+
 #[derive(Debug)]
 pub struct LexDependencies<'s, D, W> {
-    // allow_mode_switch: bool,
-    scope: CssMode<'s>,
+    mode_data: Option<CssModulesModeData>,
+    scope: Scope<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
     balanced: Vec<BalancedItem>,
@@ -762,10 +844,14 @@ pub struct LexDependencies<'s, D, W> {
 }
 
 impl<'s, D, W> LexDependencies<'s, D, W> {
-    pub fn new(handle_dependency: D, handle_warning: W, allow_mode_switch: bool) -> Self {
+    pub fn new(
+        handle_dependency: D,
+        handle_warning: W,
+        mode_data: Option<CssModulesModeData>,
+    ) -> Self {
         Self {
-            // allow_mode_switch,
-            scope: CssMode::TopLevel,
+            mode_data,
+            scope: Scope::TopLevel,
             block_nesting_level: 0,
             allow_import_at_rule: true,
             balanced: Vec::new(),
@@ -809,7 +895,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     ) -> Option<()> {
         let value = lexer.slice(content_start, content_end)?;
         match self.scope {
-            CssMode::InAtImport(ref mut import_data) => {
+            Scope::InAtImport(ref mut import_data) => {
                 if import_data.in_supports() {
                     return Some(());
                 }
@@ -822,7 +908,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
             }
-            CssMode::InBlock => (self.handle_dependency)(Dependency::Url {
+            Scope::InBlock => (self.handle_dependency)(Dependency::Url {
                 request: value,
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
@@ -834,7 +920,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
     fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         match self.scope {
-            CssMode::InAtImport(ref mut import_data) => {
+            Scope::InAtImport(ref mut import_data) => {
                 let inside_url = matches!(
                     self.balanced.last(),
                     Some(last) if matches!(last.kind, BalancedItemKind::Url)
@@ -859,7 +945,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                     import_data.url_range = Some(Range::new(start, end));
                 }
             }
-            CssMode::InBlock => {
+            Scope::InBlock => {
                 let Some(last) = self.balanced.last() else {
                     return Some(());
                 };
@@ -883,19 +969,19 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
-            self.scope = CssMode::AtNamespaceInvalid;
+            self.scope = Scope::AtNamespaceInvalid;
             (self.handle_warning)(Warning::NamespaceNotSupportedInBundledCss {
                 range: Range::new(start, end),
             });
         } else if name == "@import" {
             if !self.allow_import_at_rule {
-                self.scope = CssMode::AtImportInvalid;
+                self.scope = Scope::AtImportInvalid;
                 (self.handle_warning)(Warning::NotPrecededAtImport {
                     range: Range::new(start, end),
                 });
                 return Some(());
             }
-            self.scope = CssMode::InAtImport(ImportData::new(start));
+            self.scope = Scope::InAtImport(ImportData::new(start));
         } else if name == "@media"
             || name == "@supports"
             || name == "@layer"
@@ -911,12 +997,12 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
     fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         match self.scope {
-            CssMode::InAtImport(ref import_data) => {
+            Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
                     (self.handle_warning)(Warning::ExpectedUrl {
                         range: Range::new(import_data.start, end),
                     });
-                    self.scope = CssMode::TopLevel;
+                    self.scope = Scope::TopLevel;
                     return Some(());
                 };
                 let Some(url_range) = &import_data.url_range else {
@@ -924,7 +1010,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                         unexpected: Range::new(start, end),
                         range: Range::new(import_data.start, end),
                     });
-                    self.scope = CssMode::TopLevel;
+                    self.scope = Scope::TopLevel;
                     return Some(());
                 };
                 let layer = match &import_data.layer {
@@ -935,7 +1021,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                                 should_after: range.clone(),
                                 range: url_range.clone(),
                             });
-                            self.scope = CssMode::TopLevel;
+                            self.scope = Scope::TopLevel;
                             return Some(());
                         }
                         Some(*value)
@@ -958,7 +1044,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                                 should_after: range.clone(),
                                 range: url_range.clone(),
                             });
-                            self.scope = CssMode::TopLevel;
+                            self.scope = Scope::TopLevel;
                             return Some(());
                         }
                         Some(*value)
@@ -971,19 +1057,17 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                                 should_after: supports_range.clone(),
                                 range: layer_range.clone(),
                             });
-                            self.scope = CssMode::TopLevel;
+                            self.scope = Scope::TopLevel;
                             return Some(());
                         }
                     }
                 }
-                let _ = lexer.eat_while_line();
-                let end = lexer.cur_pos()?;
                 let last_end = import_data
                     .supports_range()
                     .or_else(|| import_data.layer_range())
                     .unwrap_or(url_range)
                     .end;
-                let media = self.get_media(&lexer, last_end, start);
+                let media = self.get_media(lexer, last_end, start);
                 (self.handle_dependency)(Dependency::Import {
                     request: url,
                     range: Range::new(import_data.start, end),
@@ -991,12 +1075,12 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                     supports,
                     media,
                 });
-                self.scope = CssMode::TopLevel;
+                self.scope = Scope::TopLevel;
             }
-            CssMode::AtImportInvalid | CssMode::AtNamespaceInvalid => {
-                self.scope = CssMode::TopLevel;
+            Scope::AtImportInvalid | Scope::AtNamespaceInvalid => {
+                self.scope = Scope::TopLevel;
             }
-            CssMode::InBlock => {
+            Scope::InBlock => {
                 // TODO: css modules
             }
             _ => {}
@@ -1008,7 +1092,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
         self.balanced.push(BalancedItem::new(&name, start, end));
 
-        if let CssMode::InAtImport(ref mut import_data) = self.scope {
+        if let Scope::InAtImport(ref mut import_data) = self.scope {
             if name == "supports" {
                 import_data.supports = ImportDataSupports::InSupports { start };
             }
@@ -1025,7 +1109,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         let Some(last) = self.balanced.pop() else {
             return Some(());
         };
-        if let CssMode::InAtImport(ref mut import_data) = self.scope {
+        if let Scope::InAtImport(ref mut import_data) = self.scope {
             let not_in_supports = !import_data.in_supports();
             if matches!(last.kind, BalancedItemKind::Url) && not_in_supports {
                 import_data.url_range = Some(Range::new(last.range.start, end));
@@ -1046,10 +1130,10 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
     fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
         match self.scope {
-            CssMode::InBlock => {
+            Scope::InBlock => {
                 // TODO: css modules
             }
-            CssMode::InAtImport(ref mut import_data) => {
+            Scope::InAtImport(ref mut import_data) => {
                 if lexer.slice(start, end)?.to_ascii_lowercase() == "layer" {
                     import_data.layer = ImportDataLayer::EndLayer {
                         value: "",
@@ -1068,15 +1152,15 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
         match self.scope {
-            CssMode::TopLevel => {
+            Scope::TopLevel => {
                 self.allow_import_at_rule = false;
-                self.scope = CssMode::InBlock;
+                self.scope = Scope::InBlock;
                 self.block_nesting_level = 1;
                 // if self.allow_mode_switch {
                 //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 // }
             }
-            CssMode::InBlock => {
+            Scope::InBlock => {
                 self.block_nesting_level += 1;
                 // if self.allow_mode_switch {
                 //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1088,11 +1172,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     }
 
     fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
-        if matches!(self.scope, CssMode::InBlock) {
+        if matches!(self.scope, Scope::InBlock) {
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
                 // TODO: if isLocalMode
-                self.scope = CssMode::TopLevel;
+                self.scope = Scope::TopLevel;
                 // if self.allow_mode_switch {
                 //     self.is_next_rule_prelude = true;
                 // }
