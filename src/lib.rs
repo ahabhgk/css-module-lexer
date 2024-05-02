@@ -47,43 +47,39 @@ const C_HYPHEN_MINUS: char = '-';
 const C_LESS_THAN_SIGN: char = '<';
 const C_GREATER_THAN_SIGN: char = '>';
 
+pub type Pos = u32;
+
 pub trait Visitor<'s> {
-    fn function(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn ident(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn url(
         &mut self,
         lexer: &mut Lexer<'s>,
-        start: usize,
-        end: usize,
-        content_start: usize,
-        content_end: usize,
+        start: Pos,
+        end: Pos,
+        content_start: Pos,
+        content_end: Pos,
     ) -> Option<()>;
-    fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
+    fn string(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool>;
-    fn id(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn comma(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()>;
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize)
-        -> Option<()>;
-    fn right_curly_bracket(
-        &mut self,
-        lexer: &mut Lexer<'s>,
-        start: usize,
-        end: usize,
-    ) -> Option<()>;
+    fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
 }
 
 #[derive(Debug, Clone)]
 pub struct Lexer<'s> {
     value: &'s str,
     iter: Chars<'s>,
-    cur_pos: Option<usize>,
+    cur_pos: Option<Pos>,
     cur: Option<char>,
     peek: Option<char>,
     peek2: Option<char>,
@@ -115,7 +111,7 @@ impl<'s> Lexer<'s> {
         self.cur()
     }
 
-    pub fn cur_pos(&self) -> Option<usize> {
+    pub fn cur_pos(&self) -> Option<Pos> {
         self.cur_pos
     }
 
@@ -123,10 +119,10 @@ impl<'s> Lexer<'s> {
         self.cur
     }
 
-    pub fn peek_pos(&self) -> Option<usize> {
+    pub fn peek_pos(&self) -> Option<Pos> {
         if let Some(pos) = self.cur_pos() {
             if let Some(c) = self.cur() {
-                Some(pos + c.len_utf8())
+                Some(pos + c.len_utf8() as u32)
             } else {
                 None
             }
@@ -139,10 +135,10 @@ impl<'s> Lexer<'s> {
         self.peek
     }
 
-    pub fn peek2_pos(&self) -> Option<usize> {
+    pub fn peek2_pos(&self) -> Option<Pos> {
         if let Some(pos) = self.peek_pos() {
             if let Some(c) = self.peek() {
-                Some(pos + c.len_utf8())
+                Some(pos + c.len_utf8() as u32)
             } else {
                 None
             }
@@ -155,8 +151,8 @@ impl<'s> Lexer<'s> {
         self.peek2
     }
 
-    pub fn slice(&self, start: usize, end: usize) -> Option<&'s str> {
-        self.value.get(start..end)
+    pub fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
+        self.value.get(start as usize..end as usize)
     }
 }
 
@@ -320,7 +316,7 @@ impl<'s> Lexer<'s> {
     fn consume_url<T: Visitor<'s>>(
         self: &mut Lexer<'s>,
         visitor: &mut T,
-        start: usize,
+        start: Pos,
     ) -> Option<()> {
         let content_start = self.cur_pos()?;
         loop {
@@ -604,7 +600,7 @@ enum Scope<'s> {
 
 #[derive(Debug)]
 struct ImportData<'s> {
-    start: usize,
+    start: Pos,
     url: Option<&'s str>,
     url_range: Option<Range>,
     supports: ImportDataSupports<'s>,
@@ -612,7 +608,7 @@ struct ImportData<'s> {
 }
 
 impl ImportData<'_> {
-    pub fn new(start: usize) -> Self {
+    pub fn new(start: Pos) -> Self {
         Self {
             start,
             url: None,
@@ -644,7 +640,7 @@ impl ImportData<'_> {
 #[derive(Debug)]
 enum ImportDataSupports<'s> {
     None,
-    InSupports { start: usize },
+    InSupports { start: Pos },
     EndSupports { value: &'s str, range: Range },
 }
 
@@ -661,14 +657,14 @@ struct BalancedItem {
 }
 
 impl BalancedItem {
-    pub fn new(name: &str, start: usize, end: usize) -> Self {
+    pub fn new(name: &str, start: Pos, end: Pos) -> Self {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
         }
     }
 
-    pub fn new_other(start: usize, end: usize) -> Self {
+    pub fn new_other(start: Pos, end: Pos) -> Self {
         Self {
             kind: BalancedItemKind::Other,
             range: Range::new(start, end),
@@ -703,12 +699,12 @@ impl BalancedItemKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
-    pub start: usize,
-    pub end: usize,
+    pub start: Pos,
+    pub end: Pos,
 }
 
 impl Range {
-    pub fn new(start: usize, end: usize) -> Self {
+    pub fn new(start: Pos, end: Pos) -> Self {
         Self { start, end }
     }
 }
@@ -913,7 +909,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(!is_ident_start(c))
     }
 
-    pub fn get_media(&self, lexer: &Lexer<'s>, start: usize, end: usize) -> Option<&'s str> {
+    pub fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
         let mut media_lexer = Lexer::from(media);
         media_lexer.consume()?;
@@ -921,7 +917,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(media)
     }
 
-    pub fn lex_export(&mut self, lexer: &mut Lexer<'s>, start: usize) -> Option<()> {
+    pub fn lex_export(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
         lexer.eat_white_space_and_comments()?;
         let c = lexer.cur()?;
         if c != C_LEFT_CURLY {
@@ -995,10 +991,10 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
     fn url(
         &mut self,
         lexer: &mut Lexer<'s>,
-        start: usize,
-        end: usize,
-        content_start: usize,
-        content_end: usize,
+        start: Pos,
+        end: Pos,
+        content_start: Pos,
+        content_end: Pos,
     ) -> Option<()> {
         let value = lexer.slice(content_start, content_end)?;
         match self.scope {
@@ -1025,7 +1021,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn string(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn string(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         match self.scope {
             Scope::InAtImport(ref mut import_data) => {
                 let inside_url = matches!(
@@ -1073,7 +1069,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn at_keyword(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
             self.scope = Scope::AtNamespaceInvalid;
@@ -1102,7 +1098,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
@@ -1195,7 +1191,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
         self.balanced.push(BalancedItem::new(&name, start, end));
 
@@ -1207,12 +1203,12 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn left_parenthesis(&mut self, _: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn left_parenthesis(&mut self, _: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.balanced.push(BalancedItem::new_other(start, end));
         Some(())
     }
 
-    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(last) = self.balanced.pop() else {
             return Some(());
         };
@@ -1256,7 +1252,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn ident(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         match self.scope {
             Scope::InBlock => {
                 // TODO: css modules
@@ -1274,7 +1270,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
@@ -1290,7 +1286,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn id(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
@@ -1306,7 +1302,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
@@ -1327,7 +1323,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: usize, _: usize) -> Option<()> {
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock) {
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
@@ -1344,7 +1340,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn pseudo_function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
         self.balanced.push(BalancedItem::new(&name, start, end));
         if let Some(mode_data) = &mut self.mode_data {
@@ -1365,7 +1361,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
+    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -1395,7 +1391,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn comma(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         if let Some(mode_data) = &mut self.mode_data {
             mode_data.set_none();
         }

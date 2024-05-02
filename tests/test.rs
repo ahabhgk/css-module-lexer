@@ -1,17 +1,17 @@
 use css_module_lexer::{
-    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, LocalKind,
-    UrlRangeKind, Visitor, Warning,
+    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, LocalKind, Pos,
+    Range, UrlRangeKind, Visitor, Warning,
 };
 use indoc::indoc;
 
 fn assert_lexer_state(
     lexer: &Lexer,
     cur: Option<char>,
-    cur_pos: Option<usize>,
+    cur_pos: Option<Pos>,
     peek: Option<char>,
-    peek_pos: Option<usize>,
+    peek_pos: Option<Pos>,
     peek2: Option<char>,
-    peek2_pos: Option<usize>,
+    peek2_pos: Option<Pos>,
 ) {
     assert_eq!(lexer.cur(), cur);
     assert_eq!(lexer.cur_pos(), cur_pos);
@@ -40,12 +40,12 @@ impl Snapshot {
 }
 
 impl Visitor<'_> for Snapshot {
-    fn function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("function", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn ident(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn ident(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("ident", lexer.slice(start, end)?);
         Some(())
     }
@@ -53,16 +53,16 @@ impl Visitor<'_> for Snapshot {
     fn url(
         &mut self,
         lexer: &mut Lexer,
-        _: usize,
-        _: usize,
-        content_start: usize,
-        content_end: usize,
+        _: Pos,
+        _: Pos,
+        content_start: Pos,
+        content_end: Pos,
     ) -> Option<()> {
         self.add("url", lexer.slice(content_start, content_end)?);
         Some(())
     }
 
-    fn string(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn string(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("string", lexer.slice(start, end)?);
         Some(())
     }
@@ -71,60 +71,64 @@ impl Visitor<'_> for Snapshot {
         Some(true)
     }
 
-    fn id(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn id(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("id", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn left_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("left_parenthesis", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn right_parenthesis(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn right_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("right_parenthesis", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn comma(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn comma(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("comma", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("class", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn pseudo_function(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn pseudo_function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("pseudo_function", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn pseudo_class(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn pseudo_class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("pseudo_class", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn semicolon(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn semicolon(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("semicolon", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn at_keyword(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn at_keyword(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("at_keyword", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("left_curly", lexer.slice(start, end)?);
         Some(())
     }
 
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: usize, end: usize) -> Option<()> {
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
         self.add("right_curly", lexer.slice(start, end)?);
         Some(())
     }
+}
+
+fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
+    input.get(range.start as usize..range.end as usize)
 }
 
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
@@ -135,7 +139,7 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::NotPrecededAtImport { range }
         | Warning::ExpectedUrl { range }
         | Warning::ExpectedBefore { range, .. } => {
-            assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+            assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
     }
 }
@@ -157,7 +161,7 @@ fn assert_url_dependency(
     };
     assert_eq!(*req, request);
     assert_eq!(*k, kind);
-    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_import_dependency(
@@ -183,7 +187,7 @@ fn assert_import_dependency(
     assert_eq!(*actual_layer, layer);
     assert_eq!(*actual_supports, supports);
     assert_eq!(*actual_media, media);
-    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_local_dependency(
@@ -203,7 +207,7 @@ fn assert_local_dependency(
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_kind, kind);
-    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_replace_dependency(
@@ -220,7 +224,7 @@ fn assert_replace_dependency(
         return assert!(false);
     };
     assert_eq!(*actual_content, content);
-    assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &str, value: &str) {
