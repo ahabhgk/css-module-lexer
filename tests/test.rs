@@ -223,6 +223,15 @@ fn assert_replace_dependency(
     assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
 }
 
+fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &str, value: &str) {
+    let Dependency::ICSSExport { prop: actual_prop, value: actual_value } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_prop, prop);
+    assert_eq!(*actual_value, value);
+}
+
 #[test]
 fn lexer_start() {
     let mut l = Lexer::from("");
@@ -765,9 +774,89 @@ fn css_modules_pseudo1() {
 }
 
 #[test]
-fn icss_export_unexpected() {
+fn icss_export_unexpected1() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
-    assert!(dependencies.is_empty());
     assert_warning(input, &warnings[0], "/sl/ash;");
+    assert_replace_dependency(input, &dependencies[0], "", ":export {\n/sl/ash");
+}
+
+#[test]
+fn icss_export() {
+    let input = indoc! {r#"
+        :export {
+            a: a;
+        }
+
+        :export {
+            abc: a b c;
+            comments: abc/****/   /* hello world *//****/   def
+        }
+
+        :export
+
+
+        {
+
+
+            white space
+
+            :
+
+            abc
+            def
+
+        }
+
+        :export{default:default}
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_icss_export_dependency(input, &dependencies[0], "a", "a");
+    assert_replace_dependency(
+        input,
+        &dependencies[1],
+        "",
+        indoc! {r#":export {
+            a: a;
+        }"#},
+    );
+    assert_icss_export_dependency(input, &dependencies[2], "abc", "a b c");
+    assert_icss_export_dependency(
+        input,
+        &dependencies[3],
+        "comments",
+        "abc/****/   /* hello world *//****/   def",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[4],
+        "",
+        indoc! {r#":export {
+            abc: a b c;
+            comments: abc/****/   /* hello world *//****/   def
+        }"#},
+    );
+    assert_icss_export_dependency(input, &dependencies[5], "white space", "abc\n    def");
+    assert_replace_dependency(
+        input,
+        &dependencies[6],
+        "",
+        indoc! {r#":export
+
+
+        {
+
+
+            white space
+
+            :
+
+            abc
+            def
+
+        }"#},
+    );
+    assert_icss_export_dependency(input, &dependencies[7], "default", "default");
+    assert_replace_dependency(input, &dependencies[8], "", ":export{default:default}");
 }

@@ -786,6 +786,10 @@ pub enum Dependency<'s> {
         range: Range,
         kind: LocalKind,
     },
+    ICSSExport {
+        prop: &'s str,
+        value: &'s str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -954,7 +958,31 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
                 });
                 return Some(());
             }
+            lexer.consume()?;
+            lexer.eat_white_space_and_comments()?;
+            let value_start = lexer.cur_pos()?;
+            loop {
+                let c = lexer.cur()?;
+                if c == C_RIGHT_CURLY || c == C_SEMICOLON {
+                    break;
+                }
+                lexer.consume()?;
+            }
+            let value_end = lexer.cur_pos()?;
+            if lexer.cur()? == C_SEMICOLON {
+                lexer.consume()?;
+                lexer.eat_white_space_and_comments()?;
+            }
+            (self.handle_dependency)(Dependency::ICSSExport {
+                prop: lexer
+                    .slice(prop_start, prop_end)?
+                    .trim_end_matches(is_white_space),
+                value: lexer
+                    .slice(value_start, value_end)?
+                    .trim_end_matches(is_white_space),
+            });
         }
+        lexer.consume()?;
         Some(())
     }
 }
@@ -1358,7 +1386,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
             return Some(());
         }
         if matches!(self.scope, Scope::TopLevel) && name == ":export" {
-            self.lex_export(lexer, start);
+            self.lex_export(lexer, start)?;
+            (self.handle_dependency)(Dependency::Replace {
+                content: "",
+                range: Range::new(start, lexer.cur_pos()?),
+            });
         }
         Some(())
     }
