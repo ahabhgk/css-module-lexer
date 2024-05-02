@@ -1,4 +1,4 @@
-use std::str::CharIndices;
+use std::str::Chars;
 
 const C_LINE_FEED: char = '\n';
 const C_CARRIAGE_RETURN: char = '\r';
@@ -82,25 +82,25 @@ pub trait Visitor<'s> {
 #[derive(Debug, Clone)]
 pub struct Lexer<'s> {
     value: &'s str,
-    iter: CharIndices<'s>,
-    cur: Option<(usize, char)>,
-    peek: Option<(usize, char)>,
-    peek2: Option<(usize, char)>,
-    start: bool,
+    iter: Chars<'s>,
+    cur_pos: Option<usize>,
+    cur: Option<char>,
+    peek: Option<char>,
+    peek2: Option<char>,
 }
 
 impl<'s> From<&'s str> for Lexer<'s> {
     fn from(value: &'s str) -> Self {
-        let mut iter = value.char_indices();
+        let mut iter = value.chars();
         let peek = iter.next();
         let peek2 = iter.next();
         Self {
             value,
             iter,
+            cur_pos: None,
             cur: None,
             peek,
             peek2,
-            start: false,
         }
     }
 }
@@ -108,7 +108,7 @@ impl<'s> From<&'s str> for Lexer<'s> {
 impl<'s> Lexer<'s> {
     #[must_use]
     pub fn consume(&mut self) -> Option<char> {
-        self.start = true;
+        self.cur_pos = self.peek_pos();
         self.cur = self.peek;
         self.peek = self.peek2;
         self.peek2 = self.iter.next();
@@ -116,38 +116,47 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn cur_pos(&self) -> Option<usize> {
-        self.cur.map(|(p, _)| p)
+        self.cur_pos
     }
 
     pub fn cur(&self) -> Option<char> {
-        self.cur.map(|(_, c)| c)
+        self.cur
     }
 
     pub fn peek_pos(&self) -> Option<usize> {
-        self.peek.map(|(p, _)| p)
+        if let Some(pos) = self.cur_pos() {
+            if let Some(c) = self.cur() {
+                Some(pos + c.len_utf8())
+            } else {
+                None
+            }
+        } else {
+            Some(0)
+        }
     }
 
     pub fn peek(&self) -> Option<char> {
-        self.peek.map(|(_, c)| c)
+        self.peek
     }
 
     pub fn peek2_pos(&self) -> Option<usize> {
-        self.peek2.map(|(p, _)| p)
+        if let Some(pos) = self.peek_pos() {
+            if let Some(c) = self.peek() {
+                Some(pos + c.len_utf8())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     pub fn peek2(&self) -> Option<char> {
-        self.peek2.map(|(_, c)| c)
+        self.peek2
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Option<&'s str> {
         self.value.get(start..end)
-    }
-
-    pub fn is_eof(&self) -> bool {
-        if self.value.is_empty() {
-            return true;
-        }
-        self.start && self.cur.is_none()
     }
 }
 
@@ -158,7 +167,7 @@ impl<'s> Lexer<'s> {
 
     fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
-        while !self.is_eof() {
+        while !self.cur().is_none() {
             self.consume_comments()?;
             let c = self.cur()?;
             if c < '\u{80}' {
@@ -872,7 +881,7 @@ pub struct LexDependencies<'s, D, W> {
     handle_warning: W,
 }
 
-impl<'s, D, W> LexDependencies<'s, D, W> {
+impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> {
     pub fn new(
         handle_dependency: D,
         handle_warning: W,
@@ -906,6 +915,47 @@ impl<'s, D, W> LexDependencies<'s, D, W> {
         media_lexer.consume()?;
         media_lexer.eat_white_space_and_comments()?;
         Some(media)
+    }
+
+    pub fn lex_export(&mut self, lexer: &mut Lexer<'s>, start: usize) -> Option<()> {
+        lexer.eat_white_space_and_comments()?;
+        let c = lexer.cur()?;
+        if c != C_LEFT_CURLY {
+            let end = lexer.peek_pos()?;
+            (self.handle_warning)(Warning::Unexpected {
+                unexpected: Range::new(lexer.cur_pos()?, end),
+                range: Range::new(start, end),
+            });
+            return Some(());
+        }
+        lexer.consume()?;
+        lexer.eat_white_space_and_comments()?;
+        while lexer.cur()? != C_RIGHT_CURLY {
+            lexer.eat_white_space_and_comments()?;
+            let prop_start = lexer.cur_pos()?;
+            loop {
+                let c = lexer.cur()?;
+                if c == C_COLON
+                    || c == C_RIGHT_CURLY
+                    || c == C_SEMICOLON
+                    || (c == C_SOLIDUS && lexer.peek()? == C_ASTERISK)
+                {
+                    break;
+                }
+                lexer.consume()?;
+            }
+            let prop_end = lexer.cur_pos()?;
+            lexer.eat_white_space_and_comments()?;
+            if lexer.cur()? != C_COLON {
+                let end = lexer.peek_pos()?;
+                (self.handle_warning)(Warning::Unexpected {
+                    unexpected: Range::new(lexer.cur_pos()?, end),
+                    range: Range::new(prop_start, end),
+                });
+                return Some(());
+            }
+        }
+        Some(())
     }
 }
 
@@ -1289,7 +1339,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
     fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: usize, end: usize) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
-            return Some(())
+            return Some(());
         };
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == ":global" || name == ":local" {
@@ -1306,6 +1356,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 mode_data.set_local();
             }
             return Some(());
+        }
+        if matches!(self.scope, Scope::TopLevel) && name == ":export" {
+            self.lex_export(lexer, start);
         }
         Some(())
     }

@@ -4,6 +4,23 @@ use css_module_lexer::{
 };
 use indoc::indoc;
 
+fn assert_lexer_state(
+    lexer: &Lexer,
+    cur: Option<char>,
+    cur_pos: Option<usize>,
+    peek: Option<char>,
+    peek_pos: Option<usize>,
+    peek2: Option<char>,
+    peek2_pos: Option<usize>,
+) {
+    assert_eq!(lexer.cur(), cur);
+    assert_eq!(lexer.cur_pos(), cur_pos);
+    assert_eq!(lexer.peek(), peek);
+    assert_eq!(lexer.peek_pos(), peek_pos);
+    assert_eq!(lexer.peek2(), peek2);
+    assert_eq!(lexer.peek2_pos(), peek2_pos);
+}
+
 #[derive(Default)]
 struct Snapshot {
     results: Vec<(String, String)>,
@@ -204,6 +221,44 @@ fn assert_replace_dependency(
     };
     assert_eq!(*actual_content, content);
     assert_eq!(input.get(range.start..range.end).unwrap(), range_content);
+}
+
+#[test]
+fn lexer_start() {
+    let mut l = Lexer::from("");
+    assert_lexer_state(&l, None, None, None, Some(0), None, None);
+    assert_eq!(l.consume(), None);
+    assert_lexer_state(&l, None, Some(0), None, None, None, None);
+    assert_eq!(l.consume(), None);
+    let mut l = Lexer::from("0壹👂삼");
+    assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
+    assert_eq!(l.consume(), Some('0'));
+    assert_lexer_state(
+        &l,
+        Some('0'),
+        Some(0),
+        Some('壹'),
+        Some(1),
+        Some('👂'),
+        Some(4),
+    );
+    assert_eq!(l.consume(), Some('壹'));
+    assert_lexer_state(
+        &l,
+        Some('壹'),
+        Some(1),
+        Some('👂'),
+        Some(4),
+        Some('삼'),
+        Some(8),
+    );
+    assert_eq!(l.consume(), Some('👂'));
+    assert_lexer_state(&l, Some('👂'), Some(4), Some('삼'), Some(8), None, Some(11));
+    assert_eq!(l.consume(), Some('삼'));
+    assert_lexer_state(&l, Some('삼'), Some(8), None, Some(11), None, None);
+    assert_eq!(l.consume(), None);
+    assert_lexer_state(&l, None, Some(11), None, None, None, None);
+    assert_eq!(l.consume(), None);
 }
 
 #[test]
@@ -707,4 +762,12 @@ fn css_modules_pseudo1() {
         "localE",
     );
     assert_replace_dependency(input, &dependencies[5], "", ")");
+}
+
+#[test]
+fn icss_export_unexpected() {
+    let input = ":export {\n/sl/ash;";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], "/sl/ash;");
 }
