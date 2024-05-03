@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use smallvec::SmallVec;
+
 use crate::lexer::is_white_space;
 use crate::lexer::start_ident_sequence;
 use crate::lexer::C_ASTERISK;
@@ -274,7 +276,7 @@ pub struct LexDependencies<'s, D, W> {
     scope: Scope<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
-    balanced: Vec<BalancedItem>,
+    balanced: SmallVec<[BalancedItem; 3]>,
     is_next_rule_prelude: bool,
     handle_dependency: D,
     handle_warning: W,
@@ -291,7 +293,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             scope: Scope::TopLevel,
             block_nesting_level: 0,
             allow_import_at_rule: true,
-            balanced: Vec::new(),
+            balanced: Default::default(),
             is_next_rule_prelude: true,
             handle_dependency,
             handle_warning,

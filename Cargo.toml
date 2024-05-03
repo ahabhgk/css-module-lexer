@@ -5,6 +5,9 @@ edition = "2021"
 description = "Lexes CSS modules returning their dependencies metadata"
 license = "MIT"
 
+[dependencies]
+smallvec = "1.13"
+
 [dev-dependencies]
 codspeed-criterion-compat = "2"
 criterion = "0.5"
