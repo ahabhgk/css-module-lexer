@@ -786,6 +786,30 @@ fn css_modules_pseudo() {
 }
 
 #[test]
+fn css_modules_nesting() {
+    let input = indoc! {r#"
+        .first-nested {
+            .first-nested-nested {
+                color: red;
+            }
+        }
+        .first-nested-at-rule {
+            @media screen {
+                .first-nested-nested-at-rule-deep {
+                    color: red;
+                }
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "first-nested");
+    assert_local_ident_dependency(input, &dependencies[1], "first-nested-nested");
+    assert_local_ident_dependency(input, &dependencies[2], "first-nested-at-rule");
+    assert_local_ident_dependency(input, &dependencies[3], "first-nested-nested-at-rule-deep");
+}
+
+#[test]
 fn css_modules_local_var_unexpected() {
     let input = indoc! {r#"
         .vars {
