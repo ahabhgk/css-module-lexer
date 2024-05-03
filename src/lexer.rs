@@ -153,11 +153,12 @@ impl<'s> Lexer<'s> {
     fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         while self.cur().is_some() {
-            self.consume_white_space_and_comments()?;
+            self.consume_comments()?;
             let c = self.cur()?;
             if c < '\u{80}' {
                 // https://drafts.csswg.org/css-syntax/#consume-token
                 match c {
+                    c if is_white_space(c) => self.consume_space()?,
                     C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
                     C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
                     C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
