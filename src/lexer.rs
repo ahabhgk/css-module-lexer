@@ -153,12 +153,11 @@ impl<'s> Lexer<'s> {
     fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         while self.cur().is_some() {
-            self.consume_comments()?;
+            self.consume_white_space_and_comments()?;
             let c = self.cur()?;
             if c < '\u{80}' {
                 // https://drafts.csswg.org/css-syntax/#consume-token
                 match c {
-                    c if is_white_space(c) => self.consume_space()?,
                     C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
                     C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
                     C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
@@ -488,9 +487,7 @@ impl<'s> Lexer<'s> {
         let end = self.cur_pos()?;
         visitor.right_curly_bracket(self, end - 1, end)
     }
-}
 
-impl Lexer<'_> {
     pub fn consume_white_space_and_comments(&mut self) -> Option<()> {
         loop {
             self.consume_comments()?;
@@ -502,25 +499,6 @@ impl Lexer<'_> {
         }
         Some(())
     }
-
-    // pub fn eat_while_line(&mut self) -> Option<()> {
-    //     loop {
-    //         let c = self.cur()?;
-    //         if is_space(c) {
-    //             self.consume()?;
-    //             continue;
-    //         }
-    //         if is_new_line(c) {
-    //             self.consume()?;
-    //         }
-    //         // For \r\n
-    //         if self.cur()? == C_CARRIAGE_RETURN && self.peek()? == C_LINE_FEED {
-    //             self.consume()?;
-    //         }
-    //         break;
-    //     }
-    //     Some(())
-    // }
 }
 
 pub fn is_new_line(c: char) -> bool {
