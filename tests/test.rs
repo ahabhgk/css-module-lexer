@@ -1,7 +1,12 @@
-use css_module_lexer::{
-    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, Pos, Range,
-    UrlRangeKind, Visitor, Warning,
-};
+use css_module_lexer::collect_css_dependencies;
+use css_module_lexer::collect_css_modules_dependencies;
+use css_module_lexer::Dependency;
+use css_module_lexer::Lexer;
+use css_module_lexer::Pos;
+use css_module_lexer::Range;
+use css_module_lexer::UrlRangeKind;
+use css_module_lexer::Visitor;
+use css_module_lexer::Warning;
 use indoc::indoc;
 
 fn assert_lexer_state(
@@ -127,6 +132,14 @@ impl Visitor<'_> for Snapshot {
     }
 }
 
+fn assert_lexer_snapshot(input: &str, snapshot: &str) {
+    let mut s = Snapshot::default();
+    let mut l = Lexer::from(input);
+    l.lex(&mut s);
+    assert!(l.cur().is_none());
+    assert_eq!(s.snapshot(), snapshot);
+}
+
 fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
     input.get(range.start as usize..range.end as usize)
 }
@@ -134,14 +147,15 @@ fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
     match warning {
         Warning::Unexpected { range, .. }
-        | Warning::DuplicateUrl { range }
+        | Warning::DuplicateUrl { range, .. }
         | Warning::NamespaceNotSupportedInBundledCss { range }
         | Warning::NotPrecededAtImport { range }
-        | Warning::ExpectedUrl { range }
-        | Warning::ExpectedBefore { range, .. } => {
+        | Warning::ExpectedUrl { range, .. }
+        | Warning::ExpectedUrlBefore { range, .. }
+        | Warning::ExpectedLayerBefore { range, .. } => {
             assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
-    }
+    };
 }
 
 fn assert_url_dependency(
@@ -190,12 +204,7 @@ fn assert_import_dependency(
     assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
-fn assert_local_ident_dependency(
-    input: &str,
-    dependency: &Dependency,
-    name: &str,
-    range_content: &str,
-) {
+fn assert_local_ident_dependency(input: &str, dependency: &Dependency, name: &str) {
     let Dependency::LocalIdent {
         name: actual_name,
         range,
@@ -204,7 +213,7 @@ fn assert_local_ident_dependency(
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(slice_range(input, range).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_var_dependency(
@@ -228,20 +237,17 @@ fn assert_local_var_decl_dependency(
     input: &str,
     dependency: &Dependency,
     name: &str,
-    value: &str,
     range_content: &str,
 ) {
     let Dependency::LocalVarDecl {
-        name_range,
+        range,
         name: actual_name,
-        value: actual_value,
     } = dependency
     else {
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(*actual_value, value);
-    assert_eq!(slice_range(input, name_range).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_replace_dependency(
@@ -313,22 +319,18 @@ fn lexer_start() {
 
 #[test]
 fn parse_urls() {
-    let mut s = Snapshot::default();
-    let mut l = Lexer::from(indoc! {r#"
-        body {
-            background: url(
-                https://example\2f4a8f.com\
-        /image.png
-            )
-        }
-        --element\ name.class\ name#_id {
-            background: url(  "https://example.com/some url \"with\" 'spaces'.png"   )  url('https://example.com/\'"quotes"\'.png');
-        }
-    "#});
-    l.lex(&mut s);
-    assert!(l.cur().is_none());
-    assert_eq!(
-        s.snapshot(),
+    assert_lexer_snapshot(
+        indoc! {r#"
+            body {
+                background: url(
+                    https://example\2f4a8f.com\
+            /image.png
+                )
+            }
+            --element\ name.class\ name#_id {
+                background: url(  "https://example.com/some url \"with\" 'spaces'.png"   )  url('https://example.com/\'"quotes"\'.png');
+            }
+        "#},
         indoc! {r#"
             ident: body
             left_curly: {
@@ -349,21 +351,17 @@ fn parse_urls() {
             right_parenthesis: )
             semicolon: ;
             right_curly: }
-        "#}
+        "#},
     );
 }
 
 #[test]
 fn parse_pseudo_functions() {
-    let mut s = Snapshot::default();
-    let mut l = Lexer::from(indoc! {r#"
-        :local(.class#id, .class:not(*:hover)) { color: red; }
-        :import(something from ":somewhere") {}
-    "#});
-    l.lex(&mut s);
-    assert!(l.cur().is_none());
-    assert_eq!(
-        s.snapshot(),
+    assert_lexer_snapshot(
+        indoc! {r#"
+            :local(.class#id, .class:not(*:hover)) { color: red; }
+            :import(something from ":somewhere") {}
+        "#},
         indoc! {r#"
             pseudo_function: :local(
             class: .class
@@ -386,24 +384,19 @@ fn parse_pseudo_functions() {
             right_parenthesis: )
             left_curly: {
             right_curly: }
-        "#}
+        "#},
     );
 }
 
 #[test]
 fn parse_at_rules() {
-    let mut s = Snapshot::default();
-    let mut l = Lexer::from(indoc! {r#"
-        @media (max-size: 100px) {
-            @import "external.css";
-            body { color: red; }
-        }
-    "#});
-    l.lex(&mut s);
-    assert!(l.cur().is_none());
-    println!("{}", s.snapshot());
-    assert_eq!(
-        s.snapshot(),
+    assert_lexer_snapshot(
+        indoc! {r#"
+            @media (max-size: 100px) {
+                @import "external.css";
+                body { color: red; }
+            }
+        "#},
         indoc! {r#"
             at_keyword: @media
             left_parenthesis: (
@@ -420,27 +413,23 @@ fn parse_at_rules() {
             semicolon: ;
             right_curly: }
             right_curly: }
-        "#}
+        "#},
     );
 }
 
 #[test]
 fn parse_escape() {
-    let mut s = Snapshot::default();
-    let mut l = Lexer::from(indoc! {r#"
-        body {
-            a\
-        a: \
-        url(https://example\2f4a8f.com\
-        /image.png)
-            b: url(#\
-        hash)
-        }
-    "#});
-    l.lex(&mut s);
-    assert!(l.cur().is_none());
-    assert_eq!(
-        s.snapshot(),
+    assert_lexer_snapshot(
+        indoc! {r#"
+            body {
+                a\
+            a: \
+            url(https://example\2f4a8f.com\
+            /image.png)
+                b: url(#\
+            hash)
+            }
+        "#},
         indoc! {r#"
             ident: body
             left_curly: {
@@ -452,7 +441,7 @@ fn parse_escape() {
             url: #\
             hash
             right_curly: }
-        "#}
+        "#},
     );
 }
 
@@ -676,7 +665,7 @@ fn unexpected_semicolon_in_supports() {
         Some(" supports(display: flex"),
         "@import \"style.css\" supports(display: flex;",
     );
-    assert_warning(input, &warnings[0], "supports(display: flex;");
+    assert_warning(input, &warnings[0], ";");
 }
 
 #[test]
@@ -687,8 +676,8 @@ fn unexpected_semicolon_import_url_string() {
     "#};
     let (dependencies, warnings) = collect_css_dependencies(input);
     assert!(dependencies.is_empty());
-    assert_warning(input, &warnings[0], "@import url(\"style.css\";");
-    assert_warning(input, &warnings[1], "@import url(\"style.css\" layer;");
+    assert_warning(input, &warnings[0], ";");
+    assert_warning(input, &warnings[1], ";");
 }
 
 #[test]
@@ -784,15 +773,15 @@ fn import_attributes() {
 }
 
 #[test]
-fn css_modules_pseudo1() {
+fn css_modules_pseudo() {
     let input = ".localA :global .global-b .global-c :local(.localD.localE) .global-d";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], "localA", "localA");
+    assert_local_ident_dependency(input, &dependencies[0], "localA");
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":local(");
-    assert_local_ident_dependency(input, &dependencies[3], "localD", "localD");
-    assert_local_ident_dependency(input, &dependencies[4], "localE", "localE");
+    assert_local_ident_dependency(input, &dependencies[3], "localD");
+    assert_local_ident_dependency(input, &dependencies[4], "localE");
     assert_replace_dependency(input, &dependencies[5], "", ")");
 }
 
@@ -804,14 +793,14 @@ fn css_modules_local_var_unexpected() {
         }
     "#};
     let (_, warnings) = collect_css_modules_dependencies(input);
-    assert_warning(input, &warnings[0], "var(lo");
+    assert_warning(input, &warnings[0], "lo");
 }
 
 #[test]
 fn css_modules_local_var() {
     let input = indoc! {r#"
         .vars {
-            color: var(--local-color);
+            color: var(--local-color, red);
             --local-color: red;
         }
         .globalVars :global {
@@ -821,24 +810,64 @@ fn css_modules_local_var() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], "vars", "vars");
+    assert_local_ident_dependency(input, &dependencies[0], "vars");
     assert_local_var_dependency(input, &dependencies[1], "local-color", "--local-color");
+    assert_local_var_decl_dependency(input, &dependencies[2], "local-color", "--local-color");
+    assert_local_ident_dependency(input, &dependencies[3], "globalVars");
+    assert_replace_dependency(input, &dependencies[4], "", ":global ");
+    dbg!(dependencies, warnings);
+}
+
+#[test]
+fn css_modules_local_var_minified_1() {
+    let input = "body{margin:0;font-family:var(--bs-body-font-family);}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_var_dependency(
+        input,
+        &dependencies[0],
+        "bs-body-font-family",
+        "--bs-body-font-family",
+    );
+}
+
+#[test]
+fn css_modules_local_var_minified_2() {
+    let input = ".table-primary{--bs-table-color:#000;--bs-table-border-color:#a6b5cc;color:var(--bs-table-color);border-color:var(--bs-table-border-color)}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "table-primary");
+    assert_local_var_decl_dependency(
+        input,
+        &dependencies[1],
+        "bs-table-color",
+        "--bs-table-color",
+    );
     assert_local_var_decl_dependency(
         input,
         &dependencies[2],
-        "local-color",
-        "red",
-        "--local-color",
+        "bs-table-border-color",
+        "--bs-table-border-color",
     );
-    assert_local_ident_dependency(input, &dependencies[3], "globalVars", "globalVars");
-    assert_replace_dependency(input, &dependencies[4], "", ":global ");
+    assert_local_var_dependency(
+        input,
+        &dependencies[3],
+        "bs-table-color",
+        "--bs-table-color",
+    );
+    assert_local_var_dependency(
+        input,
+        &dependencies[4],
+        "bs-table-border-color",
+        "--bs-table-border-color",
+    );
 }
 
 #[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
-    assert_warning(input, &warnings[0], "/sl/ash;");
+    assert_warning(input, &warnings[0], ";");
     assert_replace_dependency(input, &dependencies[0], "", ":export {\n/sl/ash");
 }
 

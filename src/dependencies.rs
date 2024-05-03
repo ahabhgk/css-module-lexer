@@ -1,11 +1,12 @@
-use crate::lexer::is_ident_start;
+use std::fmt::Display;
+
 use crate::lexer::is_white_space;
+use crate::lexer::start_ident_sequence;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_RIGHT_CURLY;
-use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
 use crate::lexer::C_SOLIDUS;
 use crate::Lexer;
@@ -63,7 +64,7 @@ impl ImportData<'_> {
 #[derive(Debug)]
 enum ImportDataSupports<'s> {
     None,
-    InSupports { start: Pos },
+    InSupports,
     EndSupports { value: &'s str, range: Range },
 }
 
@@ -120,7 +121,7 @@ impl BalancedItemKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Range {
     pub start: Pos,
     pub end: Pos,
@@ -182,7 +183,7 @@ impl CssModulesModeData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
         request: &'s str,
@@ -209,9 +210,8 @@ pub enum Dependency<'s> {
         range: Range,
     },
     LocalVarDecl {
-        name_range: Range,
         name: &'s str,
-        value: &'s str,
+        range: Range,
     },
     ICSSExport {
         prop: &'s str,
@@ -219,20 +219,47 @@ pub enum Dependency<'s> {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum UrlRangeKind {
     Function,
     String,
 }
 
-#[derive(Debug, Clone)]
-pub enum Warning {
-    Unexpected { unexpected: Range, range: Range },
-    DuplicateUrl { range: Range },
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum Warning<'s> {
+    Unexpected { range: Range, message: &'s str },
+    DuplicateUrl { range: Range, when: &'s str },
     NamespaceNotSupportedInBundledCss { range: Range },
     NotPrecededAtImport { range: Range },
-    ExpectedUrl { range: Range },
-    ExpectedBefore { should_after: Range, range: Range },
+    ExpectedUrl { range: Range, when: &'s str },
+    ExpectedUrlBefore { range: Range, when: &'s str },
+    ExpectedLayerBefore { range: Range, when: &'s str },
+}
+
+impl Display for Warning<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Warning::Unexpected { message, .. } => write!(f, "{message}"),
+            Warning::DuplicateUrl { when, .. } => {
+                write!(f, "Duplicate of 'url(...)' in '{when}'")
+            }
+            Warning::NamespaceNotSupportedInBundledCss { .. } => {
+                write!(f, "'@namespace' is not supported in bundled CSS")
+            }
+            Warning::NotPrecededAtImport { .. } => {
+                write!(f, "Any '@import' rules must precede all other rules")
+            }
+            Warning::ExpectedUrl { when, .. } => write!(f, "Expected URL in '{when}'"),
+            Warning::ExpectedUrlBefore { when, .. } => write!(
+                f,
+                "An URL in '{when}' should be before 'layer(...)' or 'supports(...)'"
+            ),
+            Warning::ExpectedLayerBefore { when, .. } => write!(
+                f,
+                "The 'layer(...)' in '{when}' should be before 'supports(...)'"
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -247,7 +274,7 @@ pub struct LexDependencies<'s, D, W> {
     handle_warning: W,
 }
 
-impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> {
+impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D, W> {
     pub fn new(
         handle_dependency: D,
         handle_warning: W,
@@ -265,14 +292,16 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         }
     }
 
-    fn _is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
-        let mut lexer = lexer.clone();
+    fn is_next_nested_syntax(&self, lexer: &mut Lexer) -> Option<bool> {
         lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;
-        if c == C_LEFT_CURLY {
+        if c == C_RIGHT_CURLY {
             return Some(false);
         }
-        Some(!is_ident_start(c))
+        // If what follows is a property, then it's not a nested selector
+        // This is not strictly correct, but it's good enough for our purposes
+        // since we only need 'is_selector()' when next char is '#', '.', or ':'
+        Some(!start_ident_sequence(c, lexer.peek()?, lexer.peek2()?))
     }
 
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
@@ -309,14 +338,14 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(())
     }
 
-    fn lex_icss_export(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+    fn lex_icss_export(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;
         if c != C_LEFT_CURLY {
             let end = lexer.peek_pos()?;
             (self.handle_warning)(Warning::Unexpected {
-                unexpected: Range::new(lexer.cur_pos()?, end),
-                range: Range::new(start, end),
+                message: "Expected '{' during parsing of ':export'",
+                range: Range::new(lexer.cur_pos()?, end),
             });
             return Some(());
         }
@@ -331,8 +360,8 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
             if lexer.cur()? != C_COLON {
                 let end = lexer.peek_pos()?;
                 (self.handle_warning)(Warning::Unexpected {
-                    unexpected: Range::new(lexer.cur_pos()?, end),
-                    range: Range::new(prop_start, end),
+                    message: "Expected ':' during parsing of ':export'",
+                    range: Range::new(lexer.cur_pos()?, end),
                 });
                 return Some(());
             }
@@ -358,29 +387,20 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(())
     }
 
-    fn lex_local_var(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+    fn lex_local_var(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         let minus_start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             let end = lexer.peek2_pos()?;
             (self.handle_warning)(Warning::Unexpected {
-                unexpected: Range::new(minus_start, end),
-                range: Range::new(start, end),
+                message: "Expected starts with '--' during parsing of CSS variable name",
+                range: Range::new(minus_start, end),
             });
             return Some(());
         }
         lexer.consume_ident_sequence()?;
         let start = minus_start + 2;
         let end = lexer.cur_pos()?;
-        lexer.consume_white_space_and_comments()?;
-        if lexer.cur()? != C_RIGHT_PARENTHESIS {
-            let end = lexer.peek_pos()?;
-            (self.handle_warning)(Warning::Unexpected {
-                unexpected: Range::new(lexer.cur_pos()?, end),
-                range: Range::new(start, end),
-            });
-            return Some(());
-        }
         (self.handle_dependency)(Dependency::LocalVar {
             name: lexer.slice(start, end)?,
             range: Range::new(minus_start, end),
@@ -399,30 +419,23 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         if lexer.cur()? != C_COLON {
             let end = lexer.peek_pos()?;
             (self.handle_warning)(Warning::Unexpected {
-                unexpected: Range::new(lexer.cur_pos()?, end),
-                range: Range::new(start, end),
+                message: "Expected ':' during parsing of local CSS variable declaration",
+                range: Range::new(lexer.cur_pos()?, end),
             });
             return Some(());
         }
         lexer.consume()?;
-        lexer.consume_white_space_and_comments()?;
-        let value_start = lexer.cur_pos()?;
-        self.consume_icss_export_value(lexer)?;
-        let value_end = lexer.cur_pos()?;
-        if lexer.cur()? == C_SEMICOLON {
-            lexer.consume()?;
-            lexer.consume_white_space_and_comments()?;
-        }
         (self.handle_dependency)(Dependency::LocalVarDecl {
-            name_range: Range::new(start, end),
             name,
-            value: lexer.slice(value_start, value_end)?,
+            range: Range::new(start, end),
         });
         Some(())
     }
 }
 
-impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDependencies<'s, D, W> {
+impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
+    for LexDependencies<'s, D, W>
+{
     fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
         Some(self.is_next_rule_prelude)
     }
@@ -444,6 +457,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 if import_data.url.is_some() {
                     (self.handle_warning)(Warning::DuplicateUrl {
                         range: Range::new(import_data.start, end),
+                        when: lexer.slice(import_data.start, end)?,
                     });
                     return Some(());
                 }
@@ -476,6 +490,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 if inside_url && import_data.url.is_some() {
                     (self.handle_warning)(Warning::DuplicateUrl {
                         range: Range::new(import_data.start, end),
+                        when: lexer.slice(import_data.start, end)?,
                     });
                     return Some(());
                 }
@@ -543,14 +558,15 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 let Some(url) = import_data.url else {
                     (self.handle_warning)(Warning::ExpectedUrl {
                         range: Range::new(import_data.start, end),
+                        when: lexer.slice(import_data.start, end)?,
                     });
                     self.scope = Scope::TopLevel;
                     return Some(());
                 };
                 let Some(url_range) = &import_data.url_range else {
                     (self.handle_warning)(Warning::Unexpected {
-                        unexpected: Range::new(start, end),
-                        range: Range::new(import_data.start, end),
+                        message: "Unexpected ';' during parsing of '@import url()'",
+                        range: Range::new(start, end),
                     });
                     self.scope = Scope::TopLevel;
                     return Some(());
@@ -559,9 +575,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                     ImportDataLayer::None => None,
                     ImportDataLayer::EndLayer { value, range } => {
                         if url_range.start > range.start {
-                            (self.handle_warning)(Warning::ExpectedBefore {
-                                should_after: range.clone(),
+                            (self.handle_warning)(Warning::ExpectedUrlBefore {
                                 range: url_range.clone(),
+                                when: lexer.slice(range.start, url_range.end)?,
                             });
                             self.scope = Scope::TopLevel;
                             return Some(());
@@ -571,20 +587,18 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 };
                 let supports = match &import_data.supports {
                     ImportDataSupports::None => None,
-                    ImportDataSupports::InSupports {
-                        start: supports_start,
-                    } => {
+                    ImportDataSupports::InSupports => {
                         (self.handle_warning)(Warning::Unexpected {
-                            unexpected: Range::new(start, end),
-                            range: Range::new(*supports_start, end),
+                            message: "Unexpected ';' during parsing of 'supports()'",
+                            range: Range::new(start, end),
                         });
                         None
                     }
                     ImportDataSupports::EndSupports { value, range } => {
                         if url_range.start > range.start {
-                            (self.handle_warning)(Warning::ExpectedBefore {
-                                should_after: range.clone(),
+                            (self.handle_warning)(Warning::ExpectedUrlBefore {
                                 range: url_range.clone(),
+                                when: lexer.slice(range.start, url_range.end)?,
                             });
                             self.scope = Scope::TopLevel;
                             return Some(());
@@ -595,9 +609,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 if let Some(layer_range) = import_data.layer_range() {
                     if let Some(supports_range) = import_data.supports_range() {
                         if layer_range.start > supports_range.start {
-                            (self.handle_warning)(Warning::ExpectedBefore {
-                                should_after: supports_range.clone(),
+                            (self.handle_warning)(Warning::ExpectedLayerBefore {
                                 range: layer_range.clone(),
+                                when: lexer.slice(supports_range.start, layer_range.end)?,
                             });
                             self.scope = Scope::TopLevel;
                             return Some(());
@@ -623,7 +637,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
                 self.scope = Scope::TopLevel;
             }
             Scope::InBlock => {
-                // TODO: css modules
+                if self.mode_data.is_some() {
+                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                }
             }
             _ => {}
         }
@@ -636,7 +652,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
             if name == "supports" {
-                import_data.supports = ImportDataSupports::InSupports { start };
+                import_data.supports = ImportDataSupports::InSupports;
             }
         }
 
@@ -644,7 +660,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
             return Some(());
         };
         if mode_data.is_local_mode() && name == "var" {
-            self.lex_local_var(lexer, start)?;
+            self.lex_local_var(lexer)?;
         }
         Some(())
     }
@@ -753,40 +769,39 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn left_curly_bracket(&mut self, _: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
                 self.scope = Scope::InBlock;
                 self.block_nesting_level = 1;
-                // if self.allow_mode_switch {
-                //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                // }
+                if self.mode_data.is_some() {
+                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                }
             }
             Scope::InBlock => {
                 self.block_nesting_level += 1;
-                // if self.allow_mode_switch {
-                //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                // }
+                if self.mode_data.is_some() {
+                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                }
             }
             _ => {}
         }
         Some(())
     }
 
-    fn right_curly_bracket(&mut self, _: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock) {
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
-                // TODO: if isLocalMode
                 self.scope = Scope::TopLevel;
-                // if self.allow_mode_switch {
-                //     self.is_next_rule_prelude = true;
-                // }
+                if let Some(mode_data) = &mut self.mode_data {
+                    self.is_next_rule_prelude = true;
+                    mode_data.set_none();
+                }
+            } else if self.mode_data.is_some() {
+                self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
-            // else if self.allow_mode_switch {
-            //     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-            // }
         }
         Some(())
     }
@@ -833,7 +848,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
             return Some(());
         }
         if matches!(self.scope, Scope::TopLevel) && name == ":export" {
-            self.lex_icss_export(lexer, start)?;
+            self.lex_icss_export(lexer)?;
             (self.handle_dependency)(Dependency::Replace {
                 content: "",
                 range: Range::new(start, lexer.cur_pos()?),

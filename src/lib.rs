@@ -14,14 +14,14 @@ pub use lexer::Visitor;
 pub fn lex_css_dependencies<'s>(
     input: &'s str,
     handle_dependency: impl FnMut(Dependency<'s>),
-    handle_warning: impl FnMut(Warning),
+    handle_warning: impl FnMut(Warning<'s>),
 ) {
     let mut lexer = Lexer::from(input);
     let mut visitor = LexDependencies::new(handle_dependency, handle_warning, None);
     lexer.lex(&mut visitor);
 }
 
-pub fn collect_css_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
+pub fn collect_css_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {
     let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
     lex_css_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
@@ -31,7 +31,7 @@ pub fn collect_css_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warnin
 pub fn lex_css_modules_dependencies<'s>(
     input: &'s str,
     handle_dependency: impl FnMut(Dependency<'s>),
-    handle_warning: impl FnMut(Warning),
+    handle_warning: impl FnMut(Warning<'s>),
 ) {
     let mut lexer = Lexer::from(input);
     let mut visitor = LexDependencies::new(
@@ -42,7 +42,7 @@ pub fn lex_css_modules_dependencies<'s>(
     lexer.lex(&mut visitor);
 }
 
-pub fn collect_css_modules_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
+pub fn collect_css_modules_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {
     let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
     lex_css_modules_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
@@ -52,7 +52,7 @@ pub fn collect_css_modules_dependencies(input: &str) -> (Vec<Dependency<'_>>, Ve
 pub fn lex_css_modules_global_dependencies<'s>(
     input: &'s str,
     handle_dependency: impl FnMut(Dependency<'s>),
-    handle_warning: impl FnMut(Warning),
+    handle_warning: impl FnMut(Warning<'s>),
 ) {
     let mut lexer = Lexer::from(input);
     let mut visitor = LexDependencies::new(
@@ -63,7 +63,9 @@ pub fn lex_css_modules_global_dependencies<'s>(
     lexer.lex(&mut visitor);
 }
 
-pub fn collect_css_modules_global_dependencies(input: &str) -> (Vec<Dependency<'_>>, Vec<Warning>) {
+pub fn collect_css_modules_global_dependencies(
+    input: &str,
+) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {
     let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
     lex_css_modules_global_dependencies(input, |v| dependencies.push(v), |v| warnings.push(v));
