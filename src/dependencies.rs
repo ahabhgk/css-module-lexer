@@ -215,6 +215,10 @@ pub enum Dependency<'s> {
         name: &'s str,
         range: Range,
     },
+    LocalPropertyDecl {
+        name: &'s str,
+        range: Range,
+    },
     ICSSExport {
         prop: &'s str,
         value: &'s str,
@@ -344,10 +348,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;
         if c != C_LEFT_CURLY {
-            let end = lexer.peek_pos()?;
             self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected '{' during parsing of ':export'",
-                range: Range::new(lexer.cur_pos()?, end),
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
             });
             return Some(());
         }
@@ -360,10 +363,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let prop_end = lexer.cur_pos()?;
             lexer.consume_white_space_and_comments()?;
             if lexer.cur()? != C_COLON {
-                let end = lexer.peek_pos()?;
                 self.handle_warning.handle_warning(Warning::Unexpected {
                     message: "Expected ':' during parsing of ':export'",
-                    range: Range::new(lexer.cur_pos()?, end),
+                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
                 });
                 return Some(());
             }
@@ -392,22 +394,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn lex_local_var(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
-        let minus_start = lexer.cur_pos()?;
+        let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
-            let end = lexer.peek2_pos()?;
             self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected starts with '--' during parsing of CSS variable name",
-                range: Range::new(minus_start, end),
+                range: Range::new(start, lexer.peek2_pos()?),
             });
             return Some(());
         }
         lexer.consume_ident_sequence()?;
-        let start = minus_start + 2;
+        let name_start = start + 2;
         let end = lexer.cur_pos()?;
         self.handle_dependency
             .handle_dependency(Dependency::LocalVar {
-                name: lexer.slice(start, end)?,
-                range: Range::new(minus_start, end),
+                name: lexer.slice(name_start, end)?,
+                range: Range::new(start, end),
             });
         Some(())
     }
@@ -421,10 +422,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     ) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_COLON {
-            let end = lexer.peek_pos()?;
             self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected ':' during parsing of local CSS variable declaration",
-                range: Range::new(lexer.cur_pos()?, end),
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
             });
             return Some(());
         }
@@ -434,6 +434,35 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 name,
                 range: Range::new(start, end),
             });
+        Some(())
+    }
+
+    fn lex_local_property_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        let start = lexer.cur_pos()?;
+        if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected starts with '--' during parsing of @property name",
+                range: Range::new(start, lexer.peek2_pos()?),
+            });
+            return Some(());
+        }
+        lexer.consume_ident_sequence()?;
+        let name_start = start + 2;
+        let end = lexer.cur_pos()?;
+        self.handle_dependency
+            .handle_dependency(Dependency::LocalPropertyDecl {
+                name: lexer.slice(name_start, end)?,
+                range: Range::new(start, end),
+            });
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_LEFT_CURLY {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected '{' during parsing of @property",
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+            });
+            return Some(());
+        }
         Some(())
     }
 }
@@ -526,7 +555,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn at_keyword(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
             self.scope = Scope::AtNamespaceInvalid;
@@ -550,6 +579,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             || name == "@container"
         {
             self.is_next_rule_prelude = true;
+        } else if self.mode_data.is_some() && name == "@property" {
+            self.lex_local_property_decl(lexer)?;
         }
         // else if self.allow_mode_switch {
         //     self.is_next_rule_prelude = false;

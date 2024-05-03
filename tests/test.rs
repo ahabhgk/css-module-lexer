@@ -216,12 +216,7 @@ fn assert_local_ident_dependency(input: &str, dependency: &Dependency, name: &st
     assert_eq!(slice_range(input, range).unwrap(), name);
 }
 
-fn assert_local_var_dependency(
-    input: &str,
-    dependency: &Dependency,
-    name: &str,
-    range_content: &str,
-) {
+fn assert_local_var_dependency(input: &str, dependency: &Dependency, name: &str) {
     let Dependency::LocalVar {
         name: actual_name,
         range,
@@ -230,15 +225,10 @@ fn assert_local_var_dependency(
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(slice_range(input, range).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), format!("--{}", name));
 }
 
-fn assert_local_var_decl_dependency(
-    input: &str,
-    dependency: &Dependency,
-    name: &str,
-    range_content: &str,
-) {
+fn assert_local_var_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
     let Dependency::LocalVarDecl {
         range,
         name: actual_name,
@@ -247,7 +237,19 @@ fn assert_local_var_decl_dependency(
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(slice_range(input, range).unwrap(), range_content);
+    assert_eq!(slice_range(input, range).unwrap(), format!("--{}", name));
+}
+
+fn assert_local_property_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalPropertyDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(slice_range(input, range).unwrap(), format!("--{}", name));
 }
 
 fn assert_replace_dependency(
@@ -835,8 +837,8 @@ fn css_modules_local_var() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_ident_dependency(input, &dependencies[0], "vars");
-    assert_local_var_dependency(input, &dependencies[1], "local-color", "--local-color");
-    assert_local_var_decl_dependency(input, &dependencies[2], "local-color", "--local-color");
+    assert_local_var_dependency(input, &dependencies[1], "local-color");
+    assert_local_var_decl_dependency(input, &dependencies[2], "local-color");
     assert_local_ident_dependency(input, &dependencies[3], "globalVars");
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
     dbg!(dependencies, warnings);
@@ -847,12 +849,7 @@ fn css_modules_local_var_minified_1() {
     let input = "body{margin:0;font-family:var(--bs-body-font-family);}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_var_dependency(
-        input,
-        &dependencies[0],
-        "bs-body-font-family",
-        "--bs-body-font-family",
-    );
+    assert_local_var_dependency(input, &dependencies[0], "bs-body-font-family");
 }
 
 #[test]
@@ -861,30 +858,29 @@ fn css_modules_local_var_minified_2() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_ident_dependency(input, &dependencies[0], "table-primary");
-    assert_local_var_decl_dependency(
-        input,
-        &dependencies[1],
-        "bs-table-color",
-        "--bs-table-color",
-    );
-    assert_local_var_decl_dependency(
-        input,
-        &dependencies[2],
-        "bs-table-border-color",
-        "--bs-table-border-color",
-    );
-    assert_local_var_dependency(
-        input,
-        &dependencies[3],
-        "bs-table-color",
-        "--bs-table-color",
-    );
-    assert_local_var_dependency(
-        input,
-        &dependencies[4],
-        "bs-table-border-color",
-        "--bs-table-border-color",
-    );
+    assert_local_var_decl_dependency(input, &dependencies[1], "bs-table-color");
+    assert_local_var_decl_dependency(input, &dependencies[2], "bs-table-border-color");
+    assert_local_var_dependency(input, &dependencies[3], "bs-table-color");
+    assert_local_var_dependency(input, &dependencies[4], "bs-table-border-color");
+}
+
+#[test]
+fn css_modules_property() {
+    let input = indoc! {r#"
+        @property --my-color {
+            syntax: "<color>";
+            inherits: false;
+            initial-value: #c0ffee;
+        }
+        .class {
+            color: var(--my-color);
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
+    assert_local_ident_dependency(input, &dependencies[1], "class");
+    assert_local_var_dependency(input, &dependencies[2], "my-color");
 }
 
 #[test]
