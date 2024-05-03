@@ -777,10 +777,13 @@ pub enum Dependency<'s> {
         content: &'s str,
         range: Range,
     },
-    Local {
+    LocalIdent {
         name: &'s str,
         range: Range,
-        kind: LocalKind,
+    },
+    LocalVar {
+        name: &'s str,
+        range: Range,
     },
     ICSSExport {
         prop: &'s str,
@@ -792,12 +795,6 @@ pub enum Dependency<'s> {
 pub enum UrlRangeKind {
     Function,
     String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LocalKind {
-    Ident,
-    Var,
 }
 
 #[derive(Debug, Clone)]
@@ -979,6 +976,49 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
             });
         }
         lexer.consume()?;
+        Some(())
+    }
+
+    pub fn lex_local_var(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        lexer.eat_white_space_and_comments()?;
+        let minus_start = lexer.cur_pos()?;
+        if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
+            let end = lexer.peek2_pos()?;
+            (self.handle_warning)(Warning::Unexpected {
+                unexpected: Range::new(minus_start, end),
+                range: Range::new(start, end),
+            });
+            return Some(());
+        }
+        lexer.consume()?;
+        lexer.consume()?;
+        let start = lexer.cur_pos()?;
+        loop {
+            let c = lexer.cur()?;
+            if c == C_RIGHT_PARENTHESIS
+                || c == C_COMMA
+                || c == C_SEMICOLON
+                || c == C_RIGHT_CURLY
+                || (c == C_SOLIDUS && lexer.peek()? == C_ASTERISK)
+            {
+                break;
+            }
+            lexer.consume()?;
+        }
+        let end = lexer.cur_pos()?;
+        lexer.eat_white_space_and_comments()?;
+        if lexer.cur()? != C_RIGHT_PARENTHESIS {
+            let end = lexer.peek_pos()?;
+            (self.handle_warning)(Warning::Unexpected {
+                unexpected: Range::new(lexer.cur_pos()?, end),
+                range: Range::new(start, end),
+            });
+            return Some(());
+        }
+        (self.handle_dependency)(Dependency::LocalVar {
+            name: lexer.slice(start, end)?.trim_end_matches(is_white_space),
+            range: Range::new(minus_start, end),
+        });
         Some(())
     }
 }
@@ -1191,7 +1231,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end - 1)?.to_ascii_lowercase();
         self.balanced.push(BalancedItem::new(&name, start, end));
 
@@ -1199,6 +1239,13 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
             if name == "supports" {
                 import_data.supports = ImportDataSupports::InSupports { start };
             }
+        }
+
+        let Some(mode_data) = &self.mode_data else {
+            return Some(());
+        };
+        if mode_data.is_local_mode() && name == "var" {
+            self.lex_local_var(lexer, start)?;
         }
         Some(())
     }
@@ -1277,10 +1324,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         if mode_data.is_local_mode() {
             let start = start + 1;
             let name = lexer.slice(start, end)?;
-            (self.handle_dependency)(Dependency::Local {
+            (self.handle_dependency)(Dependency::LocalIdent {
                 name,
                 range: Range::new(start, end),
-                kind: LocalKind::Ident,
             })
         }
         Some(())
@@ -1293,10 +1339,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         if mode_data.is_local_mode() {
             let start = start + 1;
             let name = lexer.slice(start, end)?;
-            (self.handle_dependency)(Dependency::Local {
+            (self.handle_dependency)(Dependency::LocalIdent {
                 name,
                 range: Range::new(start, end),
-                kind: LocalKind::Ident,
             })
         }
         Some(())

@@ -4,7 +4,7 @@ Lexes CSS modules returning their dependencies metadata.
 
 - Blazing fast: no parsing, no AST creation, only lexing, minimal heap allocation.
 - Error tolerant: uninterrupted by bad syntax, no errors, only warnings.
-- Syntax rich: CSS, CSS Modules, and iCSS.
+- Syntax rich: supports CSS, CSS Modules, and iCSS.
 
 ## Roadmap
 
@@ -14,6 +14,7 @@ Lexes CSS modules returning their dependencies metadata.
 - [ ] CSS Modules
   - [x] :local, :local(), :global, :global()
   - [x] local scope by default
+  - [ ] nested class
   - [ ] var(), @property
   - [ ] @keyframe
   - [ ] more warnings

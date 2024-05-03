@@ -1,6 +1,6 @@
 use css_module_lexer::{
-    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, LocalKind, Pos,
-    Range, UrlRangeKind, Visitor, Warning,
+    collect_css_dependencies, collect_css_modules_dependencies, Dependency, Lexer, Pos, Range,
+    UrlRangeKind, Visitor, Warning,
 };
 use indoc::indoc;
 
@@ -190,23 +190,37 @@ fn assert_import_dependency(
     assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
-fn assert_local_dependency(
+fn assert_local_ident_dependency(
     input: &str,
     dependency: &Dependency,
     name: &str,
-    kind: LocalKind,
     range_content: &str,
 ) {
-    let Dependency::Local {
+    let Dependency::LocalIdent {
         name: actual_name,
         range,
-        kind: actual_kind,
     } = dependency
     else {
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(*actual_kind, kind);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
+}
+
+fn assert_local_var_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    range_content: &str,
+) {
+    let Dependency::LocalVar {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
     assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
@@ -751,34 +765,47 @@ fn css_modules_pseudo1() {
     let input = ".localA :global .global-b .global-c :local(.localD.localE) .global-d";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_dependency(
-        input,
-        &dependencies[0],
-        "localA",
-        LocalKind::Ident,
-        "localA",
-    );
+    assert_local_ident_dependency(input, &dependencies[0], "localA", "localA");
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":local(");
-    assert_local_dependency(
-        input,
-        &dependencies[3],
-        "localD",
-        LocalKind::Ident,
-        "localD",
-    );
-    assert_local_dependency(
-        input,
-        &dependencies[4],
-        "localE",
-        LocalKind::Ident,
-        "localE",
-    );
+    assert_local_ident_dependency(input, &dependencies[3], "localD", "localD");
+    assert_local_ident_dependency(input, &dependencies[4], "localE", "localE");
     assert_replace_dependency(input, &dependencies[5], "", ")");
 }
 
 #[test]
-fn icss_export_unexpected1() {
+fn css_modules_local_var_unexpected() {
+    let input = indoc! {r#"
+        .vars {
+            color: var(local-color);
+        }
+    "#};
+    let (_, warnings) = collect_css_modules_dependencies(input);
+    assert_warning(input, &warnings[0], "var(lo");
+}
+
+#[test]
+fn css_modules_local_var() {
+    let input = indoc! {r#"
+        .vars {
+            color: var(--local-color);
+            --local-color: red;
+        }
+        .globalVars :global {
+            color: var(--global-color);
+            --global-color: red;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "vars", "vars");
+    assert_local_var_dependency(input, &dependencies[1], "local-color", "--local-color");
+    assert_local_ident_dependency(input, &dependencies[2], "globalVars", "globalVars");
+    assert_replace_dependency(input, &dependencies[3], "", ":global ");
+}
+
+#[test]
+fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert_warning(input, &warnings[0], "/sl/ash;");
