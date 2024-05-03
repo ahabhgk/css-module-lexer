@@ -186,7 +186,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_comments(&mut self) -> Option<()> {
+    pub fn consume_comments(&mut self) -> Option<()> {
         if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
             while let Some(c) = self.consume() {
                 if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
@@ -199,17 +199,17 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_delim(&mut self) -> Option<()> {
+    pub fn consume_delim(&mut self) -> Option<()> {
         self.consume()?;
         Some(())
     }
 
-    fn consume_space(&mut self) -> Option<()> {
+    pub fn consume_space(&mut self) -> Option<()> {
         while is_white_space(self.consume()?) {}
         Some(())
     }
 
-    fn consume_numeric_token(&mut self) -> Option<()> {
+    pub fn consume_numeric_token(&mut self) -> Option<()> {
         self.consume_number()?;
         let c = self.cur()?;
         if start_ident_sequence(c, self.peek()?, self.peek2()?) {
@@ -221,7 +221,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_number(&mut self) -> Option<()> {
+    pub fn consume_number(&mut self) -> Option<()> {
         while matches!(self.consume(), Some(c) if is_digit(c)) {}
         if self.cur()? == C_FULL_STOP && is_digit(self.peek()?) {
             self.consume()?;
@@ -250,7 +250,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_ident_sequence(&mut self) -> Option<()> {
+    pub fn consume_ident_sequence(&mut self) -> Option<()> {
         loop {
             let c = self.cur()?;
             if maybe_valid_escape(c) {
@@ -264,7 +264,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_escaped(&mut self) -> Option<()> {
+    pub fn consume_escaped(&mut self) -> Option<()> {
         if is_hex_digit(self.cur()?) {
             for _ in 1..5 {
                 if !is_hex_digit(self.consume()?) {
@@ -280,7 +280,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_ident_like<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_ident_like<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         self.consume_ident_sequence()?;
         let peek_pos = self.peek_pos()?;
@@ -302,7 +302,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_url<T: Visitor<'s>>(
+    pub fn consume_url<T: Visitor<'s>>(
         self: &mut Lexer<'s>,
         visitor: &mut T,
         start: Pos,
@@ -333,7 +333,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
+    pub fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
         let start = self.cur_pos()?;
         while let Some(c) = self.consume() {
             if c == end {
@@ -355,7 +355,7 @@ impl<'s> Lexer<'s> {
         visitor.string(self, start, self.cur_pos()?)
     }
 
-    fn consume_number_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_number_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c2 = self.peek()?;
         if is_ident(c2) || are_valid_escape(c2, self.peek2()?) {
             let start = self.cur_pos()?;
@@ -370,19 +370,19 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_left_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_left_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.left_parenthesis(self, end - 1, end)
     }
 
-    fn consume_right_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_right_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.right_parenthesis(self, end - 1, end)
     }
 
-    fn consume_plus_sign(&mut self) -> Option<()> {
+    pub fn consume_plus_sign(&mut self) -> Option<()> {
         if start_number(self.cur()?, self.peek()?, self.peek2()?) {
             self.consume_numeric_token()
         } else {
@@ -390,13 +390,13 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_comma<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_comma<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.comma(self, end - 1, end)
     }
 
-    fn consume_minus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_minus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -413,7 +413,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_full_stop<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_full_stop<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c = self.cur()?;
         let c2 = self.peek()?;
         let c3 = self.peek2()?;
@@ -429,7 +429,7 @@ impl<'s> Lexer<'s> {
         visitor.class(self, start, self.cur_pos()?)
     }
 
-    fn consume_potential_pseudo<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_potential_pseudo<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
         if !visitor.is_selector(self)? || !start_ident_sequence(c, self.peek()?, self.peek2()?) {
@@ -444,13 +444,13 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_semicolon<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_semicolon<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.semicolon(self, end - 1, end)
     }
 
-    fn consume_less_than_sign(&mut self) -> Option<()> {
+    pub fn consume_less_than_sign(&mut self) -> Option<()> {
         if self.consume()? == '!' && self.peek()? == '-' && self.peek2()? == '-' {
             self.consume()?;
             self.consume()?;
@@ -459,7 +459,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_at_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_at_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let start = self.cur_pos()?;
         let c = self.consume()?;
         if start_ident_sequence(c, self.peek()?, self.peek2()?) {
@@ -469,7 +469,7 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    fn consume_reverse_solidus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_reverse_solidus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         if are_valid_escape(self.cur()?, self.peek()?) {
             self.consume_ident_like(visitor)
         } else {
@@ -477,13 +477,13 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn consume_left_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_left_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.left_curly_bracket(self, end - 1, end)
     }
 
-    fn consume_right_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+    pub fn consume_right_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume()?;
         let end = self.cur_pos()?;
         visitor.right_curly_bracket(self, end - 1, end)
@@ -491,7 +491,7 @@ impl<'s> Lexer<'s> {
 }
 
 impl Lexer<'_> {
-    pub fn eat_white_space_and_comments(&mut self) -> Option<()> {
+    pub fn consume_white_space_and_comments(&mut self) -> Option<()> {
         loop {
             self.consume_comments()?;
             if is_white_space(self.cur()?) {

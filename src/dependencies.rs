@@ -2,7 +2,6 @@ use crate::lexer::is_ident_start;
 use crate::lexer::is_white_space;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
-use crate::lexer::C_COMMA;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_RIGHT_CURLY;
@@ -209,6 +208,11 @@ pub enum Dependency<'s> {
         name: &'s str,
         range: Range,
     },
+    LocalVarDecl {
+        name_range: Range,
+        name: &'s str,
+        value: &'s str,
+    },
     ICSSExport {
         prop: &'s str,
         value: &'s str,
@@ -261,9 +265,9 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         }
     }
 
-    pub fn is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
+    fn is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
         let mut lexer = lexer.clone();
-        lexer.eat_white_space_and_comments()?;
+        lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;
         if c == C_LEFT_CURLY {
             return Some(false);
@@ -271,16 +275,42 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(!is_ident_start(c))
     }
 
-    pub fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
+    fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
         let mut media_lexer = Lexer::from(media);
         media_lexer.consume()?;
-        media_lexer.eat_white_space_and_comments()?;
+        media_lexer.consume_white_space_and_comments()?;
         Some(media)
     }
 
-    pub fn lex_export(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
-        lexer.eat_white_space_and_comments()?;
+    fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
+        loop {
+            let c = lexer.cur()?;
+            if c == C_COLON
+                || c == C_RIGHT_CURLY
+                || c == C_SEMICOLON
+                || (c == C_SOLIDUS && lexer.peek()? == C_ASTERISK)
+            {
+                break;
+            }
+            lexer.consume()?;
+        }
+        Some(())
+    }
+
+    fn consume_icss_export_value(&self, lexer: &mut Lexer<'s>) -> Option<()> {
+        loop {
+            let c = lexer.cur()?;
+            if c == C_RIGHT_CURLY || c == C_SEMICOLON {
+                break;
+            }
+            lexer.consume()?;
+        }
+        Some(())
+    }
+
+    fn lex_icss_export(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;
         if c != C_LEFT_CURLY {
             let end = lexer.peek_pos()?;
@@ -291,23 +321,13 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
             return Some(());
         }
         lexer.consume()?;
-        lexer.eat_white_space_and_comments()?;
+        lexer.consume_white_space_and_comments()?;
         while lexer.cur()? != C_RIGHT_CURLY {
-            lexer.eat_white_space_and_comments()?;
+            lexer.consume_white_space_and_comments()?;
             let prop_start = lexer.cur_pos()?;
-            loop {
-                let c = lexer.cur()?;
-                if c == C_COLON
-                    || c == C_RIGHT_CURLY
-                    || c == C_SEMICOLON
-                    || (c == C_SOLIDUS && lexer.peek()? == C_ASTERISK)
-                {
-                    break;
-                }
-                lexer.consume()?;
-            }
+            self.consume_icss_export_prop(lexer)?;
             let prop_end = lexer.cur_pos()?;
-            lexer.eat_white_space_and_comments()?;
+            lexer.consume_white_space_and_comments()?;
             if lexer.cur()? != C_COLON {
                 let end = lexer.peek_pos()?;
                 (self.handle_warning)(Warning::Unexpected {
@@ -317,19 +337,13 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
                 return Some(());
             }
             lexer.consume()?;
-            lexer.eat_white_space_and_comments()?;
+            lexer.consume_white_space_and_comments()?;
             let value_start = lexer.cur_pos()?;
-            loop {
-                let c = lexer.cur()?;
-                if c == C_RIGHT_CURLY || c == C_SEMICOLON {
-                    break;
-                }
-                lexer.consume()?;
-            }
+            self.consume_icss_export_value(lexer)?;
             let value_end = lexer.cur_pos()?;
             if lexer.cur()? == C_SEMICOLON {
                 lexer.consume()?;
-                lexer.eat_white_space_and_comments()?;
+                lexer.consume_white_space_and_comments()?;
             }
             (self.handle_dependency)(Dependency::ICSSExport {
                 prop: lexer
@@ -344,8 +358,8 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         Some(())
     }
 
-    pub fn lex_local_var(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
-        lexer.eat_white_space_and_comments()?;
+    fn lex_local_var(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
         let minus_start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             let end = lexer.peek2_pos()?;
@@ -355,23 +369,10 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
             });
             return Some(());
         }
-        lexer.consume()?;
-        lexer.consume()?;
-        let start = lexer.cur_pos()?;
-        loop {
-            let c = lexer.cur()?;
-            if c == C_RIGHT_PARENTHESIS
-                || c == C_COMMA
-                || c == C_SEMICOLON
-                || c == C_RIGHT_CURLY
-                || (c == C_SOLIDUS && lexer.peek()? == C_ASTERISK)
-            {
-                break;
-            }
-            lexer.consume()?;
-        }
+        lexer.consume_ident_sequence()?;
+        let start = minus_start + 2;
         let end = lexer.cur_pos()?;
-        lexer.eat_white_space_and_comments()?;
+        lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_RIGHT_PARENTHESIS {
             let end = lexer.peek_pos()?;
             (self.handle_warning)(Warning::Unexpected {
@@ -381,8 +382,41 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
             return Some(());
         }
         (self.handle_dependency)(Dependency::LocalVar {
-            name: lexer.slice(start, end)?.trim_end_matches(is_white_space),
+            name: lexer.slice(start, end)?,
             range: Range::new(minus_start, end),
+        });
+        Some(())
+    }
+
+    fn lex_local_var_decl(
+        &mut self,
+        lexer: &mut Lexer<'s>,
+        name: &'s str,
+        start: Pos,
+        end: Pos,
+    ) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_COLON {
+            let end = lexer.peek_pos()?;
+            (self.handle_warning)(Warning::Unexpected {
+                unexpected: Range::new(lexer.cur_pos()?, end),
+                range: Range::new(start, end),
+            });
+            return Some(());
+        }
+        lexer.consume()?;
+        lexer.consume_white_space_and_comments()?;
+        let value_start = lexer.cur_pos()?;
+        self.consume_icss_export_value(lexer)?;
+        let value_end = lexer.cur_pos()?;
+        if lexer.cur()? == C_SEMICOLON {
+            lexer.consume()?;
+            lexer.consume_white_space_and_comments()?;
+        }
+        (self.handle_dependency)(Dependency::LocalVarDecl {
+            name_range: Range::new(start, end),
+            name,
+            value: lexer.slice(value_start, value_end)?,
         });
         Some(())
     }
@@ -664,10 +698,17 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         Some(())
     }
 
-    fn ident(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         match self.scope {
             Scope::InBlock => {
-                // TODO: css modules
+                let Some(mode_data) = &mut self.mode_data else {
+                    return Some(());
+                };
+                if mode_data.is_local_mode() {
+                    if let Some(name) = lexer.slice(start, end)?.strip_prefix("--") {
+                        self.lex_local_var_decl(lexer, name, start, end)?;
+                    }
+                }
             }
             Scope::InAtImport(ref mut import_data) => {
                 if lexer.slice(start, end)?.to_ascii_lowercase() == "layer" {
@@ -777,7 +818,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
         };
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == ":global" || name == ":local" {
-            lexer.eat_white_space_and_comments()?;
+            lexer.consume_white_space_and_comments()?;
             let end2 = lexer.cur_pos()?;
             let comments = lexer.slice(end, end2)?.trim_matches(is_white_space);
             (self.handle_dependency)(Dependency::Replace {
@@ -792,7 +833,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> Visitor<'s> for LexDepende
             return Some(());
         }
         if matches!(self.scope, Scope::TopLevel) && name == ":export" {
-            self.lex_export(lexer, start)?;
+            self.lex_icss_export(lexer, start)?;
             (self.handle_dependency)(Dependency::Replace {
                 content: "",
                 range: Range::new(start, lexer.cur_pos()?),

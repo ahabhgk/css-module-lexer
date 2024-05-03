@@ -224,6 +224,26 @@ fn assert_local_var_dependency(
     assert_eq!(slice_range(input, range).unwrap(), range_content);
 }
 
+fn assert_local_var_decl_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    value: &str,
+    range_content: &str,
+) {
+    let Dependency::LocalVarDecl {
+        name_range,
+        name: actual_name,
+        value: actual_value,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(*actual_value, value);
+    assert_eq!(slice_range(input, name_range).unwrap(), range_content);
+}
+
 fn assert_replace_dependency(
     input: &str,
     dependency: &Dependency,
@@ -800,8 +820,15 @@ fn css_modules_local_var() {
     assert!(warnings.is_empty());
     assert_local_ident_dependency(input, &dependencies[0], "vars", "vars");
     assert_local_var_dependency(input, &dependencies[1], "local-color", "--local-color");
-    assert_local_ident_dependency(input, &dependencies[2], "globalVars", "globalVars");
-    assert_replace_dependency(input, &dependencies[3], "", ":global ");
+    assert_local_var_decl_dependency(
+        input,
+        &dependencies[2],
+        "local-color",
+        "red",
+        "--local-color",
+    );
+    assert_local_ident_dependency(input, &dependencies[3], "globalVars", "globalVars");
+    assert_replace_dependency(input, &dependencies[4], "", ":global ");
 }
 
 #[test]
