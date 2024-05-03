@@ -265,7 +265,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning)> LexDependencies<'s, D, W> 
         }
     }
 
-    fn is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
+    fn _is_next_nested_syntax(&self, lexer: &Lexer) -> Option<bool> {
         let mut lexer = lexer.clone();
         lexer.consume_white_space_and_comments()?;
         let c = lexer.cur()?;

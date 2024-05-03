@@ -262,7 +262,10 @@ fn assert_replace_dependency(
 }
 
 fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &str, value: &str) {
-    let Dependency::ICSSExport { prop: actual_prop, value: actual_value } = dependency
+    let Dependency::ICSSExport {
+        prop: actual_prop,
+        value: actual_value,
+    } = dependency
     else {
         return assert!(false);
     };
