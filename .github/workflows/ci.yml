@@ -7,13 +7,15 @@ on:
   pull_request:
 
 jobs:
-  benchmarks:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup
         uses: moonrepo/setup-rust@v1
+        with:
+          profile: default
 
       - name: Check
         run: cargo check --locked

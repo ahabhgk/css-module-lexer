@@ -18,6 +18,8 @@ jobs:
         with:
           cache-target: release
           bins: cargo-codspeed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         run: cargo codspeed build
