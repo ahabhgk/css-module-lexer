@@ -9,6 +9,8 @@ use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_RIGHT_CURLY;
 use crate::lexer::C_SEMICOLON;
 use crate::lexer::C_SOLIDUS;
+use crate::HandleDependency;
+use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
 use crate::Visitor;
@@ -274,7 +276,7 @@ pub struct LexDependencies<'s, D, W> {
     handle_warning: W,
 }
 
-impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D, W> {
+impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W> {
     pub fn new(
         handle_dependency: D,
         handle_warning: W,
@@ -343,7 +345,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
         let c = lexer.cur()?;
         if c != C_LEFT_CURLY {
             let end = lexer.peek_pos()?;
-            (self.handle_warning)(Warning::Unexpected {
+            self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected '{' during parsing of ':export'",
                 range: Range::new(lexer.cur_pos()?, end),
             });
@@ -359,7 +361,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
             lexer.consume_white_space_and_comments()?;
             if lexer.cur()? != C_COLON {
                 let end = lexer.peek_pos()?;
-                (self.handle_warning)(Warning::Unexpected {
+                self.handle_warning.handle_warning(Warning::Unexpected {
                     message: "Expected ':' during parsing of ':export'",
                     range: Range::new(lexer.cur_pos()?, end),
                 });
@@ -374,14 +376,15 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
                 lexer.consume()?;
                 lexer.consume_white_space_and_comments()?;
             }
-            (self.handle_dependency)(Dependency::ICSSExport {
-                prop: lexer
-                    .slice(prop_start, prop_end)?
-                    .trim_end_matches(is_white_space),
-                value: lexer
-                    .slice(value_start, value_end)?
-                    .trim_end_matches(is_white_space),
-            });
+            self.handle_dependency
+                .handle_dependency(Dependency::ICSSExport {
+                    prop: lexer
+                        .slice(prop_start, prop_end)?
+                        .trim_end_matches(is_white_space),
+                    value: lexer
+                        .slice(value_start, value_end)?
+                        .trim_end_matches(is_white_space),
+                });
         }
         lexer.consume()?;
         Some(())
@@ -392,7 +395,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
         let minus_start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             let end = lexer.peek2_pos()?;
-            (self.handle_warning)(Warning::Unexpected {
+            self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected starts with '--' during parsing of CSS variable name",
                 range: Range::new(minus_start, end),
             });
@@ -401,10 +404,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
         lexer.consume_ident_sequence()?;
         let start = minus_start + 2;
         let end = lexer.cur_pos()?;
-        (self.handle_dependency)(Dependency::LocalVar {
-            name: lexer.slice(start, end)?,
-            range: Range::new(minus_start, end),
-        });
+        self.handle_dependency
+            .handle_dependency(Dependency::LocalVar {
+                name: lexer.slice(start, end)?,
+                range: Range::new(minus_start, end),
+            });
         Some(())
     }
 
@@ -418,24 +422,23 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> LexDependencies<'s, D,
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_COLON {
             let end = lexer.peek_pos()?;
-            (self.handle_warning)(Warning::Unexpected {
+            self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected ':' during parsing of local CSS variable declaration",
                 range: Range::new(lexer.cur_pos()?, end),
             });
             return Some(());
         }
         lexer.consume()?;
-        (self.handle_dependency)(Dependency::LocalVarDecl {
-            name,
-            range: Range::new(start, end),
-        });
+        self.handle_dependency
+            .handle_dependency(Dependency::LocalVarDecl {
+                name,
+                range: Range::new(start, end),
+            });
         Some(())
     }
 }
 
-impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
-    for LexDependencies<'s, D, W>
-{
+impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDependencies<'s, D, W> {
     fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
         Some(self.is_next_rule_prelude)
     }
@@ -455,7 +458,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     return Some(());
                 }
                 if import_data.url.is_some() {
-                    (self.handle_warning)(Warning::DuplicateUrl {
+                    self.handle_warning.handle_warning(Warning::DuplicateUrl {
                         range: Range::new(import_data.start, end),
                         when: lexer.slice(import_data.start, end)?,
                     });
@@ -464,7 +467,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
             }
-            Scope::InBlock => (self.handle_dependency)(Dependency::Url {
+            Scope::InBlock => self.handle_dependency.handle_dependency(Dependency::Url {
                 request: value,
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
@@ -488,7 +491,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                 }
 
                 if inside_url && import_data.url.is_some() {
-                    (self.handle_warning)(Warning::DuplicateUrl {
+                    self.handle_warning.handle_warning(Warning::DuplicateUrl {
                         range: Range::new(import_data.start, end),
                         when: lexer.slice(import_data.start, end)?,
                     });
@@ -512,7 +515,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     _ => return Some(()),
                 };
                 let value = lexer.slice(start + 1, end - 1)?;
-                (self.handle_dependency)(Dependency::Url {
+                self.handle_dependency.handle_dependency(Dependency::Url {
                     request: value,
                     range: Range::new(start, end),
                     kind,
@@ -527,15 +530,17 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == "@namespace" {
             self.scope = Scope::AtNamespaceInvalid;
-            (self.handle_warning)(Warning::NamespaceNotSupportedInBundledCss {
-                range: Range::new(start, end),
-            });
+            self.handle_warning
+                .handle_warning(Warning::NamespaceNotSupportedInBundledCss {
+                    range: Range::new(start, end),
+                });
         } else if name == "@import" {
             if !self.allow_import_at_rule {
                 self.scope = Scope::AtImportInvalid;
-                (self.handle_warning)(Warning::NotPrecededAtImport {
-                    range: Range::new(start, end),
-                });
+                self.handle_warning
+                    .handle_warning(Warning::NotPrecededAtImport {
+                        range: Range::new(start, end),
+                    });
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
@@ -556,7 +561,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
-                    (self.handle_warning)(Warning::ExpectedUrl {
+                    self.handle_warning.handle_warning(Warning::ExpectedUrl {
                         range: Range::new(import_data.start, end),
                         when: lexer.slice(import_data.start, end)?,
                     });
@@ -564,7 +569,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     return Some(());
                 };
                 let Some(url_range) = &import_data.url_range else {
-                    (self.handle_warning)(Warning::Unexpected {
+                    self.handle_warning.handle_warning(Warning::Unexpected {
                         message: "Unexpected ';' during parsing of '@import url()'",
                         range: Range::new(start, end),
                     });
@@ -575,10 +580,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     ImportDataLayer::None => None,
                     ImportDataLayer::EndLayer { value, range } => {
                         if url_range.start > range.start {
-                            (self.handle_warning)(Warning::ExpectedUrlBefore {
-                                range: url_range.clone(),
-                                when: lexer.slice(range.start, url_range.end)?,
-                            });
+                            self.handle_warning
+                                .handle_warning(Warning::ExpectedUrlBefore {
+                                    range: url_range.clone(),
+                                    when: lexer.slice(range.start, url_range.end)?,
+                                });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -588,7 +594,7 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                 let supports = match &import_data.supports {
                     ImportDataSupports::None => None,
                     ImportDataSupports::InSupports => {
-                        (self.handle_warning)(Warning::Unexpected {
+                        self.handle_warning.handle_warning(Warning::Unexpected {
                             message: "Unexpected ';' during parsing of 'supports()'",
                             range: Range::new(start, end),
                         });
@@ -596,10 +602,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     }
                     ImportDataSupports::EndSupports { value, range } => {
                         if url_range.start > range.start {
-                            (self.handle_warning)(Warning::ExpectedUrlBefore {
-                                range: url_range.clone(),
-                                when: lexer.slice(range.start, url_range.end)?,
-                            });
+                            self.handle_warning
+                                .handle_warning(Warning::ExpectedUrlBefore {
+                                    range: url_range.clone(),
+                                    when: lexer.slice(range.start, url_range.end)?,
+                                });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -609,10 +616,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                 if let Some(layer_range) = import_data.layer_range() {
                     if let Some(supports_range) = import_data.supports_range() {
                         if layer_range.start > supports_range.start {
-                            (self.handle_warning)(Warning::ExpectedLayerBefore {
-                                range: layer_range.clone(),
-                                when: lexer.slice(supports_range.start, layer_range.end)?,
-                            });
+                            self.handle_warning
+                                .handle_warning(Warning::ExpectedLayerBefore {
+                                    range: layer_range.clone(),
+                                    when: lexer.slice(supports_range.start, layer_range.end)?,
+                                });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -624,13 +632,14 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     .unwrap_or(url_range)
                     .end;
                 let media = self.get_media(lexer, last_end, start);
-                (self.handle_dependency)(Dependency::Import {
-                    request: url,
-                    range: Range::new(import_data.start, end),
-                    layer,
-                    supports,
-                    media,
-                });
+                self.handle_dependency
+                    .handle_dependency(Dependency::Import {
+                        request: url,
+                        range: Range::new(import_data.start, end),
+                        layer,
+                        supports,
+                        media,
+                    });
                 self.scope = Scope::TopLevel;
             }
             Scope::AtImportInvalid | Scope::AtNamespaceInvalid => {
@@ -688,10 +697,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
                     }
                     _ => mode_data.set_none(),
                 };
-                (self.handle_dependency)(Dependency::Replace {
-                    content: "",
-                    range: Range::new(start, end),
-                });
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, end),
+                    });
                 return Some(());
             }
         }
@@ -746,10 +756,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         if mode_data.is_local_mode() {
             let start = start + 1;
             let name = lexer.slice(start, end)?;
-            (self.handle_dependency)(Dependency::LocalIdent {
-                name,
-                range: Range::new(start, end),
-            })
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalIdent {
+                    name,
+                    range: Range::new(start, end),
+                });
         }
         Some(())
     }
@@ -761,10 +772,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         if mode_data.is_local_mode() {
             let start = start + 1;
             let name = lexer.slice(start, end)?;
-            (self.handle_dependency)(Dependency::LocalIdent {
-                name,
-                range: Range::new(start, end),
-            })
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalIdent {
+                    name,
+                    range: Range::new(start, end),
+                });
         }
         Some(())
     }
@@ -812,16 +824,18 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         if let Some(mode_data) = &mut self.mode_data {
             if name == ":global" {
                 mode_data.set_global();
-                (self.handle_dependency)(Dependency::Replace {
-                    content: "",
-                    range: Range::new(start, end),
-                });
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, end),
+                    });
             } else if name == ":local" {
                 mode_data.set_local();
-                (self.handle_dependency)(Dependency::Replace {
-                    content: "",
-                    range: Range::new(start, end),
-                });
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, end),
+                    });
             }
         }
         Some(())
@@ -836,10 +850,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
             lexer.consume_white_space_and_comments()?;
             let end2 = lexer.cur_pos()?;
             let comments = lexer.slice(end, end2)?.trim_matches(is_white_space);
-            (self.handle_dependency)(Dependency::Replace {
-                content: comments,
-                range: Range::new(start, end2),
-            });
+            self.handle_dependency
+                .handle_dependency(Dependency::Replace {
+                    content: comments,
+                    range: Range::new(start, end2),
+                });
             if name == ":global" {
                 mode_data.set_global();
             } else {
@@ -849,10 +864,11 @@ impl<'s, D: FnMut(Dependency<'s>), W: FnMut(Warning<'s>)> Visitor<'s>
         }
         if matches!(self.scope, Scope::TopLevel) && name == ":export" {
             self.lex_icss_export(lexer)?;
-            (self.handle_dependency)(Dependency::Replace {
-                content: "",
-                range: Range::new(start, lexer.cur_pos()?),
-            });
+            self.handle_dependency
+                .handle_dependency(Dependency::Replace {
+                    content: "",
+                    range: Range::new(start, lexer.cur_pos()?),
+                });
         }
         Some(())
     }
