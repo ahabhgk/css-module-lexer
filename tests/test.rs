@@ -252,6 +252,30 @@ fn assert_local_property_decl_dependency(input: &str, dependency: &Dependency, n
     assert_eq!(slice_range(input, range).unwrap(), format!("--{}", name));
 }
 
+fn assert_local_keyframes_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalKeyframesDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalKeyframes {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(slice_range(input, range).unwrap(), name);
+}
+
 fn assert_replace_dependency(
     input: &str,
     dependency: &Dependency,
@@ -888,6 +912,65 @@ fn css_modules_property() {
     assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
     assert_local_ident_dependency(input, &dependencies[1], "class");
     assert_local_var_dependency(input, &dependencies[2], "my-color");
+}
+
+#[test]
+fn css_modules_keyframes_1() {
+    let input = indoc! {r#"
+        @keyframes localkeyframes {
+            0% { color: var(--theme-color1); }
+            100% { color: var(--theme-color2); }
+        }
+        @keyframes localkeyframes2 {
+            0% { left: 0; }
+            100% { left: 100px; }
+        }
+        .animation {
+            animation-name: localkeyframes;
+            animation: 3s ease-in 1s 2 reverse both paused localkeyframes, localkeyframes2;
+            --theme-color1: red;
+            --theme-color2: blue;
+        }    
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_keyframes_decl_dependency(input, &dependencies[0], "localkeyframes");
+    assert_local_var_dependency(input, &dependencies[1], "theme-color1");
+    assert_local_var_dependency(input, &dependencies[2], "theme-color2");
+    assert_local_keyframes_decl_dependency(input, &dependencies[3], "localkeyframes2");
+    assert_local_ident_dependency(input, &dependencies[4], "animation");
+    assert_local_keyframes_dependency(input, &dependencies[5], "localkeyframes");
+    assert_local_keyframes_dependency(input, &dependencies[6], "localkeyframes");
+    assert_local_keyframes_dependency(input, &dependencies[7], "localkeyframes2");
+    assert_local_var_decl_dependency(input, &dependencies[8], "theme-color1");
+    assert_local_var_decl_dependency(input, &dependencies[9], "theme-color2");
+    assert_eq!(dependencies.len(), 10);
+}
+
+#[test]
+fn css_modules_keyframes_2() {
+    let input = indoc! {r#"
+        @keyframes slidein {
+            from { width: 300%; }
+            to { width: 100%; }
+        }
+        .class {
+            --animation-name: slidein;
+            animation:
+                var(--animation-name) 3s,
+                3s linear 1s infinite running env(slidein),
+                3s linear env(slidein, var(--baz)) infinite running slidein;
+        }   
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_keyframes_decl_dependency(input, &dependencies[0], "slidein");
+    assert_local_ident_dependency(input, &dependencies[1], "class");
+    assert_local_var_decl_dependency(input, &dependencies[2], "animation-name");
+    assert_local_var_dependency(input, &dependencies[3], "animation-name");
+    assert_local_var_dependency(input, &dependencies[4], "baz");
+    assert_local_keyframes_dependency(input, &dependencies[5], "slidein");
+    assert_eq!(dependencies.len(), 6);
 }
 
 #[test]

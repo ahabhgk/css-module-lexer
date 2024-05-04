@@ -187,6 +187,13 @@ impl CssModulesModeData {
     }
 }
 
+#[derive(Debug, Default)]
+enum AnimationKeyframes {
+    #[default]
+    Start,
+    LastIdent(Range),
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
@@ -218,6 +225,14 @@ pub enum Dependency<'s> {
         range: Range,
     },
     LocalPropertyDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalKeyframes {
+        name: &'s str,
+        range: Range,
+    },
+    LocalKeyframesDecl {
         name: &'s str,
         range: Range,
     },
@@ -278,6 +293,7 @@ pub struct LexDependencies<'s, D, W> {
     allow_import_at_rule: bool,
     balanced: SmallVec<[BalancedItem; 3]>,
     is_next_rule_prelude: bool,
+    in_animation_property: Option<AnimationKeyframes>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -295,6 +311,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             allow_import_at_rule: true,
             balanced: Default::default(),
             is_next_rule_prelude: true,
+            in_animation_property: None,
             handle_dependency,
             handle_warning,
         }
@@ -399,7 +416,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected starts with '--' during parsing of CSS variable name",
+                message: "Expected starts with '--' during parsing of local CSS variable name",
                 range: Range::new(start, lexer.peek2_pos()?),
             });
             return Some(());
@@ -444,7 +461,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected starts with '--' during parsing of @property name",
+                message: "Expected starts with '--' during parsing of '@property'",
                 range: Range::new(start, lexer.peek2_pos()?),
             });
             return Some(());
@@ -460,10 +477,49 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_LEFT_CURLY {
             self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected '{' during parsing of @property",
+                message: "Expected '{' during parsing of '@property'",
                 range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
             });
             return Some(());
+        }
+        Some(())
+    }
+
+    fn lex_local_keyframes_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        let Some(mode_data) = &self.mode_data else {
+            return Some(());
+        };
+        lexer.consume_white_space_and_comments()?;
+        let start = lexer.cur_pos()?;
+        lexer.consume_ident_sequence()?;
+        let end = lexer.cur_pos()?;
+        if mode_data.is_local_mode() {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalKeyframesDecl {
+                    name: lexer.slice(start, end)?,
+                    range: Range::new(start, end),
+                });
+        }
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_LEFT_CURLY {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected '{' during parsing of '@keyframes'",
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+            });
+            return Some(());
+        }
+        Some(())
+    }
+
+    fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+        if let Some(animation) = &mut self.in_animation_property {
+            if let AnimationKeyframes::LastIdent(range) = std::mem::take(animation) {
+                self.handle_dependency
+                    .handle_dependency(Dependency::LocalKeyframes {
+                        name: lexer.slice(range.start, range.end)?,
+                        range,
+                    });
+            }
         }
         Some(())
     }
@@ -575,12 +631,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
-        } else if self.mode_data.is_some() && name == "@property" {
-            self.lex_local_property_decl(lexer)?;
-        } else if self.mode_data.is_some() && name == "@scope" {
-            self.is_next_rule_prelude = true;
         } else if self.mode_data.is_some() {
-            self.is_next_rule_prelude = false;
+            if name == "@keyframes" {
+                self.lex_local_keyframes_decl(lexer)?;
+            } else if name == "@property" {
+                self.lex_local_property_decl(lexer)?;
+            } else {
+                self.is_next_rule_prelude = name == "@scope";
+            }
         }
         Some(())
     }
@@ -674,7 +732,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.scope = Scope::TopLevel;
             }
             Scope::InBlock => {
-                if self.mode_data.is_some() {
+                if let Some(mode_data) = &self.mode_data {
+                    if mode_data.is_local_mode() {
+                        self.handle_local_keyframes_dependency(lexer)?;
+                        self.in_animation_property = None;
+                    }
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 }
             }
@@ -696,8 +758,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        if mode_data.is_local_mode() && name == "var" {
-            self.lex_local_var(lexer)?;
+        if mode_data.is_local_mode() {
+            // Don't rename animation name when we in functions
+            if let Some(animation) = &mut self.in_animation_property {
+                if !self.balanced.is_empty() {
+                    *animation = AnimationKeyframes::Start;
+                }
+            }
+            if name == "var" {
+                self.lex_local_var(lexer)?;
+            }
         }
         Some(())
     }
@@ -759,8 +829,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     return Some(());
                 };
                 if mode_data.is_local_mode() {
-                    if let Some(name) = lexer.slice(start, end)?.strip_prefix("--") {
-                        self.lex_local_var_decl(lexer, name, start, end)?;
+                    if let Some(animation) = &mut self.in_animation_property {
+                        // Not inside functions
+                        if self.balanced.is_empty() {
+                            *animation = AnimationKeyframes::LastIdent(Range::new(start, end));
+                        }
+                    }
+                    let ident = lexer.slice(start, end)?;
+                    if let Some(name) = ident.strip_prefix("--") {
+                        return self.lex_local_var_decl(lexer, name, start, end);
+                    }
+                    let ident = ident.to_ascii_lowercase();
+                    if ident == "animation" || ident == "animation-name" {
+                        self.in_animation_property = Some(AnimationKeyframes::Start);
+                        return Some(());
                     }
                 }
             }
@@ -828,8 +910,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock) {
+            if let Some(mode_data) = &self.mode_data {
+                if mode_data.is_local_mode() {
+                    self.handle_local_keyframes_dependency(lexer)?;
+                    self.in_animation_property = None;
+                }
+            }
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
@@ -898,9 +986,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn comma(&mut self, _: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
+    fn comma(&mut self, lexer: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
         if let Some(mode_data) = &mut self.mode_data {
             mode_data.set_default();
+            if matches!(self.scope, Scope::InBlock) && mode_data.is_local_mode() {
+                self.handle_local_keyframes_dependency(lexer)?;
+            }
         }
         Some(())
     }

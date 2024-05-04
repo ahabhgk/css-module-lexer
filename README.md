@@ -16,7 +16,7 @@ Lexes CSS modules returning their dependencies metadata.
   - [x] local scope by default
   - [x] nesting
   - [x] var(), @property
-  - [ ] @keyframe
+  - [x] @keyframe
   - [ ] more warnings
   - [ ] composes
   - [ ] @values
