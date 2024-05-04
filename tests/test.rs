@@ -790,25 +790,33 @@ fn css_modules_pseudo() {
 #[test]
 fn css_modules_nesting() {
     let input = indoc! {r#"
-        .first-nested {
-            .first-nested-nested {
+        .nested {
+            .nested-nested {
                 color: red;
             }
         }
-        .first-nested-at-rule {
+        .nested-at-rule {
             @media screen {
-                .first-nested-nested-at-rule-deep {
+                .nested-nested-at-rule-deep {
                     color: red;
                 }
+            }
+        }
+        :global .nested2 {
+            .nested2-nested {
+                color: red;
             }
         }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], "first-nested");
-    assert_local_ident_dependency(input, &dependencies[1], "first-nested-nested");
-    assert_local_ident_dependency(input, &dependencies[2], "first-nested-at-rule");
-    assert_local_ident_dependency(input, &dependencies[3], "first-nested-nested-at-rule-deep");
+    assert_local_ident_dependency(input, &dependencies[0], "nested");
+    assert_local_ident_dependency(input, &dependencies[1], "nested-nested");
+    assert_local_ident_dependency(input, &dependencies[2], "nested-at-rule");
+    assert_local_ident_dependency(input, &dependencies[3], "nested-nested-at-rule-deep");
+    assert_replace_dependency(input, &dependencies[4], "", ":global ");
+    assert_local_ident_dependency(input, &dependencies[5], "nested2-nested");
+    assert_eq!(dependencies.len(), 6);
 }
 
 #[test]
@@ -841,7 +849,6 @@ fn css_modules_local_var() {
     assert_local_var_decl_dependency(input, &dependencies[2], "local-color");
     assert_local_ident_dependency(input, &dependencies[3], "globalVars");
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
-    dbg!(dependencies, warnings);
 }
 
 #[test]
@@ -881,6 +888,62 @@ fn css_modules_property() {
     assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
     assert_local_ident_dependency(input, &dependencies[1], "class");
     assert_local_var_dependency(input, &dependencies[2], "my-color");
+}
+
+#[test]
+fn css_modules_at_rule_1() {
+    let input = indoc! {r#"
+        @layer framework.container {
+            .class {
+                color: red;
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "class");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn css_modules_at_rule_2() {
+    let input = indoc! {r#"
+        @page {
+            .class {
+                color: red;
+            }
+        }
+        @page :left, :top {
+            .class2 {
+                color: red;
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "class");
+    assert_local_ident_dependency(input, &dependencies[1], "class2");
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_at_rule_3() {
+    let input = indoc! {r#"
+        .article-body {
+            color: red;
+        }
+        @scope (.article-body) to (figure) {
+            .img {
+                background-color: goldenrod;
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "article-body");
+    assert_local_ident_dependency(input, &dependencies[1], "article-body");
+    assert_local_ident_dependency(input, &dependencies[2], "img");
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]

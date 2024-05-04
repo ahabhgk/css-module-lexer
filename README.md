@@ -10,7 +10,7 @@ Lexes CSS modules returning their dependencies metadata.
 
 - [x] CSS:
   - [x] @import
-  - [x] url, image-set
+  - [x] url(), image-set()
 - [ ] CSS Modules
   - [x] :local, :local(), :global, :global()
   - [x] local scope by default

@@ -182,7 +182,7 @@ impl CssModulesModeData {
         self.current = CssModulesMode::Global;
     }
 
-    pub fn set_none(&mut self) {
+    pub fn set_default(&mut self) {
         self.current = CssModulesMode::None;
     }
 }
@@ -575,18 +575,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
-        } else if name == "@media"
-            || name == "@supports"
-            || name == "@layer"
-            || name == "@container"
-        {
-            self.is_next_rule_prelude = true;
         } else if self.mode_data.is_some() && name == "@property" {
             self.lex_local_property_decl(lexer)?;
+        } else if self.mode_data.is_some() && name == "@scope" {
+            self.is_next_rule_prelude = true;
+        } else if self.mode_data.is_some() {
+            self.is_next_rule_prelude = false;
         }
-        // else if self.allow_mode_switch {
-        //     self.is_next_rule_prelude = false;
-        // }
         Some(())
     }
 
@@ -728,7 +723,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     Some(last) if matches!(last.kind, BalancedItemKind::Global) => {
                         mode_data.set_global()
                     }
-                    _ => mode_data.set_none(),
+                    _ => mode_data.set_default(),
                 };
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
@@ -820,17 +815,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.allow_import_at_rule = false;
                 self.scope = Scope::InBlock;
                 self.block_nesting_level = 1;
-                if self.mode_data.is_some() {
-                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                }
             }
             Scope::InBlock => {
                 self.block_nesting_level += 1;
-                if self.mode_data.is_some() {
-                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                }
             }
-            _ => {}
+            _ => return Some(()),
+        }
+        if let Some(mode_data) = &mut self.mode_data {
+            mode_data.set_default();
+            self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
         }
         Some(())
     }
@@ -840,9 +833,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
-                if let Some(mode_data) = &mut self.mode_data {
+                if self.mode_data.is_some() {
                     self.is_next_rule_prelude = true;
-                    mode_data.set_none();
                 }
             } else if self.mode_data.is_some() {
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -908,7 +900,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn comma(&mut self, _: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
         if let Some(mode_data) = &mut self.mode_data {
-            mode_data.set_none();
+            mode_data.set_default();
         }
         Some(())
     }
