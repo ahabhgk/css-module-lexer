@@ -17,9 +17,9 @@ Lexes CSS modules returning their dependencies metadata.
   - [x] nesting
   - [x] var(), @property
   - [x] @keyframe
-  - [ ] more warnings
-  - [ ] composes
+  - [x] composes
   - [ ] @values
+  - [ ] more warnings
 - [ ] iCSS
   - [x] :export
   - [ ] :import
