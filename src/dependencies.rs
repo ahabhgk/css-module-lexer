@@ -6,6 +6,7 @@ use crate::lexer::is_white_space;
 use crate::lexer::start_ident_sequence;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
+use crate::lexer::C_COMMA;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_RIGHT_CURLY;
@@ -236,6 +237,11 @@ pub enum Dependency<'s> {
         name: &'s str,
         range: Range,
     },
+    Composes {
+        names: &'s str,
+        from: Option<&'s str>,
+        range: Range,
+    },
     ICSSExport {
         prop: &'s str,
         value: &'s str,
@@ -416,7 +422,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
             self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected starts with '--' during parsing of local CSS variable name",
+                message: "Expected starts with '--' during parsing of 'var()'",
                 range: Range::new(start, lexer.peek2_pos()?),
             });
             return Some(());
@@ -441,10 +447,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     ) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_COLON {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected ':' during parsing of local CSS variable declaration",
-                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
-            });
             return Some(());
         }
         lexer.consume()?;
@@ -491,6 +493,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         };
         lexer.consume_white_space_and_comments()?;
         let start = lexer.cur_pos()?;
+        if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected ident during parsing of '@keyframes' name",
+                range: Range::new(start, lexer.peek2_pos()?),
+            });
+            return Some(());
+        }
         lexer.consume_ident_sequence()?;
         let end = lexer.cur_pos()?;
         if mode_data.is_local_mode() {
@@ -521,6 +530,111 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     });
             }
         }
+        Some(())
+    }
+
+    fn lex_composes(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_COLON {
+            return Some(());
+        }
+        lexer.consume()?;
+        let mut end;
+        let mut has_from = false;
+        loop {
+            lexer.consume_white_space_and_comments()?;
+            let names_start = lexer.cur_pos()?;
+            let mut names_end = names_start;
+            loop {
+                let name_start = lexer.cur_pos()?;
+                let c = lexer.cur()?;
+                if c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
+                    break;
+                }
+                if !start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
+                    self.handle_warning.handle_warning(Warning::Unexpected {
+                        message: "Expected ident during parsing of 'composes'",
+                        range: Range::new(name_start, lexer.peek2_pos()?),
+                    });
+                    return Some(());
+                }
+                lexer.consume_ident_sequence()?;
+                let name_end = lexer.cur_pos()?;
+                if lexer.slice(name_start, name_end)? == "from" {
+                    has_from = true;
+                    break;
+                }
+                names_end = name_end;
+                lexer.consume_white_space_and_comments()?;
+            }
+            lexer.consume_white_space_and_comments()?;
+            let c = lexer.cur()?;
+            if !has_from {
+                self.handle_dependency
+                    .handle_dependency(Dependency::Composes {
+                        names: lexer.slice(names_start, names_end)?,
+                        from: None,
+                        range: Range::new(names_start, names_end),
+                    });
+                if c == C_COMMA {
+                    lexer.consume()?;
+                    continue;
+                }
+                end = names_end;
+                break;
+            }
+            let path_start = lexer.cur_pos()?;
+            match c {
+                '\'' | '"' => {
+                    lexer.consume()?;
+                    lexer.consume_string(self, c)?;
+                }
+                'g' => {
+                    if lexer.consume()? != 'l'
+                        || lexer.consume()? != 'o'
+                        || lexer.consume()? != 'b'
+                        || lexer.consume()? != 'a'
+                        || lexer.consume()? != 'l'
+                    {
+                        self.handle_warning.handle_warning(Warning::Unexpected {
+                            message: "Expected 'global' during parsing of 'composes'",
+                            range: Range::new(path_start, lexer.peek_pos()?),
+                        });
+                        return Some(());
+                    }
+                    lexer.consume()?;
+                }
+                _ => {
+                    self.handle_warning.handle_warning(Warning::Unexpected {
+                    message: "Expected '\'path\'', or '\"path\"' or 'global' during parsing of 'composes'",
+                    range: Range::new(path_start, lexer.peek_pos()?),
+                });
+                    return Some(());
+                }
+            }
+            let path_end = lexer.cur_pos()?;
+            end = path_end;
+            self.handle_dependency
+                .handle_dependency(Dependency::Composes {
+                    names: lexer.slice(names_start, names_end)?,
+                    from: Some(lexer.slice(path_start, path_end)?),
+                    range: Range::new(names_start, path_end),
+                });
+            lexer.consume_white_space_and_comments()?;
+            if lexer.cur()? != C_COMMA {
+                break;
+            }
+            lexer.consume()?;
+        }
+        if lexer.cur()? == C_SEMICOLON {
+            lexer.consume()?;
+            end = lexer.cur_pos()?;
+        }
+        self.handle_dependency
+            .handle_dependency(Dependency::Replace {
+                content: "",
+                range: Range::new(start, end),
+            });
         Some(())
     }
 }
@@ -834,6 +948,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         if self.balanced.is_empty() {
                             *animation = AnimationKeyframes::LastIdent(Range::new(start, end));
                         }
+                        return Some(());
                     }
                     let ident = lexer.slice(start, end)?;
                     if let Some(name) = ident.strip_prefix("--") {
@@ -843,6 +958,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if ident == "animation" || ident == "animation-name" {
                         self.in_animation_property = Some(AnimationKeyframes::Start);
                         return Some(());
+                    }
+                    if ident == "composes" {
+                        return self.lex_composes(lexer, start);
                     }
                 }
             }

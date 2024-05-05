@@ -276,6 +276,26 @@ fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name:
     assert_eq!(slice_range(input, range).unwrap(), name);
 }
 
+fn assert_composes_dependency(
+    input: &str,
+    dependency: &Dependency,
+    names: &str,
+    from: Option<&str>,
+    range_content: &str,
+) {
+    let Dependency::Composes {
+        names: actual_names,
+        from: actual_from,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_names, names);
+    assert_eq!(*actual_from, from);
+    assert_eq!(slice_range(input, range).unwrap(), range_content);
+}
+
 fn assert_replace_dependency(
     input: &str,
     dependency: &Dependency,
@@ -915,6 +935,22 @@ fn css_modules_property() {
 }
 
 #[test]
+fn css_modules_keyframes_unexpected() {
+    let input = indoc! {r#"
+        @keyframes $aaa {
+            0% { color: var(--theme-color1); }
+            100% { color: var(--theme-color2); }
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert_warning(input, &warnings[0], "$a");
+    assert_eq!(warnings.len(), 1);
+    assert_local_var_dependency(input, &dependencies[0], "theme-color1");
+    assert_local_var_dependency(input, &dependencies[1], "theme-color2");
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
 fn css_modules_keyframes_1() {
     let input = indoc! {r#"
         @keyframes localkeyframes {
@@ -1030,11 +1066,192 @@ fn css_modules_at_rule_3() {
 }
 
 #[test]
+fn css_modules_composes_1() {
+    let input = indoc! {r#"
+        .exportName {
+            composes: importName from "path/library.css", beforeName from global, importName secondImport from global, firstImport secondImport from "path/library.css";
+            other: rule;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "exportName");
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "importName",
+        Some("\"path/library.css\""),
+        "importName from \"path/library.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "beforeName",
+        Some("global"),
+        "beforeName from global",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "importName secondImport",
+        Some("global"),
+        "importName secondImport from global",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[4],
+        "firstImport secondImport",
+        Some("\"path/library.css\""),
+        "firstImport secondImport from \"path/library.css\"",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[5],
+        "",
+        r#"composes: importName from "path/library.css", beforeName from global, importName secondImport from global, firstImport secondImport from "path/library.css";"#,
+    );
+    assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_composes_2() {
+    let input = indoc! {r#"
+        .duplicate {
+            composes: a from "./aa.css", b from "./bb.css", c from './cc.css', a from './aa.css', c from './cc.css'
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "duplicate");
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "a",
+        Some("\"./aa.css\""),
+        "a from \"./aa.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "b",
+        Some("\"./bb.css\""),
+        "b from \"./bb.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "c",
+        Some("'./cc.css'"),
+        "c from './cc.css'",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[4],
+        "a",
+        Some("'./aa.css'"),
+        "a from './aa.css'",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[5],
+        "c",
+        Some("'./cc.css'"),
+        "c from './cc.css'",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[6],
+        "",
+        r#"composes: a from "./aa.css", b from "./bb.css", c from './cc.css', a from './aa.css', c from './cc.css'"#,
+    );
+    assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
+fn css_modules_composes_3() {
+    let input = indoc! {r#"
+        .spaces {
+            composes: importName importName2 from "path/library.css", importName3 importName4 from "path/library.css";
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "spaces");
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "importName importName2",
+        Some("\"path/library.css\""),
+        "importName importName2 from \"path/library.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "importName3 importName4",
+        Some("\"path/library.css\""),
+        "importName3 importName4 from \"path/library.css\"",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        r#"composes: importName importName2 from "path/library.css", importName3 importName4 from "path/library.css";"#,
+    );
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn css_modules_composes_4() {
+    let input = indoc! {r#"
+        .unknown {
+            composes: foo bar, baz;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "unknown");
+    assert_composes_dependency(input, &dependencies[1], "foo bar", None, "foo bar");
+    assert_composes_dependency(input, &dependencies[2], "baz", None, "baz");
+    assert_replace_dependency(input, &dependencies[3], "", r#"composes: foo bar, baz;"#);
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn css_modules_composes_5() {
+    let input = indoc! {r#"
+        .mixed {
+            composes: foo bar, baz, importName importName2 from "path/library.css"
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], "mixed");
+    assert_composes_dependency(input, &dependencies[1], "foo bar", None, "foo bar");
+    assert_composes_dependency(input, &dependencies[2], "baz", None, "baz");
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "importName importName2",
+        Some("\"path/library.css\""),
+        "importName importName2 from \"path/library.css\"",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[4],
+        "",
+        r#"composes: foo bar, baz, importName importName2 from "path/library.css""#,
+    );
+    assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert_warning(input, &warnings[0], ";");
+    assert_eq!(warnings.len(), 1);
     assert_replace_dependency(input, &dependencies[0], "", ":export {\n/sl/ash");
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
@@ -1043,28 +1260,13 @@ fn icss_export() {
         :export {
             a: a;
         }
-
         :export {
             abc: a b c;
             comments: abc/****/   /* hello world *//****/   def
         }
-
-        :export
-
-
-        {
-
-
-            white space
-
-            :
-
-            abc
-            def
-
-        }
-
         :export{default:default}
+        :export { $: abc; }
+        :export { white space: a b c; }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
@@ -1093,26 +1295,16 @@ fn icss_export() {
             comments: abc/****/   /* hello world *//****/   def
         }"#},
     );
-    assert_icss_export_dependency(input, &dependencies[5], "white space", "abc\n    def");
+    assert_icss_export_dependency(input, &dependencies[5], "default", "default");
+    assert_replace_dependency(input, &dependencies[6], "", ":export{default:default}");
+    assert_icss_export_dependency(input, &dependencies[7], "$", "abc");
+    assert_replace_dependency(input, &dependencies[8], "", ":export { $: abc; }");
+    assert_icss_export_dependency(input, &dependencies[9], "white space", "a b c");
     assert_replace_dependency(
         input,
-        &dependencies[6],
+        &dependencies[10],
         "",
-        indoc! {r#":export
-
-
-        {
-
-
-            white space
-
-            :
-
-            abc
-            def
-
-        }"#},
+        ":export { white space: a b c; }",
     );
-    assert_icss_export_dependency(input, &dependencies[7], "default", "default");
-    assert_replace_dependency(input, &dependencies[8], "", ":export{default:default}");
+    assert_eq!(dependencies.len(), 11);
 }
