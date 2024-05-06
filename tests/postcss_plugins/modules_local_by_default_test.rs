@@ -234,10 +234,6 @@ fn not_localize_animation_name_in_a_var_function() {
         ".foo { animation-name: var(--bar); }",
         ":local(.foo) { animation-name: var(--bar); }",
     );
-}
-
-#[test]
-fn not_localize_animation_name_in_a_var_function_2() {
     test(
         ".foo { animation-name: vAr(--bar); }",
         ":local(.foo) { animation-name: vAr(--bar); }",
@@ -250,10 +246,6 @@ fn not_localize_animation_name_in_an_env_function() {
         ".foo { animation-name: env(bar); }",
         ":local(.foo) { animation-name: env(bar); }",
     );
-}
-
-#[test]
-fn not_localize_animation_name_in_an_env_function_2() {
     test(
         ".foo { animation-name: eNv(bar); }",
         ":local(.foo) { animation-name: eNv(bar); }",
@@ -322,68 +314,40 @@ fn localize_animation_using_special_characters() {
         ".foo { animation: \\@bounce; }",
         ":local(.foo) { animation: :local(\\@bounce); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_2() {
     test(
         ".foo { animation: bou\\@nce; }",
         ":local(.foo) { animation: :local(bou\\@nce); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_3() {
     test(
         ".foo { animation: \\ as; }",
         ":local(.foo) { animation: :local(\\ as); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_4() {
     test(
         ".foo { animation: t\\ t; }",
         ":local(.foo) { animation: :local(t\\ t); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_5() {
     test(
         ".foo { animation: -\\a; }",
         ":local(.foo) { animation: :local(-\\a); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_6() {
     test(
         ".foo { animation: --\\a; }",
         ":local(.foo) { animation: :local(--\\a); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_7() {
     test(
         ".foo { animation: \\a; }",
         ":local(.foo) { animation: :local(\\a); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_8() {
     test(
         ".foo { animation: -\\a; }",
         ":local(.foo) { animation: :local(-\\a); }",
     );
-}
-
-#[test]
-fn localize_animation_using_special_characters_9() {
     test(
         ".foo { animation: --; }",
         ":local(.foo) { animation: :local(--); }",
+    );
+    test(
+        ".foo { animation: 😃bounce😃; }",
+        ":local(.foo) { animation: :local(😃bounce😃); }",
     );
 }

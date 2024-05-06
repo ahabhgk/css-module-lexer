@@ -154,33 +154,30 @@ impl<'s> Lexer<'s> {
         self.consume()?;
         while self.cur().is_some() {
             self.consume_comments()?;
-            let c = self.cur()?;
-            if c < '\u{80}' {
-                // https://drafts.csswg.org/css-syntax/#consume-token
-                match c {
-                    c if is_white_space(c) => self.consume_space()?,
-                    C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
-                    C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
-                    C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
-                    C_LEFT_PARENTHESIS => self.consume_left_parenthesis(visitor)?,
-                    C_RIGHT_PARENTHESIS => self.consume_right_parenthesis(visitor)?,
-                    C_PLUS_SIGN => self.consume_plus_sign()?,
-                    C_COMMA => self.consume_comma(visitor)?,
-                    C_HYPHEN_MINUS => self.consume_minus(visitor)?,
-                    C_FULL_STOP => self.consume_full_stop(visitor)?,
-                    C_COLON => self.consume_potential_pseudo(visitor)?,
-                    C_SEMICOLON => self.consume_semicolon(visitor)?,
-                    C_LESS_THAN_SIGN => self.consume_less_than_sign()?,
-                    C_AT_SIGN => self.consume_at_sign(visitor)?,
-                    C_LEFT_SQUARE => self.consume_delim()?,
-                    C_REVERSE_SOLIDUS => self.consume_reverse_solidus(visitor)?,
-                    C_RIGHT_SQUARE => self.consume_delim()?,
-                    C_LEFT_CURLY => self.consume_left_curly(visitor)?,
-                    C_RIGHT_CURLY => self.consume_right_curly(visitor)?,
-                    c if is_digit(c) => self.consume_numeric_token()?,
-                    c if is_ident_start(c) => self.consume_ident_like(visitor)?,
-                    _ => self.consume_delim()?,
-                }
+            // https://drafts.csswg.org/css-syntax/#consume-token
+            match self.cur()? {
+                c if is_white_space(c) => self.consume_space()?,
+                C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
+                C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
+                C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
+                C_LEFT_PARENTHESIS => self.consume_left_parenthesis(visitor)?,
+                C_RIGHT_PARENTHESIS => self.consume_right_parenthesis(visitor)?,
+                C_PLUS_SIGN => self.consume_plus_sign()?,
+                C_COMMA => self.consume_comma(visitor)?,
+                C_HYPHEN_MINUS => self.consume_minus(visitor)?,
+                C_FULL_STOP => self.consume_full_stop(visitor)?,
+                C_COLON => self.consume_potential_pseudo(visitor)?,
+                C_SEMICOLON => self.consume_semicolon(visitor)?,
+                C_LESS_THAN_SIGN => self.consume_less_than_sign()?,
+                C_AT_SIGN => self.consume_at_sign(visitor)?,
+                C_LEFT_SQUARE => self.consume_delim()?,
+                C_REVERSE_SOLIDUS => self.consume_reverse_solidus(visitor)?,
+                C_RIGHT_SQUARE => self.consume_delim()?,
+                C_LEFT_CURLY => self.consume_left_curly(visitor)?,
+                C_RIGHT_CURLY => self.consume_right_curly(visitor)?,
+                c if is_digit(c) => self.consume_numeric_token()?,
+                c if is_ident_start(c) => self.consume_ident_like(visitor)?,
+                _ => self.consume_delim()?,
             }
         }
         Some(())
