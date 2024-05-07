@@ -210,6 +210,7 @@ impl BalancedItemKind {
         match name {
             "url(" => Self::Url,
             "image-set(" => Self::ImageSet,
+            _ if with_vendor_prefixed_eq(name, "image-set(") => Self::ImageSet,
             "layer(" => Self::Layer,
             "supports(" => Self::Supports,
             ":local(" => Self::LocalFn,
@@ -219,6 +220,20 @@ impl BalancedItemKind {
             _ => Self::Other,
         }
     }
+}
+
+fn with_vendor_prefixed_eq(left: &str, right: &str) -> bool {
+    left.strip_prefix("-webkit-") == Some(right)
+        || left.strip_prefix("-moz-") == Some(right)
+        || left.strip_prefix("-ms-") == Some(right)
+        || left.strip_prefix("-o-") == Some(right)
+}
+
+fn with_at_vendor_prefixed_eq(left: &str, right: &str) -> bool {
+    if let Some(left) = left.strip_prefix('@') {
+        return with_vendor_prefixed_eq(left, right);
+    }
+    false
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -928,7 +943,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if self.mode_data.is_some() {
-            if name == "@keyframes" {
+            if name == "@keyframes" || with_at_vendor_prefixed_eq(&name, "keyframes") {
                 self.lex_local_keyframes_decl(lexer)?;
             } else if name == "@property" {
                 self.lex_local_property_decl(lexer)?;
@@ -1057,10 +1072,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        if mode_data.is_local_mode() {
-            if name == "var(" {
-                self.lex_local_var(lexer)?;
-            }
+        if mode_data.is_local_mode() && name == "var(" {
+            self.lex_local_var(lexer)?;
         }
         Some(())
     }
@@ -1136,7 +1149,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     }
                     let ident = lexer.slice(start, end)?;
                     let ident = ident.to_ascii_lowercase();
-                    if ident == "animation" || ident == "animation-name" {
+                    if ident == "animation"
+                        || ident == "animation-name"
+                        || with_vendor_prefixed_eq(&ident, "animation")
+                        || with_vendor_prefixed_eq(&ident, "animation-name")
+                    {
                         self.enter_animation_property();
                         return Some(());
                     }

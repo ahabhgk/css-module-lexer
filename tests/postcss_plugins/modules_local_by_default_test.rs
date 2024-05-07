@@ -381,13 +381,13 @@ fn localize_animation() {
     );
 }
 
-// #[test]
-// fn localize_animation_with_vendor_prefix() {
-//     test(
-//         ".foo { -webkit-animation: bar; animation: bar; }",
-//         ":local(.foo) { -webkit-animation: :local(bar); animation: :local(bar); }",
-//     );
-// }
+#[test]
+fn localize_animation_with_vendor_prefix() {
+    test(
+        ".foo { -webkit-animation: bar; animation: bar; }",
+        ":local(.foo) { -webkit-animation: :local(bar); animation: :local(bar); }",
+    );
+}
 
 #[test]
 fn not_localize_other_rules() {
