@@ -101,12 +101,12 @@ impl BalancedStack {
                 item.kind,
                 BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
             ) {
-                mode_data.set_local();
+                mode_data.set_current_mode(CssModulesMode::Local);
             } else if matches!(
                 item.kind,
                 BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
             ) {
-                mode_data.set_global();
+                mode_data.set_current_mode(CssModulesMode::Global);
             }
         }
         self.0.push(item);
@@ -115,27 +115,7 @@ impl BalancedStack {
     pub fn pop(&mut self, mode_data: Option<&mut CssModulesModeData>) -> Option<BalancedItem> {
         let item = self.0.pop()?;
         if let Some(mode_data) = mode_data {
-            let mut iter = self.0.iter();
-            loop {
-                if let Some(last) = iter.next_back() {
-                    if matches!(
-                        last.kind,
-                        BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
-                    ) {
-                        mode_data.set_local();
-                        break;
-                    } else if matches!(
-                        last.kind,
-                        BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
-                    ) {
-                        mode_data.set_global();
-                        break;
-                    }
-                } else {
-                    mode_data.set_default();
-                    break;
-                }
-            }
+            self.update_current_modules_mode(mode_data);
         }
         Some(item)
     }
@@ -157,7 +137,36 @@ impl BalancedStack {
             }
             break;
         }
-        mode_data.set_default();
+        self.update_current_modules_mode(mode_data);
+    }
+
+    pub fn update_current_modules_mode(&self, mode_data: &mut CssModulesModeData) {
+        mode_data.set_current_mode(self.topmost_modules_mode(mode_data));
+    }
+
+    pub fn update_property_modules_mode(&self, mode_data: &mut CssModulesModeData) {
+        mode_data.set_property_mode(self.topmost_modules_mode(mode_data));
+    }
+
+    fn topmost_modules_mode(&self, mode_data: &CssModulesModeData) -> CssModulesMode {
+        let mut iter = self.0.iter();
+        loop {
+            if let Some(last) = iter.next_back() {
+                if matches!(
+                    last.kind,
+                    BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
+                ) {
+                    return CssModulesMode::Local;
+                } else if matches!(
+                    last.kind,
+                    BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
+                ) {
+                    return CssModulesMode::Global;
+                }
+            } else {
+                return mode_data.default_mode();
+            }
+        }
     }
 }
 
@@ -224,28 +233,30 @@ impl Range {
     }
 }
 
-#[derive(Debug)]
-enum CssModulesMode {
+#[derive(Debug, Clone, Copy)]
+pub enum CssModulesMode {
     Local,
     Global,
-    None,
 }
 
 #[derive(Debug)]
 pub struct CssModulesModeData {
     default: CssModulesMode,
     current: CssModulesMode,
+    property: CssModulesMode,
 }
 
 impl CssModulesModeData {
     pub fn new(local: bool) -> Self {
+        let default = if local {
+            CssModulesMode::Local
+        } else {
+            CssModulesMode::Global
+        };
         Self {
-            default: if local {
-                CssModulesMode::Local
-            } else {
-                CssModulesMode::Global
-            },
-            current: CssModulesMode::None,
+            default,
+            current: default,
+            property: default,
         }
     }
 
@@ -253,24 +264,26 @@ impl CssModulesModeData {
         match self.current {
             CssModulesMode::Local => true,
             CssModulesMode::Global => false,
-            CssModulesMode::None => match self.default {
-                CssModulesMode::Local => true,
-                CssModulesMode::Global => false,
-                CssModulesMode::None => false,
-            },
         }
     }
 
-    pub fn set_local(&mut self) {
-        self.current = CssModulesMode::Local;
+    pub fn is_property_local_mode(&self) -> bool {
+        match self.property {
+            CssModulesMode::Local => true,
+            CssModulesMode::Global => false,
+        }
     }
 
-    pub fn set_global(&mut self) {
-        self.current = CssModulesMode::Global;
+    pub fn default_mode(&self) -> CssModulesMode {
+        self.default
     }
 
-    pub fn set_default(&mut self) {
-        self.current = CssModulesMode::None;
+    pub fn set_current_mode(&mut self, mode: CssModulesMode) {
+        self.current = mode;
+    }
+
+    pub fn set_property_mode(&mut self, mode: CssModulesMode) {
+        self.property = mode;
     }
 }
 
@@ -292,6 +305,10 @@ impl AnimationProperty {
 
     fn check_keywords(&mut self, ident: &str) -> bool {
         self.keywords.check(ident)
+    }
+
+    pub fn reset_keywords(&mut self) {
+        self.keywords.reset();
     }
 
     pub fn set_keyframes(&mut self, ident: &str, range: Range) {
@@ -338,7 +355,7 @@ impl AnimationKeywords {
             "normal" => self.keyword_check(Self::NORMAL),
             "reverse" => self.keyword_check(Self::REVERSE),
             "alternate" => self.keyword_check(Self::ALTERNATE),
-            "alternate_reverse" => self.keyword_check(Self::ALTERNATE_REVERSE),
+            "alternate-reverse" => self.keyword_check(Self::ALTERNATE_REVERSE),
             "forwards" => self.keyword_check(Self::FORWARDS),
             "backwards" => self.keyword_check(Self::BACKWARDS),
             "both" => self.keyword_check(Self::BOTH),
@@ -346,12 +363,12 @@ impl AnimationKeywords {
             "paused" => self.keyword_check(Self::PAUSED),
             "running" => self.keyword_check(Self::RUNNING),
             "ease" => self.keyword_check(Self::EASE),
-            "ease_in" => self.keyword_check(Self::EASE_IN),
-            "ease_out" => self.keyword_check(Self::EASE_OUT),
-            "ease_in_out" => self.keyword_check(Self::EASE_IN_OUT),
+            "ease-in" => self.keyword_check(Self::EASE_IN),
+            "ease-out" => self.keyword_check(Self::EASE_OUT),
+            "ease-in-out" => self.keyword_check(Self::EASE_IN_OUT),
             "linear" => self.keyword_check(Self::LINEAR),
-            "step_end" => self.keyword_check(Self::STEP_END),
-            "step_start" => self.keyword_check(Self::STEP_START),
+            "step-end" => self.keyword_check(Self::STEP_END),
+            "step-start" => self.keyword_check(Self::STEP_START),
             "none" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
             _ => true,
         }
@@ -363,6 +380,10 @@ impl AnimationKeywords {
         }
         self.bits |= bit;
         false
+    }
+
+    pub fn reset(&mut self) {
+        self.bits = 0;
     }
 }
 
@@ -707,6 +728,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         range,
                     });
             }
+            animation.reset_keywords();
         }
         Some(())
     }
@@ -1007,7 +1029,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             Scope::InBlock => {
                 if let Some(mode_data) = &self.mode_data {
-                    if mode_data.is_local_mode() {
+                    if mode_data.is_property_local_mode() {
                         self.handle_local_keyframes_dependency(lexer)?;
                         self.exit_animation_property();
                     }
@@ -1053,7 +1075,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(last) = self.balanced.pop(self.mode_data.as_mut()) else {
             return Some(());
         };
-        if self.mode_data.is_some() {
+        if let Some(mode_data) = &mut self.mode_data {
             let is_function = matches!(
                 last.kind,
                 BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
@@ -1071,6 +1093,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             range: Range::new(start, end),
                         });
                 } else {
+                    self.balanced.pop_modules_mode_pseudo_class(mode_data);
                     let popped = self.balanced.pop_without_moda_data();
                     debug_assert!(matches!(popped.unwrap().kind, BalancedItemKind::Other));
                 }
@@ -1102,7 +1125,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let Some(mode_data) = &mut self.mode_data else {
                     return Some(());
                 };
-                if mode_data.is_local_mode() {
+                if mode_data.is_property_local_mode() {
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
@@ -1112,14 +1135,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         return Some(());
                     }
                     let ident = lexer.slice(start, end)?;
-                    if let Some(name) = ident.strip_prefix("--") {
-                        return self.lex_local_var_decl(lexer, name, start, end);
-                    }
                     let ident = ident.to_ascii_lowercase();
                     if ident == "animation" || ident == "animation-name" {
                         self.enter_animation_property();
                         return Some(());
                     }
+                }
+                if mode_data.is_local_mode() {
+                    let ident = lexer.slice(start, end)?;
+                    if let Some(name) = ident.strip_prefix("--") {
+                        return self.lex_local_var_decl(lexer, name, start, end);
+                    }
+                    let ident = ident.to_ascii_lowercase();
                     if ident == "composes" {
                         return self.lex_composes(lexer, start);
                     }
@@ -1181,6 +1208,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             _ => return Some(()),
         }
         if let Some(mode_data) = &mut self.mode_data {
+            self.balanced.update_property_modules_mode(mode_data);
             self.balanced.pop_modules_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
         }
@@ -1194,7 +1222,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock) {
             if let Some(mode_data) = &self.mode_data {
-                if mode_data.is_local_mode() {
+                if mode_data.is_property_local_mode() {
                     self.handle_local_keyframes_dependency(lexer)?;
                     self.exit_animation_property();
                 }
@@ -1272,7 +1300,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.balanced.pop_modules_mode_pseudo_class(mode_data);
             }
         }
-        if matches!(self.scope, Scope::InBlock) && mode_data.is_local_mode() {
+        if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {
             self.handle_local_keyframes_dependency(lexer)?;
         }
         Some(())

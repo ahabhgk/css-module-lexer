@@ -1,6 +1,7 @@
 use css_module_lexer::collect_css_modules_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Range;
+use indoc::indoc;
 
 use crate::slice_range;
 
@@ -377,5 +378,149 @@ fn localize_animation() {
     test(
         ".foo { animation: 0s ease 0s 1 normal none test running; }",
         ":local(.foo) { animation: 0s ease 0s 1 normal none :local(test) running; }",
+    );
+}
+
+// #[test]
+// fn localize_animation_with_vendor_prefix() {
+//     test(
+//         ".foo { -webkit-animation: bar; animation: bar; }",
+//         ":local(.foo) { -webkit-animation: :local(bar); animation: :local(bar); }",
+//     );
+// }
+
+#[test]
+fn not_localize_other_rules() {
+    test(
+        ".foo { content: \"animation: bar;\" }",
+        ":local(.foo) { content: \"animation: bar;\" }",
+    );
+}
+
+#[test]
+fn not_localize_global_rules() {
+    test(
+        ":global .foo { animation: foo; animation-name: bar; }",
+        ".foo { animation: foo; animation-name: bar; }",
+    );
+}
+
+#[test]
+fn handle_nested_global() {
+    test(":global .a:not(:global .b) {}", ".a:not(.b) {}");
+    test(
+        ":global .a:not(:global .b:not(:global .c)) {}",
+        ".a:not(.b:not(.c)) {}",
+    );
+    test(
+        ":local .a:not(:not(:not(:global .c))) {}",
+        ":local(.a):not(:not(:not(.c))) {}",
+    );
+    test(
+        ":global .a:not(:global .b, :global .c) {}",
+        ".a:not(.b, .c) {}",
+    );
+    test(
+        ":local .a:not(:global .b, :local .c) {}",
+        ":local(.a):not(.b, :local(.c)) {}",
+    );
+    test(
+        ":global .a:not(:local .b, :global .c) {}",
+        ".a:not(:local(.b), .c) {}",
+    );
+    test(":global .a:not(.b, .c) {}", ".a:not(.b, .c) {}");
+    test(
+        ":local .a:not(.b, .c) {}",
+        ":local(.a):not(:local(.b), :local(.c)) {}",
+    );
+    test(
+        ":global .a:not(:local .b, .c) {}",
+        ".a:not(:local(.b), :local(.c)) {}",
+    );
+}
+
+#[test]
+fn handle_a_complex_animation_rule() {
+    test(
+        ".foo { animation: foo, bar 5s linear 2s infinite alternate, barfoo 1s; }", 
+        ":local(.foo) { animation: :local(foo), :local(bar) 5s linear 2s infinite alternate, :local(barfoo) 1s; }",
+    );
+}
+
+#[test]
+fn handle_animations_where_the_first_value_is_not_the_animation_name() {
+    test(
+        ".foo { animation: 1s foo; }",
+        ":local(.foo) { animation: 1s :local(foo); }",
+    );
+}
+
+#[test]
+fn handle_animations_where_the_first_value_is_not_the_animation_name_whilst_also_using_keywords() {
+    test(
+        ".foo { animation: 1s normal ease-out infinite foo; }",
+        ":local(.foo) { animation: 1s normal ease-out infinite :local(foo); }",
+    );
+}
+
+#[test]
+fn not_treat_animation_curve_as_identifier_of_animation_name_even_if_it_separated_by_comma() {
+    test(
+        ".foo { animation: slide-right 300ms forwards ease-out, fade-in 300ms forwards ease-out; }",
+        ":local(.foo) { animation: :local(slide-right) 300ms forwards ease-out, :local(fade-in) 300ms forwards ease-out; }",
+    );
+}
+
+#[test]
+fn not_treat_start_and_end_keywords_in_steps_function_as_identifiers() {
+    test(
+        indoc! {r#"
+            .foo { animation: spin 1s steps(12, end) infinite; }
+            .foo { animation: spin 1s STEPS(12, start) infinite; }
+            .foo { animation: spin 1s steps(12, END) infinite; }
+            .foo { animation: spin 1s steps(12, START) infinite; }
+        "#},
+        indoc! {r#"
+            :local(.foo) { animation: :local(spin) 1s steps(12, end) infinite; }
+            :local(.foo) { animation: :local(spin) 1s STEPS(12, start) infinite; }
+            :local(.foo) { animation: :local(spin) 1s steps(12, END) infinite; }
+            :local(.foo) { animation: :local(spin) 1s steps(12, START) infinite; }
+        "#},
+    );
+}
+
+#[test]
+fn handle_animations_with_custom_timing_functions() {
+    test(
+        ".foo { animation: 1s normal cubic-bezier(0.25, 0.5, 0.5. 0.75) foo; }",
+        ":local(.foo) { animation: 1s normal cubic-bezier(0.25, 0.5, 0.5. 0.75) :local(foo); }",
+    );
+}
+
+#[test]
+fn handle_animations_whose_names_are_keywords() {
+    test(
+        ".foo { animation: 1s infinite infinite; }",
+        ":local(.foo) { animation: 1s infinite :local(infinite); }",
+    );
+}
+
+#[test]
+fn handle_not_localize_an_animation_shorthand_value_of_inherit() {
+    test(
+        ".foo { animation: inherit; }",
+        ":local(.foo) { animation: inherit; }",
+    );
+}
+
+#[test]
+fn handle_constructor_as_animation_name() {
+    test(
+        ".foo { animation: constructor constructor; }",
+        // should be ":local(.foo) { animation: :local(constructor) :local(constructor); }"
+        // but the output of postcss-modules-scope is "._local_foo) { animation: _local_constructor :local(constructor); }"
+        // postcss-modules-scope only process the first :local in decl.value
+        // therefore seems our output is more appropriate and it's fine to have different output here
+        ":local(.foo) { animation: constructor :local(constructor); }",
     );
 }
