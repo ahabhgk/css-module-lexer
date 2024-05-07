@@ -274,11 +274,96 @@ impl CssModulesModeData {
     }
 }
 
+#[derive(Debug)]
+struct AnimationProperty {
+    keywords: AnimationKeywords,
+    keyframes: Option<Range>,
+    balanced_len: usize,
+}
+
+impl AnimationProperty {
+    pub fn new(balanced_len: usize) -> Self {
+        Self {
+            keywords: AnimationKeywords::default(),
+            keyframes: None,
+            balanced_len,
+        }
+    }
+
+    fn check_keywords(&mut self, ident: &str) -> bool {
+        self.keywords.check(ident)
+    }
+
+    pub fn set_keyframes(&mut self, ident: &str, range: Range) {
+        if self.check_keywords(ident) {
+            self.keyframes = Some(range);
+        }
+    }
+
+    pub fn take_keyframes(&mut self, balanced_len: usize) -> Option<Range> {
+        // Don't rename animation name when we in functions
+        if balanced_len != self.balanced_len {
+            return None;
+        }
+        std::mem::take(&mut self.keyframes)
+    }
+}
+
 #[derive(Debug, Default)]
-enum AnimationKeyframes {
-    #[default]
-    Start,
-    LastIdent(Range),
+struct AnimationKeywords {
+    bits: u32,
+}
+
+impl AnimationKeywords {
+    const NORMAL: u32 = 1 << 0;
+    const REVERSE: u32 = 1 << 1;
+    const ALTERNATE: u32 = 1 << 2;
+    const ALTERNATE_REVERSE: u32 = 1 << 3;
+    const FORWARDS: u32 = 1 << 4;
+    const BACKWARDS: u32 = 1 << 5;
+    const BOTH: u32 = 1 << 6;
+    const INFINITE: u32 = 1 << 7;
+    const PAUSED: u32 = 1 << 8;
+    const RUNNING: u32 = 1 << 9;
+    const EASE: u32 = 1 << 10;
+    const EASE_IN: u32 = 1 << 11;
+    const EASE_OUT: u32 = 1 << 12;
+    const EASE_IN_OUT: u32 = 1 << 13;
+    const LINEAR: u32 = 1 << 14;
+    const STEP_END: u32 = 1 << 15;
+    const STEP_START: u32 = 1 << 16;
+
+    pub fn check(&mut self, ident: &str) -> bool {
+        match ident {
+            "normal" => self.keyword_check(Self::NORMAL),
+            "reverse" => self.keyword_check(Self::REVERSE),
+            "alternate" => self.keyword_check(Self::ALTERNATE),
+            "alternate_reverse" => self.keyword_check(Self::ALTERNATE_REVERSE),
+            "forwards" => self.keyword_check(Self::FORWARDS),
+            "backwards" => self.keyword_check(Self::BACKWARDS),
+            "both" => self.keyword_check(Self::BOTH),
+            "infinite" => self.keyword_check(Self::INFINITE),
+            "paused" => self.keyword_check(Self::PAUSED),
+            "running" => self.keyword_check(Self::RUNNING),
+            "ease" => self.keyword_check(Self::EASE),
+            "ease_in" => self.keyword_check(Self::EASE_IN),
+            "ease_out" => self.keyword_check(Self::EASE_OUT),
+            "ease_in_out" => self.keyword_check(Self::EASE_IN_OUT),
+            "linear" => self.keyword_check(Self::LINEAR),
+            "step_end" => self.keyword_check(Self::STEP_END),
+            "step_start" => self.keyword_check(Self::STEP_START),
+            "none" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
+            _ => true,
+        }
+    }
+
+    fn keyword_check(&mut self, bit: u32) -> bool {
+        if self.bits & bit == bit {
+            return true;
+        }
+        self.bits |= bit;
+        false
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -384,7 +469,7 @@ pub struct LexDependencies<'s, D, W> {
     allow_import_at_rule: bool,
     balanced: BalancedStack,
     is_next_rule_prelude: bool,
-    in_animation_property: Option<AnimationKeyframes>,
+    in_animation_property: Option<AnimationProperty>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -423,9 +508,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
         let mut media_lexer = Lexer::from(media);
-        media_lexer.consume()?;
+        media_lexer.consume();
         media_lexer.consume_white_space_and_comments()?;
         Some(media)
+    }
+
+    fn enter_animation_property(&mut self) {
+        self.in_animation_property = Some(AnimationProperty::new(self.balanced.len()));
+    }
+
+    fn exit_animation_property(&mut self) {
+        self.in_animation_property = None;
     }
 
     fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
@@ -438,7 +531,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             {
                 break;
             }
-            lexer.consume()?;
+            lexer.consume();
         }
         Some(())
     }
@@ -449,7 +542,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             if c == C_RIGHT_CURLY || c == C_SEMICOLON {
                 break;
             }
-            lexer.consume()?;
+            lexer.consume();
         }
         Some(())
     }
@@ -464,7 +557,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             });
             return Some(());
         }
-        lexer.consume()?;
+        lexer.consume();
         lexer.consume_white_space_and_comments()?;
         while lexer.cur()? != C_RIGHT_CURLY {
             lexer.consume_white_space_and_comments()?;
@@ -479,13 +572,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 });
                 return Some(());
             }
-            lexer.consume()?;
+            lexer.consume();
             lexer.consume_white_space_and_comments()?;
             let value_start = lexer.cur_pos()?;
             self.consume_icss_export_value(lexer)?;
             let value_end = lexer.cur_pos()?;
             if lexer.cur()? == C_SEMICOLON {
-                lexer.consume()?;
+                lexer.consume();
                 lexer.consume_white_space_and_comments()?;
             }
             self.handle_dependency
@@ -498,7 +591,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         .trim_end_matches(is_white_space),
                 });
         }
-        lexer.consume()?;
+        lexer.consume();
         Some(())
     }
 
@@ -534,7 +627,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if lexer.cur()? != C_COLON {
             return Some(());
         }
-        lexer.consume()?;
+        lexer.consume();
         self.handle_dependency
             .handle_dependency(Dependency::LocalVarDecl {
                 name,
@@ -607,7 +700,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         if let Some(animation) = &mut self.in_animation_property {
-            if let AnimationKeyframes::LastIdent(range) = std::mem::take(animation) {
+            if let Some(range) = animation.take_keyframes(self.balanced.len()) {
                 self.handle_dependency
                     .handle_dependency(Dependency::LocalKeyframes {
                         name: lexer.slice(range.start, range.end)?,
@@ -623,7 +716,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if lexer.cur()? != C_COLON {
             return Some(());
         }
-        lexer.consume()?;
+        lexer.consume();
         let mut end;
         let mut has_from = false;
         loop {
@@ -661,7 +754,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         from: None,
                     });
                 if c == C_COMMA {
-                    lexer.consume()?;
+                    lexer.consume();
                     continue;
                 }
                 end = names_end;
@@ -669,7 +762,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             let path_start = lexer.cur_pos()?;
             if c == '\'' || c == '"' {
-                lexer.consume()?;
+                lexer.consume();
                 lexer.consume_string(self, c)?;
             } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
                 lexer.consume_ident_sequence()?;
@@ -691,10 +784,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             if lexer.cur()? != C_COMMA {
                 break;
             }
-            lexer.consume()?;
+            lexer.consume();
         }
         if lexer.cur()? == C_SEMICOLON {
-            lexer.consume()?;
+            lexer.consume();
             end = lexer.cur_pos()?;
         }
         self.handle_dependency
@@ -916,7 +1009,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 if let Some(mode_data) = &self.mode_data {
                     if mode_data.is_local_mode() {
                         self.handle_local_keyframes_dependency(lexer)?;
-                        self.in_animation_property = None;
+                        self.exit_animation_property();
                     }
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 }
@@ -943,12 +1036,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         };
         if mode_data.is_local_mode() {
-            // Don't rename animation name when we in functions
-            if let Some(animation) = &mut self.in_animation_property {
-                if !self.balanced.is_empty() {
-                    *animation = AnimationKeyframes::Start;
-                }
-            }
             if name == "var(" {
                 self.lex_local_var(lexer)?;
             }
@@ -1019,7 +1106,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            *animation = AnimationKeyframes::LastIdent(Range::new(start, end));
+                            animation
+                                .set_keyframes(lexer.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
@@ -1029,7 +1117,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     }
                     let ident = ident.to_ascii_lowercase();
                     if ident == "animation" || ident == "animation-name" {
-                        self.in_animation_property = Some(AnimationKeyframes::Start);
+                        self.enter_animation_property();
                         return Some(());
                     }
                     if ident == "composes" {
@@ -1108,7 +1196,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             if let Some(mode_data) = &self.mode_data {
                 if mode_data.is_local_mode() {
                     self.handle_local_keyframes_dependency(lexer)?;
-                    self.in_animation_property = None;
+                    self.exit_animation_property();
                 }
             }
             self.block_nesting_level -= 1;

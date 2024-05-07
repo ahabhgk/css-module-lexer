@@ -328,12 +328,15 @@ fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &s
 fn lexer_start() {
     let mut l = Lexer::from("");
     assert_lexer_state(&l, None, None, None, Some(0), None, None);
-    assert_eq!(l.consume(), None);
+    l.consume();
+    assert_eq!(l.cur(), None);
     assert_lexer_state(&l, None, Some(0), None, None, None, None);
-    assert_eq!(l.consume(), None);
+    l.consume();
+    assert_eq!(l.cur(), None);
     let mut l = Lexer::from("0壹👂삼");
     assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
-    assert_eq!(l.consume(), Some('0'));
+    l.consume();
+    assert_eq!(l.cur(), Some('0'));
     assert_lexer_state(
         &l,
         Some('0'),
@@ -343,7 +346,8 @@ fn lexer_start() {
         Some('👂'),
         Some(4),
     );
-    assert_eq!(l.consume(), Some('壹'));
+    l.consume();
+    assert_eq!(l.cur(), Some('壹'));
     assert_lexer_state(
         &l,
         Some('壹'),
@@ -353,13 +357,17 @@ fn lexer_start() {
         Some('삼'),
         Some(8),
     );
-    assert_eq!(l.consume(), Some('👂'));
+    l.consume();
+    assert_eq!(l.cur(), Some('👂'));
     assert_lexer_state(&l, Some('👂'), Some(4), Some('삼'), Some(8), None, Some(11));
-    assert_eq!(l.consume(), Some('삼'));
+    l.consume();
+    assert_eq!(l.cur(), Some('삼'));
     assert_lexer_state(&l, Some('삼'), Some(8), None, Some(11), None, None);
-    assert_eq!(l.consume(), None);
+    l.consume();
+    assert_eq!(l.cur(), None);
     assert_lexer_state(&l, None, Some(11), None, None, None, None);
-    assert_eq!(l.consume(), None);
+    l.consume();
+    assert_eq!(l.cur(), None);
 }
 
 #[test]
@@ -1015,7 +1023,7 @@ fn css_modules_keyframes_1() {
             animation: 3s ease-in 1s 2 reverse both paused localkeyframes, localkeyframes2;
             --theme-color1: red;
             --theme-color2: blue;
-        }    
+        }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
@@ -1045,7 +1053,7 @@ fn css_modules_keyframes_2() {
                 var(--animation-name) 3s,
                 3s linear 1s infinite running env(slidein),
                 3s linear env(slidein, var(--baz)) infinite running slidein;
-        }   
+        }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());

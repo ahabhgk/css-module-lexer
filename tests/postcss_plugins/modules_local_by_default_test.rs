@@ -51,22 +51,18 @@ fn scope_escaped_selectors() {
 
 #[test]
 fn scope_ids() {
-    test("#foobar {}", ":local(#foobar) {}")
+    test("#foobar {}", ":local(#foobar) {}");
 }
 
 #[test]
 fn scope_escaped_ids() {
-    test("#\\#test {}", ":local(#\\#test) {}")
-}
-
-#[test]
-fn scope_escaped_ids_2() {
-    test("#u-m\\00002b {}", ":local(#u-m\\00002b) {}")
+    test("#\\#test {}", ":local(#\\#test) {}");
+    test("#u-m\\00002b {}", ":local(#u-m\\00002b) {}");
 }
 
 #[test]
 fn scope_multiple_selectors() {
-    test(".foo, .baz {}", ":local(.foo), :local(.baz) {}")
+    test(".foo, .baz {}", ":local(.foo), :local(.baz) {}");
 }
 
 #[test]
@@ -268,45 +264,33 @@ fn localize_multiple_animation_names() {
     );
 }
 
-// #[test]
-// fn not_localize_revert() {
-//     test(
-//         ".foo { animation: revert; }",
-//         ":local(.foo) { animation: revert; }",
-//     );
-// }
+#[test]
+fn not_localize_revert() {
+    test(
+        ".foo { animation: revert; }",
+        ":local(.foo) { animation: revert; }",
+    );
+    test(
+        ".foo { animation-name: revert; }",
+        ":local(.foo) { animation-name: revert; }",
+    );
+    test(
+        ".foo { animation-name: revert, foo, none; }",
+        ":local(.foo) { animation-name: revert, :local(foo), none; }",
+    );
+}
 
-// #[test]
-// fn not_localize_revert_2() {
-//     test(
-//         ".foo { animation-name: revert; }",
-//         ":local(.foo) { animation-name: revert; }",
-//     );
-// }
-
-// #[test]
-// fn not_localize_revert_3() {
-//     test(
-//         ".foo { animation-name: revert, foo, none; }",
-//         ":local(.foo) { animation-name: revert, :local(foo), none; }",
-//     );
-// }
-
-// #[test]
-// fn not_localize_revert_layer() {
-//     test(
-//         ".foo { animation: revert-layer; }",
-//         ":local(.foo) { animation: revert-layer; }",
-//     );
-// }
-
-// #[test]
-// fn not_localize_revert_layer_2() {
-//     test(
-//         ".foo { animation-name: revert-layer; }",
-//         ":local(.foo) { animation-name: revert-layer; }",
-//     );
-// }
+#[test]
+fn not_localize_revert_layer() {
+    test(
+        ".foo { animation: revert-layer; }",
+        ":local(.foo) { animation: revert-layer; }",
+    );
+    test(
+        ".foo { animation-name: revert-layer; }",
+        ":local(.foo) { animation-name: revert-layer; }",
+    );
+}
 
 #[test]
 fn localize_animation_using_special_characters() {
@@ -349,5 +333,49 @@ fn localize_animation_using_special_characters() {
     test(
         ".foo { animation: 😃bounce😃; }",
         ":local(.foo) { animation: :local(😃bounce😃); }",
+    );
+    test(
+        ".foo { animation: --foo; }",
+        ":local(.foo) { animation: :local(--foo); }",
+    );
+}
+
+#[test]
+fn not_localize_name_in_nested_function() {
+    test(
+        ".foo { animation: fade .2s var(--easeOutQuart) .1s forwards }",
+        ":local(.foo) { animation: :local(fade) .2s var(--easeOutQuart) .1s forwards }",
+    );
+    test(
+        ".foo { animation: fade .2s env(FOO_BAR) .1s forwards, name }",
+        ":local(.foo) { animation: :local(fade) .2s env(FOO_BAR) .1s forwards, :local(name) }",
+    );
+    test(
+        ".foo { animation: var(--foo-bar) .1s forwards, name }",
+        ":local(.foo) { animation: var(--foo-bar) .1s forwards, :local(name) }",
+    );
+    test(
+        ".foo { animation: var(--foo-bar) .1s forwards name, name }",
+        ":local(.foo) { animation: var(--foo-bar) .1s forwards :local(name), :local(name) }",
+    );
+}
+
+#[test]
+fn localize_animation() {
+    test(
+        ".foo { animation: a; }",
+        ":local(.foo) { animation: :local(a); }",
+    );
+    test(
+        ".foo { animation: bar 5s, foobar; }",
+        ":local(.foo) { animation: :local(bar) 5s, :local(foobar); }",
+    );
+    test(
+        ".foo { animation: ease ease; }",
+        ":local(.foo) { animation: ease :local(ease); }",
+    );
+    test(
+        ".foo { animation: 0s ease 0s 1 normal none test running; }",
+        ":local(.foo) { animation: 0s ease 0s 1 normal none :local(test) running; }",
     );
 }
