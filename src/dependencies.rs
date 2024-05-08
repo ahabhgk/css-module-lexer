@@ -10,6 +10,7 @@ use crate::lexer::C_COMMA;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_RIGHT_CURLY;
+use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
 use crate::lexer::C_SOLIDUS;
 use crate::HandleDependency;
@@ -95,27 +96,27 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
-    pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut CssModulesModeData>) {
+    pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if matches!(
                 item.kind,
                 BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
             ) {
-                mode_data.set_current_mode(CssModulesMode::Local);
+                mode_data.set_current_mode(Mode::Local);
             } else if matches!(
                 item.kind,
                 BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
             ) {
-                mode_data.set_current_mode(CssModulesMode::Global);
+                mode_data.set_current_mode(Mode::Global);
             }
         }
         self.0.push(item);
     }
 
-    pub fn pop(&mut self, mode_data: Option<&mut CssModulesModeData>) -> Option<BalancedItem> {
+    pub fn pop(&mut self, mode_data: Option<&mut ModeData>) -> Option<BalancedItem> {
         let item = self.0.pop()?;
         if let Some(mode_data) = mode_data {
-            self.update_current_modules_mode(mode_data);
+            self.update_current_mode(mode_data);
         }
         Some(item)
     }
@@ -124,7 +125,7 @@ impl BalancedStack {
         self.0.pop()
     }
 
-    pub fn pop_modules_mode_pseudo_class(&mut self, mode_data: &mut CssModulesModeData) {
+    pub fn pop_mode_pseudo_class(&mut self, mode_data: &mut ModeData) {
         loop {
             if let Some(last) = self.0.last() {
                 if matches!(
@@ -137,18 +138,18 @@ impl BalancedStack {
             }
             break;
         }
-        self.update_current_modules_mode(mode_data);
+        self.update_current_mode(mode_data);
     }
 
-    pub fn update_current_modules_mode(&self, mode_data: &mut CssModulesModeData) {
-        mode_data.set_current_mode(self.topmost_modules_mode(mode_data));
+    pub fn update_current_mode(&self, mode_data: &mut ModeData) {
+        mode_data.set_current_mode(self.topmost_mode(mode_data));
     }
 
-    pub fn update_property_modules_mode(&self, mode_data: &mut CssModulesModeData) {
-        mode_data.set_property_mode(self.topmost_modules_mode(mode_data));
+    pub fn update_property_mode(&self, mode_data: &mut ModeData) {
+        mode_data.set_property_mode(self.topmost_mode(mode_data));
     }
 
-    fn topmost_modules_mode(&self, mode_data: &CssModulesModeData) -> CssModulesMode {
+    fn topmost_mode(&self, mode_data: &ModeData) -> Mode {
         let mut iter = self.0.iter();
         loop {
             if let Some(last) = iter.next_back() {
@@ -156,12 +157,12 @@ impl BalancedStack {
                     last.kind,
                     BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
                 ) {
-                    return CssModulesMode::Local;
+                    return Mode::Local;
                 } else if matches!(
                     last.kind,
                     BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
                 ) {
-                    return CssModulesMode::Global;
+                    return Mode::Global;
                 }
             } else {
                 return mode_data.default_mode();
@@ -248,26 +249,22 @@ impl Range {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum CssModulesMode {
+#[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
     Local,
     Global,
 }
 
 #[derive(Debug)]
-pub struct CssModulesModeData {
-    default: CssModulesMode,
-    current: CssModulesMode,
-    property: CssModulesMode,
+pub struct ModeData {
+    default: Mode,
+    current: Mode,
+    property: Mode,
 }
 
-impl CssModulesModeData {
-    pub fn new(local: bool) -> Self {
-        let default = if local {
-            CssModulesMode::Local
-        } else {
-            CssModulesMode::Global
-        };
+impl ModeData {
+    pub fn new(default: Mode) -> Self {
         Self {
             default,
             current: default,
@@ -277,27 +274,27 @@ impl CssModulesModeData {
 
     pub fn is_local_mode(&self) -> bool {
         match self.current {
-            CssModulesMode::Local => true,
-            CssModulesMode::Global => false,
+            Mode::Local => true,
+            Mode::Global => false,
         }
     }
 
     pub fn is_property_local_mode(&self) -> bool {
         match self.property {
-            CssModulesMode::Local => true,
-            CssModulesMode::Global => false,
+            Mode::Local => true,
+            Mode::Global => false,
         }
     }
 
-    pub fn default_mode(&self) -> CssModulesMode {
+    pub fn default_mode(&self) -> Mode {
         self.default
     }
 
-    pub fn set_current_mode(&mut self, mode: CssModulesMode) {
+    pub fn set_current_mode(&mut self, mode: Mode) {
         self.current = mode;
     }
 
-    pub fn set_property_mode(&mut self, mode: CssModulesMode) {
+    pub fn set_property_mode(&mut self, mode: Mode) {
         self.property = mode;
     }
 }
@@ -499,7 +496,7 @@ impl Display for Warning<'_> {
 
 #[derive(Debug)]
 pub struct LexDependencies<'s, D, W> {
-    mode_data: Option<CssModulesModeData>,
+    mode_data: Option<ModeData>,
     scope: Scope<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
@@ -511,11 +508,7 @@ pub struct LexDependencies<'s, D, W> {
 }
 
 impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W> {
-    pub fn new(
-        handle_dependency: D,
-        handle_warning: W,
-        mode_data: Option<CssModulesModeData>,
-    ) -> Self {
+    pub fn new(handle_dependency: D, handle_warning: W, mode_data: Option<ModeData>) -> Self {
         Self {
             mode_data,
             scope: Scope::TopLevel,
@@ -555,6 +548,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn exit_animation_property(&mut self) {
         self.in_animation_property = None;
+    }
+
+    fn consume_back_white_space_and_comments_pos(
+        &self,
+        lexer: &Lexer<'s>,
+        end: Pos,
+    ) -> Option<Pos> {
+        let mut lexer = lexer.clone().turn_back(end)?;
+        lexer.consume();
+        lexer.consume_white_space_and_comments()?;
+        Some(end - lexer.cur_pos()?)
     }
 
     fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
@@ -702,10 +706,23 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 
     fn lex_local_keyframes_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
-        let Some(mode_data) = &self.mode_data else {
-            return Some(());
-        };
         lexer.consume_white_space_and_comments()?;
+        let mut is_function = false;
+        if lexer.cur()? == C_COLON {
+            let start = lexer.cur_pos()?;
+            lexer.consume_potential_pseudo(self)?;
+            let end = lexer.cur_pos()?;
+            let pseudo = lexer.slice(start, end)?.to_ascii_lowercase();
+            is_function = pseudo == ":local(" || pseudo == ":global(";
+            if !is_function && pseudo != ":local" && pseudo != ":global" {
+                self.handle_warning.handle_warning(Warning::Unexpected {
+                    message: "Expected ':local', ':local()', ':global', or ':global()' during parsing of '@keyframes' name",
+                    range: Range::new(start, end),
+                });
+                return Some(());
+            }
+            lexer.consume_white_space_and_comments()?;
+        }
         let start = lexer.cur_pos()?;
         if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
             self.handle_warning.handle_warning(Warning::Unexpected {
@@ -716,6 +733,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         lexer.consume_ident_sequence()?;
         let end = lexer.cur_pos()?;
+        let mode_data = self.mode_data.as_ref().unwrap();
         if mode_data.is_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalKeyframesDecl {
@@ -724,6 +742,23 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 });
         }
         lexer.consume_white_space_and_comments()?;
+        if is_function {
+            if lexer.cur()? != C_RIGHT_PARENTHESIS {
+                self.handle_warning.handle_warning(Warning::Unexpected {
+                    message: "Expected ')' during parsing of '@keyframes :local(' or '@keyframes :global('",
+                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                });
+                return Some(());
+            }
+            self.handle_dependency
+                .handle_dependency(Dependency::Replace {
+                    content: "",
+                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                });
+            self.balanced.pop_without_moda_data();
+            lexer.consume();
+            lexer.consume_white_space_and_comments()?;
+        }
         if lexer.cur()? != C_LEFT_CURLY {
             self.handle_warning.handle_warning(Warning::Unexpected {
                 message: "Expected '{' during parsing of '@keyframes'",
@@ -1100,13 +1135,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 )
             {
                 if is_function {
+                    let start = self.consume_back_white_space_and_comments_pos(lexer, start)?;
                     self.handle_dependency
                         .handle_dependency(Dependency::Replace {
                             content: "",
                             range: Range::new(start, end),
                         });
                 } else {
-                    self.balanced.pop_modules_mode_pseudo_class(mode_data);
+                    self.balanced.pop_mode_pseudo_class(mode_data);
                     let popped = self.balanced.pop_without_moda_data();
                     debug_assert!(matches!(popped.unwrap().kind, BalancedItemKind::Other));
                 }
@@ -1225,8 +1261,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             _ => return Some(()),
         }
         if let Some(mode_data) = &mut self.mode_data {
-            self.balanced.update_property_modules_mode(mode_data);
-            self.balanced.pop_modules_mode_pseudo_class(mode_data);
+            self.balanced.update_property_mode(mode_data);
+            self.balanced.pop_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
         }
         debug_assert!(
@@ -1264,10 +1300,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.mode_data.as_mut(),
         );
         if self.mode_data.is_some() && (name == ":global(" || name == ":local(") {
+            lexer.consume_white_space_and_comments()?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",
-                    range: Range::new(start, end),
+                    range: Range::new(start, lexer.cur_pos()?),
                 });
         }
         Some(())
@@ -1314,7 +1351,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
             ) && self.balanced.len() == 1
             {
-                self.balanced.pop_modules_mode_pseudo_class(mode_data);
+                self.balanced.pop_mode_pseudo_class(mode_data);
             }
         }
         if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {

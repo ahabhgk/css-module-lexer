@@ -883,9 +883,25 @@ fn css_modules_pseudo_4() {
 
 #[test]
 fn css_modules_pseudo_5() {
-    let i = ":global(.a, .b) {}";
-    let (deps, ws) = collect_css_modules_dependencies(i);
-    dbg!(deps, ws);
+    let input = ":global(.a, .b) {}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":global(");
+    assert_replace_dependency(input, &dependencies[1], "", ")");
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_pseudo_6() {
+    let input = ".a:local( .b ).c {}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_replace_dependency(input, &dependencies[1], "", ":local( ");
+    assert_local_ident_dependency(input, &dependencies[2], ".b");
+    assert_replace_dependency(input, &dependencies[3], "", " )");
+    assert_local_ident_dependency(input, &dependencies[4], ".c");
+    assert_eq!(dependencies.len(), 5);
 }
 
 #[test]
@@ -1064,6 +1080,17 @@ fn css_modules_keyframes_2() {
     assert_local_var_dependency(input, &dependencies[4], "baz");
     assert_local_keyframes_dependency(input, &dependencies[5], "slidein");
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_keyframes_3() {
+    let input = "@keyframes :local(foo) {}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":local(");
+    assert_local_keyframes_decl_dependency(input, &dependencies[1], "foo");
+    assert_replace_dependency(input, &dependencies[2], "", ")");
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]

@@ -1,16 +1,24 @@
-use css_module_lexer::collect_css_modules_dependencies;
+use css_module_lexer::Mode;
+use css_module_lexer::ModeData;
 use css_module_lexer::Dependency;
+use css_module_lexer::LexDependencies;
+use css_module_lexer::Lexer;
 use css_module_lexer::Range;
 use indoc::indoc;
 
 use crate::slice_range;
 
-fn modules_local_by_default(input: &str) -> String {
-    let (dependencies, _) = collect_css_modules_dependencies(input);
+#[derive(Debug, Default)]
+struct Options {
+    mode: Mode,
+}
+
+fn modules_local_by_default(input: &str, options: Options) -> String {
     let mut result = String::new();
     let mut index = 0;
-    for dependency in dependencies {
-        match dependency {
+    let mut lexer = Lexer::from(input);
+    let mut visitor = LexDependencies::new(
+        |dependency| match dependency {
             Dependency::LocalIdent { name, range }
             | Dependency::LocalKeyframesDecl { name, range }
             | Dependency::LocalKeyframes { name, range } => {
@@ -21,13 +29,19 @@ fn modules_local_by_default(input: &str) -> String {
                 index = range.end;
             }
             Dependency::Replace { content, range } => {
+                if slice_range(input, &range).unwrap().starts_with(":export") {
+                    return;
+                }
                 result += slice_range(input, &Range::new(index, range.start)).unwrap();
                 result += content;
                 index = range.end;
             }
             _ => {}
-        }
-    }
+        },
+        |_| {},
+        Some(ModeData::new(options.mode)),
+    );
+    lexer.lex(&mut visitor);
     let len = input.len() as u32;
     if index != len {
         result += slice_range(input, &Range::new(index, len)).unwrap();
@@ -36,7 +50,17 @@ fn modules_local_by_default(input: &str) -> String {
 }
 
 fn test(input: &str, expected: &str) {
-    let actual = modules_local_by_default(input);
+    let actual = modules_local_by_default(
+        input,
+        Options {
+            mode: Mode::Local,
+        },
+    );
+    assert_eq!(expected, actual);
+}
+
+fn test_with_options(input: &str, expected: &str, options: Options) {
+    let actual = modules_local_by_default(input, options);
     assert_eq!(expected, actual);
 }
 
@@ -522,5 +546,149 @@ fn handle_constructor_as_animation_name() {
         // postcss-modules-scope only process the first :local in decl.value
         // therefore seems our output is more appropriate and it's fine to have different output here
         ":local(.foo) { animation: constructor :local(constructor); }",
+    );
+}
+
+#[test]
+fn default_to_global_when_mode_provided() {
+    test_with_options(
+        ".foo {}",
+        ".foo {}",
+        Options {
+            mode: Mode::Global,
+        },
+    );
+}
+
+#[test]
+fn default_to_local_when_mode_provided() {
+    test_with_options(
+        ".foo {}",
+        ":local(.foo) {}",
+        Options {
+            mode: Mode::Local,
+        },
+    );
+}
+
+#[test]
+fn use_correct_spacing() {
+    test_with_options(
+        indoc! {r#"
+            .a :local .b {}
+            .a:local.b {}
+            .a:local(.b) {}
+            .a:local( .b ) {}
+            .a :local(.b) {}
+            .a :local( .b ) {}
+            :local(.a).b {}
+            :local( .a ).b {}
+            :local(.a) .b {}
+            :local( .a ) .b {}
+        "#},
+        indoc! {r#"
+            .a :local(.b) {}
+            .a:local(.b) {}
+            .a:local(.b) {}
+            .a:local(.b) {}
+            .a :local(.b) {}
+            .a :local(.b) {}
+            :local(.a).b {}
+            :local(.a).b {}
+            :local(.a) .b {}
+            :local(.a) .b {}
+        "#},
+        Options {
+            mode: Mode::Global,
+        },
+    )
+}
+
+#[test]
+fn localize_keyframes() {
+    test(
+        "@keyframes foo { from { color: red; } to { color: blue; } }",
+        "@keyframes :local(foo) { from { color: red; } to { color: blue; } }",
+    );
+}
+
+#[test]
+fn localize_keyframes_starting_with_special_characters() {
+    test(
+        "@keyframes \\@foo { from { color: red; } to { color: blue; } }",
+        "@keyframes :local(\\@foo) { from { color: red; } to { color: blue; } }",
+    );
+}
+
+#[test]
+fn localize_keyframes_containing_special_characters() {
+    test(
+        "@keyframes f\\@oo { from { color: red; } to { color: blue; } }",
+        "@keyframes :local(f\\@oo) { from { color: red; } to { color: blue; } }",
+    );
+}
+
+#[test]
+fn localize_keyframes_in_global_default_mode() {
+    test_with_options(
+        "@keyframes foo {}",
+        "@keyframes foo {}",
+        Options {
+            mode: Mode::Global,
+        },
+    );
+}
+
+#[test]
+fn localize_explicit_keyframes() {
+    test(
+        "@keyframes :local(foo) { 0% { color: red; } 33.3% { color: yellow; } 100% { color: blue; } } @-webkit-keyframes :global(bar) { from { color: red; } to { color: blue; } }",
+        "@keyframes :local(foo) { 0% { color: red; } 33.3% { color: yellow; } 100% { color: blue; } } @-webkit-keyframes bar { from { color: red; } to { color: blue; } }",
+    );
+}
+
+#[test]
+fn ignore_export_statements() {
+    test(":export { foo: __foo; }", ":export { foo: __foo; }");
+}
+
+#[test]
+fn ignore_import_statemtents() {
+    test(
+        ":import(\"~/lol.css\") { foo: __foo; }",
+        ":import(\"~/lol.css\") { foo: __foo; }",
+    );
+}
+
+#[test]
+fn incorrectly_handle_nested_selectors() {
+    test(
+        ".bar:not(:global .foo, .baz) {}",
+        ":local(.bar):not(.foo, .baz) {}",
+    );
+}
+
+#[test]
+fn compile_in_pure_mode() {
+    test_with_options(
+        ":global(.foo).bar, [type=\"radio\"] ~ .label, :not(.foo), #bar {}",
+        ".foo:local(.bar), [type=\"radio\"] ~ :local(.label), :not(:local(.foo)), :local(#bar) {}",
+        // should be pure mode, use local before we implement it
+        Options {
+            mode: Mode::Local,
+        },
+    );
+}
+
+#[test]
+fn compile_explict_global_element() {
+    test(":global(input) {}", "input {}");
+}
+
+#[test]
+fn compile_explict_global_attribute() {
+    test(
+        ":global([type=\"radio\"]), :not(:global [type=\"radio\"]) {}",
+        "[type=\"radio\"], :not([type=\"radio\"]) {}",
     );
 }

@@ -1,4 +1,4 @@
-use std::str::Chars;
+use std::{iter::Rev, str::Chars};
 
 pub const C_LINE_FEED: char = '\n';
 pub const C_CARRIAGE_RETURN: char = '\r';
@@ -76,9 +76,9 @@ pub trait Visitor<'s> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Lexer<'s> {
+pub struct Lexer<'s, I: Iterator<Item = char> = Chars<'s>> {
     value: &'s str,
-    iter: Chars<'s>,
+    iter: I,
     cur_pos: Option<Pos>,
     cur: Option<char>,
     peek: Option<char>,
@@ -102,6 +102,23 @@ impl<'s> From<&'s str> for Lexer<'s> {
 }
 
 impl<'s> Lexer<'s> {
+    pub fn turn_back(self, end: Pos) -> Option<Lexer<'s, Rev<Chars<'s>>>> {
+        let value = self.slice(0, end).unwrap();
+        let mut iter = value.chars().rev();
+        let peek = iter.next();
+        let peek2 = iter.next();
+        Some(Lexer {
+            value,
+            iter,
+            cur_pos: None,
+            cur: None,
+            peek,
+            peek2,
+        })
+    }
+}
+
+impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
     pub fn consume(&mut self) {
         self.cur_pos = self.peek_pos();
         self.cur = self.peek;
@@ -181,32 +198,8 @@ impl<'s> Lexer<'s> {
         Some(())
     }
 
-    pub fn consume_comments(&mut self) -> Option<()> {
-        if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
-            self.consume();
-            loop {
-                self.consume();
-                let c = self.cur()?;
-                if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
-                    self.consume();
-                    self.consume();
-                    break;
-                }
-            }
-        }
-        Some(())
-    }
-
     pub fn consume_delim(&mut self) {
         self.consume();
-    }
-
-    pub fn consume_space(&mut self) -> Option<()> {
-        self.consume();
-        while is_white_space(self.cur()?) {
-            self.consume();
-        }
-        Some(())
     }
 
     pub fn consume_numeric_token(&mut self) -> Option<()> {
@@ -515,6 +508,32 @@ impl<'s> Lexer<'s> {
         self.consume();
         let end = self.cur_pos()?;
         visitor.right_curly_bracket(self, end - 1, end)
+    }
+}
+
+impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
+    pub fn consume_comments(&mut self) -> Option<()> {
+        if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
+            self.consume();
+            loop {
+                self.consume();
+                let c = self.cur()?;
+                if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
+                    self.consume();
+                    self.consume();
+                    break;
+                }
+            }
+        }
+        Some(())
+    }
+
+    pub fn consume_space(&mut self) -> Option<()> {
+        self.consume();
+        while is_white_space(self.cur()?) {
+            self.consume();
+        }
+        Some(())
     }
 
     pub fn consume_white_space_and_comments(&mut self) -> Option<()> {

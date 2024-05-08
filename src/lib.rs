@@ -1,7 +1,8 @@
 mod dependencies;
 mod lexer;
 
-pub use dependencies::CssModulesModeData;
+pub use dependencies::Mode;
+pub use dependencies::ModeData;
 pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;
 pub use dependencies::Range;
@@ -57,7 +58,7 @@ pub fn lex_css_modules_dependencies<'s>(
     let mut visitor = LexDependencies::new(
         handle_dependency,
         handle_warning,
-        Some(CssModulesModeData::new(true)),
+        Some(ModeData::new(Mode::Local)),
     );
     lexer.lex(&mut visitor);
 }
@@ -78,7 +79,7 @@ pub fn lex_css_modules_global_dependencies<'s>(
     let mut visitor = LexDependencies::new(
         handle_dependency,
         handle_warning,
-        Some(CssModulesModeData::new(false)),
+        Some(ModeData::new(Mode::Global)),
     );
     lexer.lex(&mut visitor);
 }
