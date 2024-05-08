@@ -173,6 +173,22 @@ impl BalancedStack {
             }
         }
     }
+
+    pub fn inside_mode_function(&self) -> Option<Pos> {
+        let mut iter = self.0.iter();
+        loop {
+            if let Some(last) = iter.next_back() {
+                if matches!(
+                    last.kind,
+                    BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
+                ) {
+                    return Some(last.range.start);
+                }
+            } else {
+                return None;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -473,6 +489,7 @@ pub enum Warning<'s> {
     ExpectedUrlBefore { range: Range, when: &'s str },
     ExpectedLayerBefore { range: Range, when: &'s str },
     InconsistentModeResult { range: Range },
+    ExpectedNotInside { range: Range, pseudo: &'s str },
 }
 
 impl Display for Warning<'_> {
@@ -498,6 +515,7 @@ impl Display for Warning<'_> {
                 "The 'layer(...)' in '{when}' should be before 'supports(...)'"
             ),
             Warning::InconsistentModeResult { .. } => write!(f, "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"),
+            Warning::ExpectedNotInside {  pseudo, .. } => write!(f, "A '{pseudo}' is not allowed inside of a ':local()' or ':global()'"),
         }
     }
 }
@@ -1132,29 +1150,33 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         };
         if let Some(mode_data) = &mut self.mode_data {
-            let is_function = matches!(
+            let mut is_function = matches!(
                 last.kind,
                 BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
             );
-            if is_function
-                || matches!(
-                    last.kind,
-                    BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
-                )
-            {
-                if is_function {
-                    let start = self.consume_back_white_space_and_comments_pos(lexer, start)?;
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Replace {
-                            content: "",
-                            range: Range::new(start, end),
-                        });
-                } else {
-                    self.balanced.pop_mode_pseudo_class(mode_data);
-                    let popped = self.balanced.pop_without_moda_data();
-                    debug_assert!(matches!(popped.unwrap().kind, BalancedItemKind::Other));
-                }
-                return Some(());
+            let is_class = matches!(
+                last.kind,
+                BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
+            );
+            if is_class {
+                self.balanced.pop_mode_pseudo_class(mode_data);
+                let popped = self.balanced.pop_without_moda_data().unwrap();
+                debug_assert!(!matches!(
+                    popped.kind,
+                    BalancedItemKind::GlobalClass | BalancedItemKind::LocalClass
+                ));
+                is_function = matches!(
+                    popped.kind,
+                    BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
+                );
+            }
+            if is_function {
+                let start = self.consume_back_white_space_and_comments_pos(lexer, start)?;
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, end),
+                    });
             }
         }
         if let Scope::InAtImport(ref mut import_data) = self.scope {
@@ -1308,13 +1330,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn pseudo_function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
-        self.balanced.push(
-            BalancedItem::new(&name, start, end),
-            self.mode_data.as_mut(),
-        );
         if self.mode_data.is_some() && (name == ":global(" || name == ":local(") {
+            if let Some(inside_start) = self.balanced.inside_mode_function() {
+                self.handle_warning
+                    .handle_warning(Warning::ExpectedNotInside {
+                        range: Range::new(inside_start, end),
+                        pseudo: lexer.slice(start, end)?,
+                    });
+            }
             lexer.consume_white_space_and_comments()?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
@@ -1322,6 +1347,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(start, lexer.cur_pos()?),
                 });
         }
+        self.balanced.push(
+            BalancedItem::new(&name, start, end),
+            self.mode_data.as_mut(),
+        );
         Some(())
     }
 
@@ -1331,6 +1360,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         };
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == ":global" || name == ":local" {
+            if let Some(inside_start) = self.balanced.inside_mode_function() {
+                self.handle_warning
+                    .handle_warning(Warning::ExpectedNotInside {
+                        range: Range::new(inside_start, end),
+                        pseudo: lexer.slice(start, end)?,
+                    });
+            }
             self.balanced.push(
                 BalancedItem::new(&name, start, end),
                 self.mode_data.as_mut(),

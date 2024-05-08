@@ -687,3 +687,39 @@ fn throw_on_inconsistent_selector_result() {
         "Inconsistent",
     );
 }
+
+#[test]
+fn throw_on_nested_locals() {
+    test_with_warning(
+        ":local(:local(.foo)) {}",
+        ":local(.foo) {}",
+        "is not allowed inside",
+    );
+}
+
+#[test]
+fn throw_on_nested_globals() {
+    test_with_warning(
+        ":global(:global(.foo)) {}",
+        ".foo {}",
+        "is not allowed inside",
+    );
+}
+
+#[test]
+fn throw_on_nested_mixed() {
+    test_with_warning(
+        ":local(:global(.foo)) {}",
+        ".foo {}",
+        "is not allowed inside",
+    );
+}
+
+#[test]
+fn throw_on_nested_broad_local() {
+    test_with_warning(
+        ":global(:local .foo) {}",
+        ":local(.foo) {}",
+        "is not allowed inside",
+    );
+}

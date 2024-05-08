@@ -155,7 +155,8 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::ExpectedUrl { range, .. }
         | Warning::ExpectedUrlBefore { range, .. }
         | Warning::ExpectedLayerBefore { range, .. }
-        | Warning::InconsistentModeResult { range } => {
+        | Warning::InconsistentModeResult { range }
+        | Warning::ExpectedNotInside { range, .. } => {
             assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
     };
@@ -903,6 +904,13 @@ fn css_modules_pseudo_6() {
     assert_replace_dependency(input, &dependencies[3], "", " )");
     assert_local_ident_dependency(input, &dependencies[4], ".c");
     assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
+fn t() {
+    let input = ":global(:local .foo) {}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    dbg!(dependencies, warnings);
 }
 
 #[test]
