@@ -1,9 +1,10 @@
-use css_module_lexer::Mode;
-use css_module_lexer::ModeData;
 use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
+use css_module_lexer::Mode;
+use css_module_lexer::ModeData;
 use css_module_lexer::Range;
+use css_module_lexer::Warning;
 use indoc::indoc;
 
 use crate::slice_range;
@@ -13,8 +14,9 @@ struct Options {
     mode: Mode,
 }
 
-fn modules_local_by_default(input: &str, options: Options) -> String {
+fn modules_local_by_default(input: &str, options: Options) -> (String, Vec<Warning>) {
     let mut result = String::new();
+    let mut warnings = Vec::new();
     let mut index = 0;
     let mut lexer = Lexer::from(input);
     let mut visitor = LexDependencies::new(
@@ -38,7 +40,7 @@ fn modules_local_by_default(input: &str, options: Options) -> String {
             }
             _ => {}
         },
-        |_| {},
+        |warning| warnings.push(warning),
         Some(ModeData::new(options.mode)),
     );
     lexer.lex(&mut visitor);
@@ -46,22 +48,25 @@ fn modules_local_by_default(input: &str, options: Options) -> String {
     if index != len {
         result += slice_range(input, &Range::new(index, len)).unwrap();
     }
-    result
+    (result, warnings)
 }
 
 fn test(input: &str, expected: &str) {
-    let actual = modules_local_by_default(
-        input,
-        Options {
-            mode: Mode::Local,
-        },
-    );
+    let (actual, warnings) = modules_local_by_default(input, Default::default());
     assert_eq!(expected, actual);
+    assert!(warnings.is_empty());
 }
 
 fn test_with_options(input: &str, expected: &str, options: Options) {
-    let actual = modules_local_by_default(input, options);
+    let (actual, warnings) = modules_local_by_default(input, options);
     assert_eq!(expected, actual);
+    assert!(warnings.is_empty());
+}
+
+fn test_with_warning(input: &str, expected: &str, warning: &str) {
+    let (actual, warnings) = modules_local_by_default(input, Default::default());
+    assert_eq!(expected, actual);
+    assert!(warnings[0].to_string().contains(warning));
 }
 
 #[test]
@@ -551,24 +556,12 @@ fn handle_constructor_as_animation_name() {
 
 #[test]
 fn default_to_global_when_mode_provided() {
-    test_with_options(
-        ".foo {}",
-        ".foo {}",
-        Options {
-            mode: Mode::Global,
-        },
-    );
+    test_with_options(".foo {}", ".foo {}", Options { mode: Mode::Global });
 }
 
 #[test]
 fn default_to_local_when_mode_provided() {
-    test_with_options(
-        ".foo {}",
-        ":local(.foo) {}",
-        Options {
-            mode: Mode::Local,
-        },
-    );
+    test_with_options(".foo {}", ":local(.foo) {}", Options { mode: Mode::Local });
 }
 
 #[test]
@@ -598,9 +591,7 @@ fn use_correct_spacing() {
             :local(.a) .b {}
             :local(.a) .b {}
         "#},
-        Options {
-            mode: Mode::Global,
-        },
+        Options { mode: Mode::Global },
     )
 }
 
@@ -633,9 +624,7 @@ fn localize_keyframes_in_global_default_mode() {
     test_with_options(
         "@keyframes foo {}",
         "@keyframes foo {}",
-        Options {
-            mode: Mode::Global,
-        },
+        Options { mode: Mode::Global },
     );
 }
 
@@ -674,9 +663,7 @@ fn compile_in_pure_mode() {
         ":global(.foo).bar, [type=\"radio\"] ~ .label, :not(.foo), #bar {}",
         ".foo:local(.bar), [type=\"radio\"] ~ :local(.label), :not(:local(.foo)), :local(#bar) {}",
         // should be pure mode, use local before we implement it
-        Options {
-            mode: Mode::Local,
-        },
+        Options { mode: Mode::Local },
     );
 }
 
@@ -690,5 +677,13 @@ fn compile_explict_global_attribute() {
     test(
         ":global([type=\"radio\"]), :not(:global [type=\"radio\"]) {}",
         "[type=\"radio\"], :not([type=\"radio\"]) {}",
+    );
+}
+#[test]
+fn throw_on_inconsistent_selector_result() {
+    test_with_warning(
+        ":global .foo, .bar {}",
+        ".foo, :local(.bar) {}",
+        "Inconsistent",
     );
 }

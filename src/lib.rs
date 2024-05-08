@@ -1,10 +1,10 @@
 mod dependencies;
 mod lexer;
 
-pub use dependencies::Mode;
-pub use dependencies::ModeData;
 pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;
+pub use dependencies::Mode;
+pub use dependencies::ModeData;
 pub use dependencies::Range;
 pub use dependencies::UrlRangeKind;
 pub use dependencies::Warning;

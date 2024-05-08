@@ -154,7 +154,8 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::NotPrecededAtImport { range }
         | Warning::ExpectedUrl { range, .. }
         | Warning::ExpectedUrlBefore { range, .. }
-        | Warning::ExpectedLayerBefore { range, .. } => {
+        | Warning::ExpectedLayerBefore { range, .. }
+        | Warning::InconsistentModeResult { range } => {
             assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
     };

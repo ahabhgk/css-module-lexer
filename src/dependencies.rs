@@ -96,6 +96,10 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
+    pub fn is_root(&self) -> bool {
+        self.0.len() == 1
+    }
+
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if matches!(
@@ -261,6 +265,7 @@ pub struct ModeData {
     default: Mode,
     current: Mode,
     property: Mode,
+    resulting_global: Option<Pos>,
 }
 
 impl ModeData {
@@ -269,6 +274,7 @@ impl ModeData {
             default,
             current: default,
             property: default,
+            resulting_global: None,
         }
     }
 
@@ -466,6 +472,7 @@ pub enum Warning<'s> {
     ExpectedUrl { range: Range, when: &'s str },
     ExpectedUrlBefore { range: Range, when: &'s str },
     ExpectedLayerBefore { range: Range, when: &'s str },
+    InconsistentModeResult { range: Range },
 }
 
 impl Display for Warning<'_> {
@@ -490,6 +497,7 @@ impl Display for Warning<'_> {
                 f,
                 "The 'layer(...)' in '{when}' should be before 'supports(...)'"
             ),
+            Warning::InconsistentModeResult { .. } => write!(f, "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"),
         }
     }
 }
@@ -1248,7 +1256,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer, _: Pos, _: Pos) -> Option<()> {
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, _: Pos) -> Option<()> {
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
@@ -1261,6 +1269,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             _ => return Some(()),
         }
         if let Some(mode_data) = &mut self.mode_data {
+            if mode_data.resulting_global.is_some() && mode_data.is_local_mode() {
+                let resulting_global_start = mode_data.resulting_global.unwrap();
+                self.handle_warning
+                    .handle_warning(Warning::InconsistentModeResult {
+                        range: Range::new(resulting_global_start, start),
+                    });
+            }
             self.balanced.update_property_mode(mode_data);
             self.balanced.pop_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1341,17 +1356,26 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn comma(&mut self, lexer: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
+    fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        if let Some(last) = self.balanced.last() {
-            if matches!(
-                last.kind,
-                BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
-            ) && self.balanced.len() == 1
-            {
+        if mode_data.resulting_global.is_some() && mode_data.is_local_mode() {
+            let resulting_global_start = mode_data.resulting_global.unwrap();
+            self.handle_warning
+                .handle_warning(Warning::InconsistentModeResult {
+                    range: Range::new(resulting_global_start, start),
+                });
+        }
+        if self.balanced.is_root() {
+            let last = self.balanced.last().unwrap();
+            let is_local_class = matches!(last.kind, BalancedItemKind::LocalClass);
+            let is_global_class = matches!(last.kind, BalancedItemKind::GlobalClass);
+            if is_local_class || is_global_class {
                 self.balanced.pop_mode_pseudo_class(mode_data);
+                if mode_data.resulting_global.is_none() && is_global_class {
+                    mode_data.resulting_global = Some(start);
+                }
             }
         }
         if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {
