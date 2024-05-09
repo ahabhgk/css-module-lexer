@@ -723,3 +723,21 @@ fn throw_on_nested_broad_local() {
         "is not allowed inside",
     );
 }
+
+#[test]
+fn throw_on_incorrect_spacing_with_broad_global() {
+    test_with_warning(
+        ".foo :global.bar {}",
+        ":local(.foo) .bar {}",
+        "Missing trailing whitespace",
+    );
+}
+
+#[test]
+fn throw_on_incorrect_spacing_with_broad_local() {
+    test_with_warning(
+        ".foo:local .bar {}",
+        ":local(.foo):local(.bar) {}",
+        "Missing leading whitespace",
+    );
+}

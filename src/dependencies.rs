@@ -9,6 +9,7 @@ use crate::lexer::C_COLON;
 use crate::lexer::C_COMMA;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
+use crate::lexer::C_LEFT_PARENTHESIS;
 use crate::lexer::C_RIGHT_CURLY;
 use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
@@ -94,10 +95,6 @@ impl BalancedStack {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.0.len() == 1
     }
 
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
@@ -490,18 +487,21 @@ pub enum Warning<'s> {
     ExpectedLayerBefore { range: Range, when: &'s str },
     InconsistentModeResult { range: Range },
     ExpectedNotInside { range: Range, pseudo: &'s str },
+    MissingWhitespace { range: Range, surrounding: &'s str },
 }
 
 impl Display for Warning<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Warning::Unexpected { message, .. } => write!(f, "{message}"),
-            Warning::DuplicateUrl { when, .. } => {
-                write!(f, "Duplicate of 'url(...)' in '{when}'")
-            }
-            Warning::NamespaceNotSupportedInBundledCss { .. } => {
-                write!(f, "'@namespace' is not supported in bundled CSS")
-            }
+            Warning::DuplicateUrl { when, .. } => write!(
+                f,
+                "Duplicate of 'url(...)' in '{when}'"
+            ),
+            Warning::NamespaceNotSupportedInBundledCss { .. } => write!(
+                f,
+                "'@namespace' is not supported in bundled CSS"
+            ),
             Warning::NotPrecededAtImport { .. } => {
                 write!(f, "Any '@import' rules must precede all other rules")
             }
@@ -514,8 +514,18 @@ impl Display for Warning<'_> {
                 f,
                 "The 'layer(...)' in '{when}' should be before 'supports(...)'"
             ),
-            Warning::InconsistentModeResult { .. } => write!(f, "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"),
-            Warning::ExpectedNotInside {  pseudo, .. } => write!(f, "A '{pseudo}' is not allowed inside of a ':local()' or ':global()'"),
+            Warning::InconsistentModeResult { .. } => write!(
+                f,
+                "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"
+            ),
+            Warning::ExpectedNotInside { pseudo, .. } => write!(
+                f,
+                "A '{pseudo}' is not allowed inside of a ':local()' or ':global()'"
+            ),
+            Warning::MissingWhitespace { surrounding, .. } => write!(
+                f,
+                "Missing {surrounding} whitespace"
+            ),
         }
     }
 }
@@ -576,15 +586,52 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         self.in_animation_property = None;
     }
 
-    fn consume_back_white_space_and_comments_pos(
-        &self,
-        lexer: &Lexer<'s>,
-        end: Pos,
-    ) -> Option<Pos> {
-        let mut lexer = lexer.clone().turn_back(end)?;
+    fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
+        let mut lexer = lexer.clone().turn_back(end);
         lexer.consume();
         lexer.consume_white_space_and_comments()?;
-        Some(end - lexer.cur_pos()?)
+        lexer.cur_pos()
+    }
+
+    fn should_have_after_white_space(&self, lexer: &Lexer<'s>, end: Pos) -> bool {
+        let mut lexer = lexer.clone().turn_back(end);
+        let mut has_white_space = false;
+        lexer.consume();
+        loop {
+            if lexer.consume_comments().is_none() {
+                return true;
+            }
+            let Some(c) = lexer.cur() else {
+                return true;
+            };
+            if is_white_space(c) {
+                has_white_space = true;
+                if lexer.consume_space().is_none() {
+                    return true;
+                }
+            } else {
+                break;
+            }
+        }
+        let c = lexer.cur().unwrap();
+        if c == C_LEFT_PARENTHESIS || c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
+            return true;
+        }
+        has_white_space
+    }
+
+    fn has_after_white_space(&self, lexer: &mut Lexer<'s>) -> Option<bool> {
+        let mut has_white_space = false;
+        loop {
+            lexer.consume_comments()?;
+            if is_white_space(lexer.cur()?) {
+                has_white_space = true;
+                lexer.consume_space()?;
+            } else {
+                break;
+            }
+        }
+        Some(has_white_space)
     }
 
     fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
@@ -1171,11 +1218,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 );
             }
             if is_function {
-                let start = self.consume_back_white_space_and_comments_pos(lexer, start)?;
+                let distance = self.back_white_space_and_comments_distance(lexer, start)?;
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
                         content: "",
-                        range: Range::new(start, end),
+                        range: Range::new(start - distance, end),
                     });
             }
         }
@@ -1298,6 +1345,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         range: Range::new(resulting_global_start, start),
                     });
             }
+            mode_data.resulting_global = None;
             self.balanced.update_property_mode(mode_data);
             self.balanced.pop_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1367,16 +1415,36 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         pseudo: lexer.slice(start, end)?,
                     });
             }
+            let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
+            let has_after_white_space = self.has_after_white_space(lexer)?;
+            let c = lexer.cur()?;
+            if should_have_after_white_space
+                && !(has_after_white_space
+                    || c == C_RIGHT_PARENTHESIS
+                    || c == C_LEFT_CURLY
+                    || c == C_COMMA)
+            {
+                self.handle_warning
+                    .handle_warning(Warning::MissingWhitespace {
+                        range: Range::new(start, end),
+                        surrounding: "trailing",
+                    });
+            }
+            if !should_have_after_white_space && has_after_white_space {
+                self.handle_warning
+                    .handle_warning(Warning::MissingWhitespace {
+                        range: Range::new(start, end),
+                        surrounding: "leading",
+                    });
+            }
             self.balanced.push(
                 BalancedItem::new(&name, start, end),
                 self.mode_data.as_mut(),
             );
-            lexer.consume_white_space_and_comments()?;
             let end2 = lexer.cur_pos()?;
-            let comments = lexer.slice(end, end2)?.trim_matches(is_white_space);
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
-                    content: comments,
+                    content: "",
                     range: Range::new(start, end2),
                 });
             return Some(());
@@ -1403,7 +1471,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(resulting_global_start, start),
                 });
         }
-        if self.balanced.is_root() {
+        if self.balanced.len() == 1 {
             let last = self.balanced.last().unwrap();
             let is_local_class = matches!(last.kind, BalancedItemKind::LocalClass);
             let is_global_class = matches!(last.kind, BalancedItemKind::GlobalClass);

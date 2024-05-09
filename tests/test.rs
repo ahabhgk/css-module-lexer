@@ -15,8 +15,8 @@ pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
     input.get(range.start as usize..range.end as usize)
 }
 
-fn assert_lexer_state(
-    lexer: &Lexer,
+fn assert_lexer_state<I: Iterator<Item = char>>(
+    lexer: &Lexer<'_, I>,
     cur: Option<char>,
     cur_pos: Option<Pos>,
     peek: Option<char>,
@@ -156,7 +156,8 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::ExpectedUrlBefore { range, .. }
         | Warning::ExpectedLayerBefore { range, .. }
         | Warning::InconsistentModeResult { range }
-        | Warning::ExpectedNotInside { range, .. } => {
+        | Warning::ExpectedNotInside { range, .. }
+        | Warning::MissingWhitespace { range, .. } => {
             assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
     };
@@ -327,7 +328,7 @@ fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &s
 }
 
 #[test]
-fn lexer_start() {
+fn lexer_state_1() {
     let mut l = Lexer::from("");
     assert_lexer_state(&l, None, None, None, Some(0), None, None);
     l.consume();
@@ -335,6 +336,10 @@ fn lexer_start() {
     assert_lexer_state(&l, None, Some(0), None, None, None, None);
     l.consume();
     assert_eq!(l.cur(), None);
+}
+
+#[test]
+fn lexer_state_2() {
     let mut l = Lexer::from("0壹👂삼");
     assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
     l.consume();
@@ -370,6 +375,15 @@ fn lexer_start() {
     assert_lexer_state(&l, None, Some(11), None, None, None, None);
     l.consume();
     assert_eq!(l.cur(), None);
+}
+
+#[test]
+fn lexer_state_3() {
+    let l = Lexer::from("");
+    let mut l = l.turn_back(0);
+    assert_lexer_state(&l, None, None, None, Some(0), None, None);
+    l.consume();
+    assert_lexer_state(&l, None, Some(0), None, None, None, None);
 }
 
 #[test]
@@ -907,10 +921,43 @@ fn css_modules_pseudo_6() {
 }
 
 #[test]
-fn t() {
-    let input = ":global(:local .foo) {}";
+fn css_modules_missing_white_space() {
+    let input = indoc! {r#"
+        .a:global,:global .b {}
+        .a{}:global .b{}
+        :global .a {}
+        .a:not(:global .b) {}
+        .a:not(.b :global) {}
+        .a :global,.b :global {}
+        .a :global{}
+    "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
-    dbg!(dependencies, warnings);
+    assert!(warnings.is_empty());
+    // .a:global,:global .b {}
+    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_replace_dependency(input, &dependencies[1], "", ":global");
+    assert_replace_dependency(input, &dependencies[2], "", ":global ");
+    // .a{}:global .b{}
+    assert_local_ident_dependency(input, &dependencies[3], ".a");
+    assert_replace_dependency(input, &dependencies[4], "", ":global ");
+    // :global .a {}
+    assert_replace_dependency(input, &dependencies[5], "", ":global ");
+    // .a:not(:global .b) {}
+    assert_local_ident_dependency(input, &dependencies[6], ".a");
+    assert_replace_dependency(input, &dependencies[7], "", ":global ");
+    // .a:not(.b :global) {}
+    assert_local_ident_dependency(input, &dependencies[8], ".a");
+    assert_local_ident_dependency(input, &dependencies[9], ".b");
+    assert_replace_dependency(input, &dependencies[10], "", ":global");
+    // .a :global,.b :global {}
+    assert_local_ident_dependency(input, &dependencies[11], ".a");
+    assert_replace_dependency(input, &dependencies[12], "", ":global");
+    assert_local_ident_dependency(input, &dependencies[13], ".b");
+    assert_replace_dependency(input, &dependencies[14], "", ":global ");
+    // .a :global{}
+    assert_local_ident_dependency(input, &dependencies[15], ".a");
+    assert_replace_dependency(input, &dependencies[16], "", ":global");
+    assert_eq!(dependencies.len(), 17);
 }
 
 #[test]

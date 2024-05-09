@@ -102,19 +102,19 @@ impl<'s> From<&'s str> for Lexer<'s> {
 }
 
 impl<'s> Lexer<'s> {
-    pub fn turn_back(self, end: Pos) -> Option<Lexer<'s, Rev<Chars<'s>>>> {
+    pub fn turn_back(self, end: Pos) -> Lexer<'s, Rev<Chars<'s>>> {
         let value = self.slice(0, end).unwrap();
         let mut iter = value.chars().rev();
         let peek = iter.next();
         let peek2 = iter.next();
-        Some(Lexer {
+        Lexer {
             value,
             iter,
             cur_pos: None,
             cur: None,
             peek,
             peek2,
-        })
+        }
     }
 }
 
