@@ -271,6 +271,7 @@ pub enum Mode {
     #[default]
     Local,
     Global,
+    Pure,
 }
 
 #[derive(Debug)]
@@ -279,6 +280,7 @@ pub struct ModeData {
     current: Mode,
     property: Mode,
     resulting_global: Option<Pos>,
+    pure_global: Option<Pos>,
 }
 
 impl ModeData {
@@ -288,19 +290,24 @@ impl ModeData {
             current: default,
             property: default,
             resulting_global: None,
+            pure_global: Some(0),
         }
     }
 
-    pub fn is_local_mode(&self) -> bool {
+    pub fn is_pure_mode(&self) -> bool {
+        matches!(self.default, Mode::Pure)
+    }
+
+    pub fn is_current_local_mode(&self) -> bool {
         match self.current {
-            Mode::Local => true,
+            Mode::Local | Mode::Pure => true,
             Mode::Global => false,
         }
     }
 
     pub fn is_property_local_mode(&self) -> bool {
         match self.property {
-            Mode::Local => true,
+            Mode::Local | Mode::Pure => true,
             Mode::Global => false,
         }
     }
@@ -488,6 +495,7 @@ pub enum Warning<'s> {
     InconsistentModeResult { range: Range },
     ExpectedNotInside { range: Range, pseudo: &'s str },
     MissingWhitespace { range: Range, surrounding: &'s str },
+    NotPure { range: Range, message: &'s str },
 }
 
 impl Display for Warning<'_> {
@@ -526,6 +534,7 @@ impl Display for Warning<'_> {
                 f,
                 "Missing {surrounding} whitespace"
             ),
+            Warning::NotPure { message, .. } => write!(f, "Pure globals is not allowed in pure mode, {message}"),
         }
     }
 }
@@ -614,6 +623,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
         }
         let c = lexer.cur().unwrap();
+        // start of a :global :local
         if c == C_LEFT_PARENTHESIS || c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
             return true;
         }
@@ -786,6 +796,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             lexer.consume_potential_pseudo(self)?;
             let end = lexer.cur_pos()?;
             let pseudo = lexer.slice(start, end)?.to_ascii_lowercase();
+            let mode_data = self.mode_data.as_ref().unwrap();
+            if mode_data.is_pure_mode() && pseudo == ":global(" || pseudo == ":global" {
+                self.handle_warning.handle_warning(Warning::NotPure {
+                    range: Range::new(start, end),
+                    message: "'@keyframes :global' is not allowed in pure mode",
+                });
+            }
             is_function = pseudo == ":local(" || pseudo == ":global(";
             if !is_function && pseudo != ":local" && pseudo != ":global" {
                 self.handle_warning.handle_warning(Warning::Unexpected {
@@ -807,7 +824,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_ident_sequence()?;
         let end = lexer.cur_pos()?;
         let mode_data = self.mode_data.as_ref().unwrap();
-        if mode_data.is_local_mode() {
+        if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalKeyframesDecl {
                     name: lexer.slice(start, end)?,
@@ -1151,11 +1168,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.scope = Scope::TopLevel;
             }
             Scope::InBlock => {
-                if let Some(mode_data) = &self.mode_data {
+                if let Some(mode_data) = &mut self.mode_data {
+                    mode_data.pure_global = Some(end);
+
                     if mode_data.is_property_local_mode() {
                         self.handle_local_keyframes_dependency(lexer)?;
                         self.exit_animation_property();
                     }
+
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 }
             }
@@ -1180,7 +1200,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        if mode_data.is_local_mode() && name == "var(" {
+        if mode_data.is_current_local_mode() && name == "var(" {
             self.lex_local_var(lexer)?;
         }
         Some(())
@@ -1271,7 +1291,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         return Some(());
                     }
                 }
-                if mode_data.is_local_mode() {
+                if mode_data.is_current_local_mode() {
                     let ident = lexer.slice(start, end)?;
                     if let Some(name) = ident.strip_prefix("--") {
                         return self.lex_local_var_decl(lexer, name, start, end);
@@ -1296,31 +1316,37 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        let Some(mode_data) = &self.mode_data else {
+        let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        if mode_data.is_local_mode() {
+        if mode_data.is_current_local_mode() {
             let name = lexer.slice(start, end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalIdent {
                     name,
                     range: Range::new(start, end),
                 });
+            if mode_data.is_pure_mode() {
+                mode_data.pure_global = None;
+            }
         }
         Some(())
     }
 
     fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        let Some(mode_data) = &self.mode_data else {
+        let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        if mode_data.is_local_mode() {
+        if mode_data.is_current_local_mode() {
             let name = lexer.slice(start, end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalIdent {
                     name,
                     range: Range::new(start, end),
                 });
+            if mode_data.is_pure_mode() {
+                mode_data.pure_global = None;
+            }
         }
         Some(())
     }
@@ -1338,7 +1364,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             _ => return Some(()),
         }
         if let Some(mode_data) = &mut self.mode_data {
-            if mode_data.resulting_global.is_some() && mode_data.is_local_mode() {
+            if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
+                let pure_global_start = mode_data.pure_global.unwrap();
+                self.handle_warning.handle_warning(Warning::NotPure {
+                    range: Range::new(pure_global_start, start),
+                    message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+                });
+            }
+
+            if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
                 let resulting_global_start = mode_data.resulting_global.unwrap();
                 self.handle_warning
                     .handle_warning(Warning::InconsistentModeResult {
@@ -1346,6 +1380,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
             }
             mode_data.resulting_global = None;
+
             self.balanced.update_property_mode(mode_data);
             self.balanced.pop_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1357,14 +1392,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
+    fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, end: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock) {
-            if let Some(mode_data) = &self.mode_data {
+            if let Some(mode_data) = &mut self.mode_data {
+                mode_data.pure_global = Some(end);
+
                 if mode_data.is_property_local_mode() {
                     self.handle_local_keyframes_dependency(lexer)?;
                     self.exit_animation_property();
                 }
             }
+
             self.block_nesting_level -= 1;
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
@@ -1388,6 +1426,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         pseudo: lexer.slice(start, end)?,
                     });
             }
+
             lexer.consume_white_space_and_comments()?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
@@ -1415,6 +1454,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         pseudo: lexer.slice(start, end)?,
                     });
             }
+
             let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
             let has_after_white_space = self.has_after_white_space(lexer)?;
             let c = lexer.cur()?;
@@ -1437,6 +1477,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         surrounding: "leading",
                     });
             }
+
             self.balanced.push(
                 BalancedItem::new(&name, start, end),
                 self.mode_data.as_mut(),
@@ -1460,17 +1501,28 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
+    fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        if mode_data.resulting_global.is_some() && mode_data.is_local_mode() {
+
+        if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
+            let pure_global_start = mode_data.pure_global.unwrap();
+            self.handle_warning.handle_warning(Warning::NotPure {
+                range: Range::new(pure_global_start, start),
+                message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+            });
+        }
+        mode_data.pure_global = Some(end);
+
+        if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
             let resulting_global_start = mode_data.resulting_global.unwrap();
             self.handle_warning
                 .handle_warning(Warning::InconsistentModeResult {
                     range: Range::new(resulting_global_start, start),
                 });
         }
+
         if self.balanced.len() == 1 {
             let last = self.balanced.last().unwrap();
             let is_local_class = matches!(last.kind, BalancedItemKind::LocalClass);
@@ -1482,9 +1534,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
         }
+
         if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {
             self.handle_local_keyframes_dependency(lexer)?;
         }
+
         Some(())
     }
 }

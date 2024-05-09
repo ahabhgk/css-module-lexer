@@ -157,7 +157,8 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::ExpectedLayerBefore { range, .. }
         | Warning::InconsistentModeResult { range }
         | Warning::ExpectedNotInside { range, .. }
-        | Warning::MissingWhitespace { range, .. } => {
+        | Warning::MissingWhitespace { range, .. }
+        | Warning::NotPure { range, .. } => {
             assert_eq!(slice_range(input, range).unwrap(), range_content);
         }
     };
@@ -958,6 +959,13 @@ fn css_modules_missing_white_space() {
     assert_local_ident_dependency(input, &dependencies[15], ".a");
     assert_replace_dependency(input, &dependencies[16], "", ":global");
     assert_eq!(dependencies.len(), 17);
+}
+
+#[test]
+fn t() {
+    let input = ".a:not(.a:not(:global .a):local .b) {}";
+    let (dependencies, warings) = collect_css_modules_dependencies(input);
+    dbg!(dependencies, warings);
 }
 
 #[test]

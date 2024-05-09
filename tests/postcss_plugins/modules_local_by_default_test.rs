@@ -69,6 +69,12 @@ fn test_with_warning(input: &str, expected: &str, warning: &str) {
     assert!(warnings[0].to_string().contains(warning));
 }
 
+fn test_with_options_warning(input: &str, expected: &str, options: Options, warning: &str) {
+    let (actual, warnings) = modules_local_by_default(input, options);
+    assert_eq!(expected, actual);
+    assert!(warnings[0].to_string().contains(warning));
+}
+
 #[test]
 fn scope_selectors() {
     test(".foobar {}", ":local(.foobar) {}");
@@ -662,8 +668,7 @@ fn compile_in_pure_mode() {
     test_with_options(
         ":global(.foo).bar, [type=\"radio\"] ~ .label, :not(.foo), #bar {}",
         ".foo:local(.bar), [type=\"radio\"] ~ :local(.label), :not(:local(.foo)), :local(#bar) {}",
-        // should be pure mode, use local before we implement it
-        Options { mode: Mode::Local },
+        Options { mode: Mode::Pure },
     );
 }
 
@@ -739,5 +744,120 @@ fn throw_on_incorrect_spacing_with_broad_local() {
         ".foo:local .bar {}",
         ":local(.foo):local(.bar) {}",
         "Missing leading whitespace",
+    );
+}
+
+#[test]
+fn throw_on_not_pure_selector_global_class() {
+    test_with_options_warning(
+        ":global(.foo) {}",
+        ".foo {}",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+}
+
+#[test]
+fn throw_on_not_pure_selector_with_multiple() {
+    test_with_options_warning(
+        ".foo, :global(.bar) {}",
+        ":local(.foo), .bar {}",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+    test_with_options_warning(
+        ":global(.bar), .foo {}",
+        ".bar, :local(.foo) {}",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+}
+
+#[test]
+fn throw_on_not_pure_selector_element() {
+    test_with_options_warning(
+        "input {}",
+        "input {}",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+    test_with_options_warning(
+        "[type=\"radio\"] {}",
+        "[type=\"radio\"] {}",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+}
+
+#[test]
+fn throw_on_not_pure_keyframes() {
+    test_with_options_warning(
+        "@keyframes :global(foo) {}",
+        "@keyframes foo {}",
+        Options { mode: Mode::Pure },
+        "'@keyframes :global' is not allowed in pure mode",
+    );
+}
+
+#[test]
+fn pass_through_global_element() {
+    test("input {}", "input {}");
+}
+
+#[test]
+fn localise_class_and_pass_through_element() {
+    test(".foo input {}", ":local(.foo) input {}");
+}
+
+#[test]
+fn pass_through_attribute_selector() {
+    test("[type=\"radio\"] {}", "[type=\"radio\"] {}");
+}
+
+#[test]
+fn not_modify_urls_without_option() {
+    test(
+        indoc! {r#"
+            .a { background: url(./image.png); }
+            :global .b { background: url(image.png); }
+            .c { background: url("./image.png"); }
+        "#},
+        indoc! {r#"
+            :local(.a) { background: url(./image.png); }
+            .b { background: url(image.png); }
+            :local(.c) { background: url("./image.png"); }
+        "#},
+    );
+}
+
+#[test]
+fn rewrite_url_in_local_block() {
+    test(
+        indoc! {r#"
+            .a { background: url(./image.png); }
+            :global .b { background: url(image.png); }
+            .c { background: url("./image.png"); }
+            .c { background: url('./image.png'); }
+            .d { background: -webkit-image-set(url("./image.png") 1x, url("./image2x.png") 2x); }
+            @font-face { src: url("./font.woff"); }
+            @-webkit-font-face { src: url("./font.woff"); }
+            @media screen { .a { src: url("./image.png"); } }
+            @keyframes :global(ani1) { 0% { src: url("image.png"); } }
+            @keyframes ani2 { 0% { src: url("./image.png"); } }
+            foo { background: end-with-url(something); }
+        "#},
+        indoc! {r#"
+            :local(.a) { background: url(./image.png); }
+            .b { background: url(image.png); }
+            :local(.c) { background: url("./image.png"); }
+            :local(.c) { background: url('./image.png'); }
+            :local(.d) { background: -webkit-image-set(url("./image.png") 1x, url("./image2x.png") 2x); }
+            @font-face { src: url("./font.woff"); }
+            @-webkit-font-face { src: url("./font.woff"); }
+            @media screen { :local(.a) { src: url("./image.png"); } }
+            @keyframes ani1 { 0% { src: url("image.png"); } }
+            @keyframes :local(ani2) { 0% { src: url("./image.png"); } }
+            foo { background: end-with-url(something); }
+        "#},
     );
 }
