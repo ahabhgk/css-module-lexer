@@ -439,7 +439,6 @@ impl<'s> Lexer<'s> {
         let start = self.cur_pos()?;
         self.consume();
         if !visitor.is_selector(self)? || !start_ident_sequence(c2, c3, self.peek2()?) {
-            self.consume_delim();
             return Some(());
         }
         self.consume_ident_sequence()?;

@@ -54,25 +54,33 @@ fn modules_local_by_default(input: &str, options: Options) -> (String, Vec<Warni
 fn test(input: &str, expected: &str) {
     let (actual, warnings) = modules_local_by_default(input, Default::default());
     assert_eq!(expected, actual);
-    assert!(warnings.is_empty());
+    assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_options(input: &str, expected: &str, options: Options) {
     let (actual, warnings) = modules_local_by_default(input, options);
     assert_eq!(expected, actual);
-    assert!(warnings.is_empty());
+    assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
     let (actual, warnings) = modules_local_by_default(input, Default::default());
     assert_eq!(expected, actual);
-    assert!(warnings[0].to_string().contains(warning));
+    assert!(
+        warnings[0].to_string().contains(warning),
+        "{}",
+        &warnings[0]
+    );
 }
 
 fn test_with_options_warning(input: &str, expected: &str, options: Options, warning: &str) {
     let (actual, warnings) = modules_local_by_default(input, options);
     assert_eq!(expected, actual);
-    assert!(warnings[0].to_string().contains(warning));
+    assert!(
+        warnings[0].to_string().contains(warning),
+        "{}",
+        &warnings[0]
+    );
 }
 
 #[test]
@@ -859,5 +867,380 @@ fn rewrite_url_in_local_block() {
             @keyframes :local(ani2) { 0% { src: url("./image.png"); } }
             foo { background: end-with-url(something); }
         "#},
+    );
+}
+
+#[test]
+fn not_crash_on_atrule_without_nodes() {
+    test("@charset \"utf-8\";", "@charset \"utf-8\";");
+}
+
+#[test]
+fn not_crash_on_a_rule_without_nodes() {
+    test(".a { .b {} }", ":local(.a) { :local(.b) {} }");
+}
+
+#[test]
+fn not_break_unicode_characters() {
+    test(
+        r#".a { content: "\\2193" }"#,
+        r#":local(.a) { content: "\\2193" }"#,
+    );
+    test(
+        r#".a { content: "\\2193\\2193" }"#,
+        r#":local(.a) { content: "\\2193\\2193" }"#,
+    );
+    test(
+        r#".a { content: "\\2193 \\2193" }"#,
+        r#":local(.a) { content: "\\2193 \\2193" }"#,
+    );
+    test(
+        r#".a { content: "\\2193\\2193\\2193" }"#,
+        r#":local(.a) { content: "\\2193\\2193\\2193" }"#,
+    );
+    test(
+        r#".a { content: "\\2193 \\2193 \\2193" }"#,
+        r#":local(.a) { content: "\\2193 \\2193 \\2193" }"#,
+    );
+}
+
+#[test]
+fn not_ignore_custom_property_set() {
+    test(
+        ":root { --title-align: center; --sr-only: { position: absolute; } }",
+        ":root { --title-align: center; --sr-only: { position: absolute; } }",
+    );
+}
+
+// #[test]
+// fn not_localize_imported_alias() {
+//     test(
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             .foo > .a_value { }
+//         "#},
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local(.foo) > .a_value { }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn not_localize_nested_imported_alias() {
+//     test(
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             .foo > .a_value > .bar { }
+//         "#},
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local(.foo) > .a_value > :local(.bar) { }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn ignore_imported_in_explicit_local() {
+//     test(
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local(.a_value) { }
+//         "#},
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local(.a_value) { }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn escape_local_context_with_explict_global() {
+//     test(
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local .foo :global(.a_value) .bar { }
+//         "#},
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             :local(.foo) .a_value :local(.bar) { }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn respect_explicit_local() {
+//     test(
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             .a_value :local .a_value .foo :global .a_value { }
+//         "#},
+//         indoc! {r#"
+//             :import(foo) { a_value: some-value; }
+
+//             .a_value :local(.a_value) :local(.foo) .a_value { }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn not_localize_imported_animation_name() {
+//     test(
+//         indoc! {r#"
+//             :import(file) { a_value: some-value; }
+
+//             .foo { animation-name: a_value; }
+//         "#},
+//         indoc! {r#"
+//             :import(file) { a_value: some-value; }
+
+//             :local(.foo) { animation-name: a_value; }
+//         "#},
+//     );
+// }
+
+#[test]
+fn throw_on_invalid_syntax_class_usage() {
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test(". {}", ". {}");
+}
+
+#[test]
+fn throw_on_invalid_syntax_id_usage() {
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test("# {}", "# {}");
+}
+
+#[test]
+fn throw_on_invalid_syntax_local_class_usage() {
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test(":local(.) {}", ". {}");
+}
+
+#[test]
+fn throw_on_invalid_syntax_local_id_usage() {
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test(":local(#) {}", "# {}");
+}
+
+#[test]
+fn throw_on_invalid_global_class_usage() {
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test(":global(.) {}", ". {}");
+    // TODO: should have "Invalid class or id selector syntax" warning
+    test(":global(#) {}", "# {}");
+    test_with_warning(
+        ":global(.a:not(:global .b, :global .c)) {}",
+        ".a:not(.b, .c) {}",
+        "A ':global' is not allowed inside of a ':local()' or ':global()'",
+    );
+    // TODO: should have ":global\(\) can't be empty" warning
+    test(":global() {}", " {}");
+}
+
+#[test]
+fn consider_nesting_statements_as_pure() {
+    test_with_options(
+        ".foo { &:hover { a_value: some-value; } }",
+        ":local(.foo) { &:hover { a_value: some-value; } }",
+        Options { mode: Mode::Pure },
+    );
+}
+
+#[test]
+fn consider_selector_nesting_statements_as_pure() {
+    test_with_options(
+        ".foo { html &:hover { a_value: some-value; } }",
+        ":local(.foo) { html &:hover { a_value: some-value; } }",
+        Options { mode: Mode::Pure },
+    );
+    test_with_options(
+        ".foo { &:global(.bar) { a_value: some-value; } }",
+        ":local(.foo) { &.bar { a_value: some-value; } }",
+        Options { mode: Mode::Pure },
+    );
+}
+
+#[test]
+fn throw_on_nested_nesting_selectors_without_a_local_selector() {
+    test_with_options_warning(
+        ":global(.foo) { &:hover { a_value: some-value; } }",
+        ".foo { &:hover { a_value: some-value; } }",
+        Options { mode: Mode::Pure },
+        "Selector is not pure",
+    );
+}
+
+#[test]
+fn css_nesting() {
+    test(
+        indoc! {r#"
+            .foo {
+                &.class {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    .bar {
+                        c_value: some-value;
+                    }
+
+                    &.baz {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+    );
+    test(
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+    );
+    test(
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+    );
+    test_with_options(
+        indoc! {r#"
+            .foo {
+                &.class {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    .bar {
+                        c_value: some-value;
+                    }
+
+                    &.baz {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            :local(.foo) {
+                &:local(.class) {
+                    a_value: some-value;
+                }
+
+                @media screen and (min-width: 900px) {
+                    b_value: some-value;
+
+                    :local(.bar) {
+                        c_value: some-value;
+                    }
+
+                    &:local(.baz) {
+                        c_value: some-value;
+                    }
+                }
+            }
+        "#},
+        Options { mode: Mode::Pure },
     );
 }

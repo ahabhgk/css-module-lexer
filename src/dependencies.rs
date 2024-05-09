@@ -1075,6 +1075,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             } else {
                 self.is_next_rule_prelude = name == "@scope";
             }
+
+            let mode_data = self.mode_data.as_mut().unwrap();
+            if mode_data.is_pure_mode() {
+                mode_data.pure_global = None;
+            }
         }
         Some(())
     }
