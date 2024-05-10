@@ -4,6 +4,7 @@ version = "0.0.2"
 edition = "2021"
 description = "Lexes CSS modules returning their dependencies metadata"
 license = "MIT"
+repository = "https://github.com/ahabhgk/css-module-lexer"
 
 [dependencies]
 smallvec = "1.13"
