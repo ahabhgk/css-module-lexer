@@ -644,6 +644,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(has_white_space)
     }
 
+    fn lex_icss_import(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        // TODO: Implement, ignore for now
+        loop {
+            lexer.consume();
+            if lexer.cur()? == C_RIGHT_CURLY {
+                break;
+            }
+        }
+        Some(())
+    }
+
     fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
         loop {
             let c = lexer.cur()?;
@@ -1495,8 +1506,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 });
             return Some(());
         }
-        if matches!(self.scope, Scope::TopLevel) && name == ":export" {
-            self.lex_icss_export(lexer)?;
+        let is_import = name == ":import";
+        let is_export = name == ":export";
+        if matches!(self.scope, Scope::TopLevel) && (is_import || is_export) {
+            if is_import {
+                self.lex_icss_import(lexer)?;
+            } else if is_export {
+                self.lex_icss_export(lexer)?;
+            }
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",
