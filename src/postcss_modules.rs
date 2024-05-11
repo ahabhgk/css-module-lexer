@@ -7,11 +7,11 @@ use crate::Range;
 use crate::Warning;
 
 #[derive(Debug, Default, Clone, Hash, PartialEq, Eq)]
-pub struct Options {
+pub struct LocalByDefaultOptions {
     pub mode: Mode,
 }
 
-pub fn local_by_default(input: &str, options: Options) -> (String, Vec<Warning>) {
+pub fn local_by_default(input: &str, options: LocalByDefaultOptions) -> (String, Vec<Warning>) {
     let mut result = String::new();
     let mut warnings = Vec::new();
     let mut index = 0;
