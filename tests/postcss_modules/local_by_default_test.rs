@@ -1,70 +1,22 @@
-use css_module_lexer::Dependency;
-use css_module_lexer::LexDependencies;
-use css_module_lexer::Lexer;
+use css_module_lexer::postcss_modules::local_by_default;
+use css_module_lexer::postcss_modules::Options;
 use css_module_lexer::Mode;
-use css_module_lexer::ModeData;
-use css_module_lexer::Range;
-use css_module_lexer::Warning;
 use indoc::indoc;
 
-use crate::slice_range;
-
-#[derive(Debug, Default)]
-struct Options {
-    mode: Mode,
-}
-
-fn modules_local_by_default(input: &str, options: Options) -> (String, Vec<Warning>) {
-    let mut result = String::new();
-    let mut warnings = Vec::new();
-    let mut index = 0;
-    let mut lexer = Lexer::from(input);
-    let mut visitor = LexDependencies::new(
-        |dependency| match dependency {
-            Dependency::LocalIdent { name, range }
-            | Dependency::LocalKeyframesDecl { name, range }
-            | Dependency::LocalKeyframes { name, range } => {
-                result += slice_range(input, &Range::new(index, range.start)).unwrap();
-                result += ":local(";
-                result += name;
-                result += ")";
-                index = range.end;
-            }
-            Dependency::Replace { content, range } => {
-                if slice_range(input, &range).unwrap().starts_with(":export") {
-                    return;
-                }
-                result += slice_range(input, &Range::new(index, range.start)).unwrap();
-                result += content;
-                index = range.end;
-            }
-            _ => {}
-        },
-        |warning| warnings.push(warning),
-        Some(ModeData::new(options.mode)),
-    );
-    lexer.lex(&mut visitor);
-    let len = input.len() as u32;
-    if index != len {
-        result += slice_range(input, &Range::new(index, len)).unwrap();
-    }
-    (result, warnings)
-}
-
 fn test(input: &str, expected: &str) {
-    let (actual, warnings) = modules_local_by_default(input, Default::default());
+    let (actual, warnings) = local_by_default(input, Default::default());
     assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_options(input: &str, expected: &str, options: Options) {
-    let (actual, warnings) = modules_local_by_default(input, options);
+    let (actual, warnings) = local_by_default(input, options);
     assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
-    let (actual, warnings) = modules_local_by_default(input, Default::default());
+    let (actual, warnings) = local_by_default(input, Default::default());
     assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
@@ -74,7 +26,7 @@ fn test_with_warning(input: &str, expected: &str, warning: &str) {
 }
 
 fn test_with_options_warning(input: &str, expected: &str, options: Options, warning: &str) {
-    let (actual, warnings) = modules_local_by_default(input, options);
+    let (actual, warnings) = local_by_default(input, options);
     assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),

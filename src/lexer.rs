@@ -1,5 +1,7 @@
 use std::{iter::Rev, str::Chars};
 
+use crate::Range;
+
 pub const C_LINE_FEED: char = '\n';
 pub const C_CARRIAGE_RETURN: char = '\r';
 pub const C_FORM_FEED: char = '\u{c}';
@@ -85,8 +87,8 @@ pub struct Lexer<'s, I: Iterator<Item = char> = Chars<'s>> {
     peek2: Option<char>,
 }
 
-impl<'s> From<&'s str> for Lexer<'s> {
-    fn from(value: &'s str) -> Self {
+impl<'s> Lexer<'s> {
+    pub fn new(value: &'s str) -> Self {
         let mut iter = value.chars();
         let peek = iter.next();
         let peek2 = iter.next();
@@ -99,9 +101,7 @@ impl<'s> From<&'s str> for Lexer<'s> {
             peek2,
         }
     }
-}
 
-impl<'s> Lexer<'s> {
     pub fn turn_back(self, end: Pos) -> Lexer<'s, Rev<Chars<'s>>> {
         let value = self.slice(0, end).unwrap();
         let mut iter = value.chars().rev();
@@ -115,6 +115,14 @@ impl<'s> Lexer<'s> {
             peek,
             peek2,
         }
+    }
+
+    pub fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
+        Self::slice_range(self.value, &Range::new(start, end))
+    }
+
+    pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
+        input.get(range.start as usize..range.end as usize)
     }
 }
 
@@ -153,10 +161,6 @@ impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
 
     pub fn peek2(&self) -> Option<char> {
         self.peek2
-    }
-
-    pub fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
-        self.value.get(start as usize..end as usize)
     }
 }
 
@@ -600,5 +604,329 @@ pub fn start_number(c1: char, c2: char, c3: char) -> bool {
         is_digit(c2) || (c2 == C_FULL_STOP && is_digit(c3))
     } else {
         is_digit(c1) || (c1 == C_FULL_STOP && is_digit(c2))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indoc::indoc;
+
+    fn assert_lexer_state<I: Iterator<Item = char>>(
+        lexer: &Lexer<'_, I>,
+        cur: Option<char>,
+        cur_pos: Option<Pos>,
+        peek: Option<char>,
+        peek_pos: Option<Pos>,
+        peek2: Option<char>,
+        peek2_pos: Option<Pos>,
+    ) {
+        assert_eq!(lexer.cur(), cur);
+        assert_eq!(lexer.cur_pos(), cur_pos);
+        assert_eq!(lexer.peek(), peek);
+        assert_eq!(lexer.peek_pos(), peek_pos);
+        assert_eq!(lexer.peek2(), peek2);
+        assert_eq!(lexer.peek2_pos(), peek2_pos);
+    }
+
+    #[derive(Default)]
+    struct Snapshot {
+        results: Vec<(String, String)>,
+    }
+
+    impl Snapshot {
+        pub fn add(&mut self, key: &str, value: &str) {
+            self.results.push((key.to_string(), value.to_string()))
+        }
+
+        pub fn snapshot(&self) -> String {
+            self.results
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}\n"))
+                .collect::<String>()
+        }
+    }
+
+    impl Visitor<'_> for Snapshot {
+        fn function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("function", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn ident(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("ident", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn url(
+            &mut self,
+            lexer: &mut Lexer,
+            _: Pos,
+            _: Pos,
+            content_start: Pos,
+            content_end: Pos,
+        ) -> Option<()> {
+            self.add("url", lexer.slice(content_start, content_end)?);
+            Some(())
+        }
+
+        fn string(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("string", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
+            Some(true)
+        }
+
+        fn id(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("id", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn left_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("left_parenthesis", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn right_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("right_parenthesis", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn comma(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("comma", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("class", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn pseudo_function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("pseudo_function", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn pseudo_class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("pseudo_class", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn semicolon(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("semicolon", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn at_keyword(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("at_keyword", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("left_curly", lexer.slice(start, end)?);
+            Some(())
+        }
+
+        fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+            self.add("right_curly", lexer.slice(start, end)?);
+            Some(())
+        }
+    }
+
+    fn assert_lexer_snapshot(input: &str, snapshot: &str) {
+        let mut s = Snapshot::default();
+        let mut l = Lexer::new(input);
+        l.lex(&mut s);
+        assert!(l.cur().is_none());
+        assert_eq!(s.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn lexer_state_1() {
+        let mut l = Lexer::new("");
+        assert_lexer_state(&l, None, None, None, Some(0), None, None);
+        l.consume();
+        assert_eq!(l.cur(), None);
+        assert_lexer_state(&l, None, Some(0), None, None, None, None);
+        l.consume();
+        assert_eq!(l.cur(), None);
+    }
+
+    #[test]
+    fn lexer_state_2() {
+        let mut l = Lexer::new("0壹👂삼");
+        assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
+        l.consume();
+        assert_eq!(l.cur(), Some('0'));
+        assert_lexer_state(
+            &l,
+            Some('0'),
+            Some(0),
+            Some('壹'),
+            Some(1),
+            Some('👂'),
+            Some(4),
+        );
+        l.consume();
+        assert_eq!(l.cur(), Some('壹'));
+        assert_lexer_state(
+            &l,
+            Some('壹'),
+            Some(1),
+            Some('👂'),
+            Some(4),
+            Some('삼'),
+            Some(8),
+        );
+        l.consume();
+        assert_eq!(l.cur(), Some('👂'));
+        assert_lexer_state(&l, Some('👂'), Some(4), Some('삼'), Some(8), None, Some(11));
+        l.consume();
+        assert_eq!(l.cur(), Some('삼'));
+        assert_lexer_state(&l, Some('삼'), Some(8), None, Some(11), None, None);
+        l.consume();
+        assert_eq!(l.cur(), None);
+        assert_lexer_state(&l, None, Some(11), None, None, None, None);
+        l.consume();
+        assert_eq!(l.cur(), None);
+    }
+
+    #[test]
+    fn lexer_state_3() {
+        let l = Lexer::new("");
+        let mut l = l.turn_back(0);
+        assert_lexer_state(&l, None, None, None, Some(0), None, None);
+        l.consume();
+        assert_lexer_state(&l, None, Some(0), None, None, None, None);
+    }
+
+    #[test]
+    fn parse_urls() {
+        assert_lexer_snapshot(
+            indoc! {r#"
+            body {
+                background: url(
+                    https://example\2f4a8f.com\
+            /image.png
+                )
+            }
+            --element\ name.class\ name#_id {
+                background: url(  "https://example.com/some url \"with\" 'spaces'.png"   )  url('https://example.com/\'"quotes"\'.png');
+            }
+        "#},
+            indoc! {r#"
+            ident: body
+            left_curly: {
+            ident: background
+            url: https://example\2f4a8f.com\
+            /image.png
+            right_curly: }
+            ident: --element\ name
+            class: .class\ name
+            id: #_id
+            left_curly: {
+            ident: background
+            function: url(
+            string: "https://example.com/some url \"with\" 'spaces'.png"
+            right_parenthesis: )
+            function: url(
+            string: 'https://example.com/\'"quotes"\'.png'
+            right_parenthesis: )
+            semicolon: ;
+            right_curly: }
+        "#},
+        );
+    }
+
+    #[test]
+    fn parse_pseudo_functions() {
+        assert_lexer_snapshot(
+            indoc! {r#"
+            :local(.class#id, .class:not(*:hover)) { color: red; }
+            :import(something from ":somewhere") {}
+        "#},
+            indoc! {r#"
+            pseudo_function: :local(
+            class: .class
+            id: #id
+            comma: ,
+            class: .class
+            pseudo_function: :not(
+            pseudo_class: :hover
+            right_parenthesis: )
+            right_parenthesis: )
+            left_curly: {
+            ident: color
+            ident: red
+            semicolon: ;
+            right_curly: }
+            pseudo_function: :import(
+            ident: something
+            ident: from
+            string: ":somewhere"
+            right_parenthesis: )
+            left_curly: {
+            right_curly: }
+        "#},
+        );
+    }
+
+    #[test]
+    fn parse_at_rules() {
+        assert_lexer_snapshot(
+            indoc! {r#"
+            @media (max-size: 100px) {
+                @import "external.css";
+                body { color: red; }
+            }
+        "#},
+            indoc! {r#"
+            at_keyword: @media
+            left_parenthesis: (
+            ident: max-size
+            right_parenthesis: )
+            left_curly: {
+            at_keyword: @import
+            string: "external.css"
+            semicolon: ;
+            ident: body
+            left_curly: {
+            ident: color
+            ident: red
+            semicolon: ;
+            right_curly: }
+            right_curly: }
+        "#},
+        );
+    }
+
+    #[test]
+    fn parse_escape() {
+        assert_lexer_snapshot(
+            indoc! {r#"
+                body {
+                    a\
+                a: \
+                url(https://example\2f4a8f.com\
+                /image.png)
+                    b: url(#\
+                hash)
+                }
+            "#},
+            indoc! {r#"
+                ident: body
+                left_curly: {
+                ident: a\
+                a
+                url: https://example\2f4a8f.com\
+                /image.png
+                ident: b
+                url: #\
+                hash
+                right_curly: }
+            "#},
+        );
     }
 }

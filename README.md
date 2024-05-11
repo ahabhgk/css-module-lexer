@@ -19,7 +19,7 @@ Lexes CSS modules returning their dependencies metadata.
   - [x] @keyframe
   - [x] composes
   - [ ] @values
-  - [ ] more warnings
+  - [x] more warnings
 - [ ] iCSS
   - [x] :export
   - [ ] :import

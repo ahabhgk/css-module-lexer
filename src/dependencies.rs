@@ -4,6 +4,7 @@ use smallvec::SmallVec;
 
 use crate::lexer::is_white_space;
 use crate::lexer::start_ident_sequence;
+use crate::lexer::Visitor;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
 use crate::lexer::C_COMMA;
@@ -18,7 +19,6 @@ use crate::HandleDependency;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
-use crate::Visitor;
 
 #[derive(Debug)]
 enum Scope<'s> {
@@ -581,7 +581,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
-        let mut media_lexer = Lexer::from(media);
+        let mut media_lexer = Lexer::new(media);
         media_lexer.consume();
         media_lexer.consume_white_space_and_comments()?;
         Some(media)

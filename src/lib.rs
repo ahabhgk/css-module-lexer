@@ -1,5 +1,6 @@
 mod dependencies;
 mod lexer;
+pub mod postcss_modules;
 
 pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;
@@ -10,7 +11,6 @@ pub use dependencies::UrlRangeKind;
 pub use dependencies::Warning;
 pub use lexer::Lexer;
 pub use lexer::Pos;
-pub use lexer::Visitor;
 
 pub trait HandleDependency<'s> {
     fn handle_dependency(&mut self, dependency: Dependency<'s>);
@@ -37,7 +37,7 @@ pub fn lex_css_dependencies<'s>(
     handle_dependency: impl HandleDependency<'s>,
     handle_warning: impl HandleWarning<'s>,
 ) {
-    let mut lexer = Lexer::from(input);
+    let mut lexer = Lexer::new(input);
     let mut visitor = LexDependencies::new(handle_dependency, handle_warning, None);
     lexer.lex(&mut visitor);
 }
@@ -54,7 +54,7 @@ pub fn lex_css_modules_dependencies<'s>(
     handle_dependency: impl HandleDependency<'s>,
     handle_warning: impl HandleWarning<'s>,
 ) {
-    let mut lexer = Lexer::from(input);
+    let mut lexer = Lexer::new(input);
     let mut visitor = LexDependencies::new(
         handle_dependency,
         handle_warning,
@@ -75,7 +75,7 @@ pub fn lex_css_modules_global_dependencies<'s>(
     handle_dependency: impl HandleDependency<'s>,
     handle_warning: impl HandleWarning<'s>,
 ) {
-    let mut lexer = Lexer::from(input);
+    let mut lexer = Lexer::new(input);
     let mut visitor = LexDependencies::new(
         handle_dependency,
         handle_warning,
