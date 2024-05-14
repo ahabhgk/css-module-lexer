@@ -1383,7 +1383,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         }
                         return Some(());
                     }
+
                     let ident = lexer.slice(start, end)?;
+                    if let Some(name) = ident.strip_prefix("--") {
+                        return self.lex_local_var_decl(lexer, name, start, end);
+                    }
+
                     let ident = ident.to_ascii_lowercase();
                     if ident == "animation"
                         || ident == "animation-name"
@@ -1393,13 +1398,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         self.enter_animation_property();
                         return Some(());
                     }
-                }
-                if mode_data.is_current_local_mode() {
-                    let ident = lexer.slice(start, end)?;
-                    if let Some(name) = ident.strip_prefix("--") {
-                        return self.lex_local_var_decl(lexer, name, start, end);
-                    }
-                    let ident = ident.to_ascii_lowercase();
+
                     if ident == "composes" {
                         return self.lex_composes(lexer, start);
                     }

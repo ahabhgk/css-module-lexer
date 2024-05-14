@@ -637,7 +637,7 @@ fn css_modules_pseudo_6() {
 }
 
 #[test]
-fn css_modules_missing_white_space() {
+fn css_modules_missing_white_space_1() {
     let input = indoc! {r#"
         .a:global,:global .b {}
         .a{}:global .b{}
@@ -677,10 +677,17 @@ fn css_modules_missing_white_space() {
 }
 
 #[test]
-fn t() {
-    let input = ".a:not(.a:not(:global .a):local .b) {}";
-    let (dependencies, warings) = collect_css_modules_dependencies(input);
-    dbg!(dependencies, warings);
+fn css_modules_missing_white_space_2() {
+    let input = ".a:not(.b:not(:global .c):local .d) {}";
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert_warning(input, &warnings[0], ":local");
+    assert_eq!(warnings.len(), 1);
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
+    assert_local_ident_dependency(input, &dependencies[1], ".b", false);
+    assert_replace_dependency(input, &dependencies[2], "", ":global ");
+    assert_replace_dependency(input, &dependencies[3], "", ":local ");
+    assert_local_ident_dependency(input, &dependencies[4], ".d", true);
+    assert_eq!(dependencies.len(), 5);
 }
 
 #[test]

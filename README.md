@@ -4,7 +4,7 @@ Lexes CSS modules returning their dependencies metadata.
 
 - Blazing fast: no parsing, no AST creation, only lexing, minimal heap allocation.
 - Error tolerant: uninterrupted by bad syntax, no errors, only warnings.
-- Syntax rich: supports CSS, CSS Modules, and iCSS.
+- Syntax rich: supports CSS, iCSS, and CSS Modules.
 
 ## Roadmap
 

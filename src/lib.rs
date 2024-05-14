@@ -1,6 +1,5 @@
 mod dependencies;
 mod lexer;
-pub mod postcss_modules;
 
 pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;

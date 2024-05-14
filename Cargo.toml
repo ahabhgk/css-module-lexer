@@ -13,6 +13,7 @@ smallvec = "1.13"
 codspeed-criterion-compat = "2"
 criterion = "0.5"
 indoc = "2"
+linked-hash-map = "0.5"
 
 [[bench]]
 name = "main"
