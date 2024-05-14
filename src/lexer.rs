@@ -374,19 +374,21 @@ impl<'s> Lexer<'s> {
 
     pub fn consume_number_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         let c2 = self.peek()?;
+        let start = self.cur_pos()?;
         if is_ident(c2) || are_valid_escape(c2, self.peek2()?) {
-            let start = self.cur_pos()?;
             self.consume();
-            if visitor.is_selector(self)?
-                && start_ident_sequence(self.cur()?, self.peek()?, self.peek2()?)
-            {
-                self.consume_ident_sequence()?;
+            if !visitor.is_selector(self)? {
+                return Some(());
+            }
+            if !start_ident_sequence(self.cur()?, self.peek()?, self.peek2()?) {
                 return visitor.id(self, start, self.cur_pos()?);
             }
+            self.consume_ident_sequence()?;
+            visitor.id(self, start, self.cur_pos()?)
         } else {
             self.consume_delim();
+            visitor.id(self, start, self.cur_pos()?)
         }
-        Some(())
     }
 
     pub fn consume_left_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
@@ -442,8 +444,11 @@ impl<'s> Lexer<'s> {
         }
         let start = self.cur_pos()?;
         self.consume();
-        if !visitor.is_selector(self)? || !start_ident_sequence(c2, c3, self.peek2()?) {
+        if !visitor.is_selector(self)? {
             return Some(());
+        }
+        if !start_ident_sequence(c2, c3, self.peek2()?) {
+            return visitor.class(self, start, self.cur_pos()?);
         }
         self.consume_ident_sequence()?;
         visitor.class(self, start, self.cur_pos()?)

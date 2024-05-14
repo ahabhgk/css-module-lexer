@@ -965,41 +965,38 @@ fn not_ignore_custom_property_set() {
 
 #[test]
 fn throw_on_invalid_syntax_class_usage() {
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test(". {}", ". {}");
+    test_with_warning(". {}", ". {}", "Invalid class selector syntax");
 }
 
 #[test]
 fn throw_on_invalid_syntax_id_usage() {
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test("# {}", "# {}");
+    test_with_warning("# {}", "# {}", "Invalid id selector syntax");
 }
 
 #[test]
 fn throw_on_invalid_syntax_local_class_usage() {
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test(":local(.) {}", ". {}");
+    test_with_warning(":local(.) {}", ". {}", "Invalid class selector syntax");
 }
 
 #[test]
 fn throw_on_invalid_syntax_local_id_usage() {
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test(":local(#) {}", "# {}");
+    test_with_warning(":local(#) {}", "# {}", "Invalid id selector syntax");
 }
 
 #[test]
 fn throw_on_invalid_global_class_usage() {
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test(":global(.) {}", ". {}");
-    // TODO: should have "Invalid class or id selector syntax" warning
-    test(":global(#) {}", "# {}");
+    test_with_warning(":global(.) {}", ". {}", "Invalid class selector syntax");
+    test_with_warning(":global(#) {}", "# {}", "Invalid id selector syntax");
     test_with_warning(
         ":global(.a:not(:global .b, :global .c)) {}",
         ".a:not(.b, .c) {}",
         "A ':global' is not allowed inside of a ':local()' or ':global()'",
     );
-    // TODO: should have ":global\(\) can't be empty" warning
-    test(":global() {}", " {}");
+    test_with_warning(
+        ":global() {}",
+        " {}",
+        "':global()' or ':local()' can't be empty",
+    );
 }
 
 #[test]

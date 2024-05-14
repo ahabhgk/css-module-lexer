@@ -1255,10 +1255,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             if is_function {
                 let distance = self.back_white_space_and_comments_distance(lexer, start)?;
+                let start = start - distance;
+                let maybe_left_parenthesis_start = start - 1;
+                if lexer.slice(start - 1, start)? == "(" {
+                    self.handle_warning.handle_warning(Warning::Unexpected {
+                        range: Range::new(maybe_left_parenthesis_start, end),
+                        message: "':global()' or ':local()' can't be empty",
+                    });
+                }
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
                         content: "",
-                        range: Range::new(start - distance, end),
+                        range: Range::new(start, end),
                     });
             }
         }
@@ -1335,8 +1343,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
+        let name = lexer.slice(start, end)?;
+        if name == "." {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                range: Range::new(start, end),
+                message: "Invalid class selector syntax",
+            });
+            return Some(());
+        }
         if mode_data.is_current_local_mode() {
-            let name = lexer.slice(start, end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalIdent {
                     name,
@@ -1353,8 +1368,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
+        let name = lexer.slice(start, end)?;
+        if name == "#" {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                range: Range::new(start, end),
+                message: "Invalid id selector syntax",
+            });
+            return Some(());
+        }
         if mode_data.is_current_local_mode() {
-            let name = lexer.slice(start, end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalIdent {
                     name,
