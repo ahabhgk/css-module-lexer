@@ -99,16 +99,16 @@ impl BalancedStack {
 
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
-            if matches!(
-                item.kind,
-                BalancedItemKind::LocalFn | BalancedItemKind::LocalClass
-            ) {
+            if item.kind.is_mode_local() {
                 mode_data.set_current_mode(Mode::Local);
-            } else if matches!(
-                item.kind,
-                BalancedItemKind::GlobalFn | BalancedItemKind::GlobalClass
-            ) {
+            } else if item.kind.is_mode_global() {
                 mode_data.set_current_mode(Mode::Global);
+            }
+
+            if item.kind.is_mode_function() {
+                mode_data.inside_mode_function += 1;
+            } else if item.kind.is_mode_class() {
+                mode_data.inside_mode_class += 1;
             }
         }
         self.0.push(item);
@@ -117,6 +117,11 @@ impl BalancedStack {
     pub fn pop(&mut self, mode_data: Option<&mut ModeData>) -> Option<BalancedItem> {
         let item = self.0.pop()?;
         if let Some(mode_data) = mode_data {
+            if item.kind.is_mode_function() {
+                mode_data.inside_mode_function -= 1;
+            } else if item.kind.is_mode_class() {
+                mode_data.inside_mode_class -= 1;
+            }
             self.update_current_mode(mode_data);
         }
         Some(item)
@@ -133,6 +138,7 @@ impl BalancedStack {
                     last.kind,
                     BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
                 ) {
+                    mode_data.inside_mode_class -= 1;
                     self.0.pop();
                     continue;
                 }
@@ -167,22 +173,6 @@ impl BalancedStack {
                 }
             } else {
                 return mode_data.default_mode();
-            }
-        }
-    }
-
-    pub fn inside_mode_function(&self) -> Option<Pos> {
-        let mut iter = self.0.iter();
-        loop {
-            if let Some(last) = iter.next_back() {
-                if matches!(
-                    last.kind,
-                    BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
-                ) {
-                    return Some(last.range.start);
-                }
-            } else {
-                return None;
             }
         }
     }
@@ -238,6 +228,22 @@ impl BalancedItemKind {
             _ => Self::Other,
         }
     }
+
+    pub fn is_mode_local(&self) -> bool {
+        matches!(self, Self::LocalFn | Self::LocalClass)
+    }
+
+    pub fn is_mode_global(&self) -> bool {
+        matches!(self, Self::GlobalFn | Self::GlobalClass)
+    }
+
+    pub fn is_mode_function(&self) -> bool {
+        matches!(self, Self::LocalFn | Self::GlobalFn)
+    }
+
+    pub fn is_mode_class(&self) -> bool {
+        matches!(self, Self::LocalClass | Self::GlobalClass)
+    }
 }
 
 fn with_vendor_prefixed_eq(left: &str, right: &str) -> bool {
@@ -281,6 +287,8 @@ pub struct ModeData {
     property: Mode,
     resulting_global: Option<Pos>,
     pure_global: Option<Pos>,
+    inside_mode_function: u32,
+    inside_mode_class: u32,
 }
 
 impl ModeData {
@@ -291,6 +299,8 @@ impl ModeData {
             property: default,
             resulting_global: None,
             pure_global: Some(0),
+            inside_mode_function: 0,
+            inside_mode_class: 0,
         }
     }
 
@@ -322,6 +332,18 @@ impl ModeData {
 
     pub fn set_property_mode(&mut self, mode: Mode) {
         self.property = mode;
+    }
+
+    pub fn is_inside_mode_function(&self) -> bool {
+        self.inside_mode_function > 0
+    }
+
+    pub fn is_inside_mode_class(&self) -> bool {
+        self.inside_mode_class > 0
+    }
+
+    pub fn is_mode_explicit(&self) -> bool {
+        self.is_inside_mode_function() || self.is_inside_mode_class()
     }
 }
 
@@ -446,6 +468,7 @@ pub enum Dependency<'s> {
     LocalIdent {
         name: &'s str,
         range: Range,
+        explicit: bool,
     },
     LocalVar {
         name: &'s str,
@@ -471,7 +494,14 @@ pub enum Dependency<'s> {
         names: &'s str,
         from: Option<&'s str>,
     },
-    ICSSExport {
+    ICSSImportFrom {
+        path: &'s str,
+    },
+    ICSSImportValue {
+        prop: &'s str,
+        value: &'s str,
+    },
+    ICSSExportValue {
         prop: &'s str,
         value: &'s str,
     },
@@ -644,14 +674,75 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(has_white_space)
     }
 
+    fn eat(&mut self, lexer: &mut Lexer<'s>, chars: &[char], message: &'s str) -> Option<bool> {
+        if !chars.contains(&lexer.cur()?) {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message,
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+            });
+            return Some(false);
+        }
+        lexer.consume();
+        Some(true)
+    }
+
     fn lex_icss_import(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
-        // TODO: Implement, ignore for now
+        lexer.consume_white_space_and_comments()?;
+        let start = lexer.cur_pos()?;
         loop {
-            lexer.consume();
-            if lexer.cur()? == C_RIGHT_CURLY {
+            let c = lexer.cur()?;
+            if c == C_RIGHT_PARENTHESIS {
                 break;
             }
+            lexer.consume();
         }
+        let end = lexer.cur_pos()?;
+        self.handle_dependency
+            .handle_dependency(Dependency::ICSSImportFrom {
+                path: lexer.slice(start, end)?,
+            });
+        lexer.consume();
+        lexer.consume_white_space_and_comments()?;
+        if !self.eat(
+            lexer,
+            &[C_LEFT_CURLY],
+            "Expected '{' during parsing of ':import()'",
+        )? {
+            return Some(());
+        }
+        lexer.consume_white_space_and_comments()?;
+        while lexer.cur()? != C_RIGHT_CURLY {
+            lexer.consume_white_space_and_comments()?;
+            let prop_start = lexer.cur_pos()?;
+            self.consume_icss_export_prop(lexer)?;
+            let prop_end = lexer.cur_pos()?;
+            lexer.consume_white_space_and_comments()?;
+            if !self.eat(
+                lexer,
+                &[C_COLON],
+                "Expected ':' during parsing of ':import'",
+            )? {
+                return Some(());
+            }
+            lexer.consume_white_space_and_comments()?;
+            let value_start = lexer.cur_pos()?;
+            self.consume_icss_export_value(lexer)?;
+            let value_end = lexer.cur_pos()?;
+            if lexer.cur()? == C_SEMICOLON {
+                lexer.consume();
+                lexer.consume_white_space_and_comments()?;
+            }
+            self.handle_dependency
+                .handle_dependency(Dependency::ICSSImportValue {
+                    prop: lexer
+                        .slice(prop_start, prop_end)?
+                        .trim_end_matches(is_white_space),
+                    value: lexer
+                        .slice(value_start, value_end)?
+                        .trim_end_matches(is_white_space),
+                });
+        }
+        lexer.consume();
         Some(())
     }
 
@@ -683,15 +774,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn lex_icss_export(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
-        let c = lexer.cur()?;
-        if c != C_LEFT_CURLY {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected '{' during parsing of ':export'",
-                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
-            });
+        if !self.eat(
+            lexer,
+            &[C_LEFT_CURLY],
+            "Expected '{' during parsing of ':export'",
+        )? {
             return Some(());
         }
-        lexer.consume();
         lexer.consume_white_space_and_comments()?;
         while lexer.cur()? != C_RIGHT_CURLY {
             lexer.consume_white_space_and_comments()?;
@@ -699,14 +788,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             self.consume_icss_export_prop(lexer)?;
             let prop_end = lexer.cur_pos()?;
             lexer.consume_white_space_and_comments()?;
-            if lexer.cur()? != C_COLON {
-                self.handle_warning.handle_warning(Warning::Unexpected {
-                    message: "Expected ':' during parsing of ':export'",
-                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
-                });
+            if !self.eat(
+                lexer,
+                &[C_COLON],
+                "Expected ':' during parsing of ':export'",
+            )? {
                 return Some(());
             }
-            lexer.consume();
             lexer.consume_white_space_and_comments()?;
             let value_start = lexer.cur_pos()?;
             self.consume_icss_export_value(lexer)?;
@@ -716,7 +804,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 lexer.consume_white_space_and_comments()?;
             }
             self.handle_dependency
-                .handle_dependency(Dependency::ICSSExport {
+                .handle_dependency(Dependency::ICSSExportValue {
                     prop: lexer
                         .slice(prop_start, prop_end)?
                         .trim_end_matches(is_white_space),
@@ -834,7 +922,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         lexer.consume_ident_sequence()?;
         let end = lexer.cur_pos()?;
-        let mode_data = self.mode_data.as_ref().unwrap();
+        let mode_data = self.mode_data.as_mut().unwrap();
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalKeyframesDecl {
@@ -856,6 +944,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     content: "",
                     range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
                 });
+            mode_data.inside_mode_function -= 1;
             self.balanced.pop_without_moda_data();
             lexer.consume();
             lexer.consume_white_space_and_comments()?;
@@ -1233,25 +1322,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         };
         if let Some(mode_data) = &mut self.mode_data {
-            let mut is_function = matches!(
-                last.kind,
-                BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
-            );
-            let is_class = matches!(
-                last.kind,
-                BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
-            );
-            if is_class {
+            let mut is_function = last.kind.is_mode_function();
+            if last.kind.is_mode_class() {
                 self.balanced.pop_mode_pseudo_class(mode_data);
                 let popped = self.balanced.pop_without_moda_data().unwrap();
                 debug_assert!(!matches!(
                     popped.kind,
                     BalancedItemKind::GlobalClass | BalancedItemKind::LocalClass
                 ));
-                is_function = matches!(
-                    popped.kind,
-                    BalancedItemKind::LocalFn | BalancedItemKind::GlobalFn
-                );
+                is_function = popped.kind.is_mode_function();
             }
             if is_function {
                 let distance = self.back_white_space_and_comments_distance(lexer, start)?;
@@ -1356,6 +1435,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 .handle_dependency(Dependency::LocalIdent {
                     name,
                     range: Range::new(start, end),
+                    explicit: mode_data.is_mode_explicit(),
                 });
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1381,6 +1461,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 .handle_dependency(Dependency::LocalIdent {
                     name,
                     range: Range::new(start, end),
+                    explicit: mode_data.is_mode_explicit(),
                 });
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1456,21 +1537,32 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
-        if self.mode_data.is_some() && (name == ":global(" || name == ":local(") {
-            if let Some(inside_start) = self.balanced.inside_mode_function() {
-                self.handle_warning
-                    .handle_warning(Warning::ExpectedNotInside {
-                        range: Range::new(inside_start, end),
-                        pseudo: lexer.slice(start, end)?,
+        if let Some(mode_data) = &mut self.mode_data {
+            if name == ":import(" {
+                self.lex_icss_import(lexer);
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, lexer.cur_pos()?),
+                    });
+                return Some(());
+            }
+            if name == ":global(" || name == ":local(" {
+                if mode_data.is_inside_mode_function() {
+                    self.handle_warning
+                        .handle_warning(Warning::ExpectedNotInside {
+                            range: Range::new(start, end),
+                            pseudo: lexer.slice(start, end)?,
+                        });
+                }
+
+                lexer.consume_white_space_and_comments()?;
+                self.handle_dependency
+                    .handle_dependency(Dependency::Replace {
+                        content: "",
+                        range: Range::new(start, lexer.cur_pos()?),
                     });
             }
-
-            lexer.consume_white_space_and_comments()?;
-            self.handle_dependency
-                .handle_dependency(Dependency::Replace {
-                    content: "",
-                    range: Range::new(start, lexer.cur_pos()?),
-                });
         }
         self.balanced.push(
             BalancedItem::new(&name, start, end),
@@ -1480,15 +1572,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        if self.mode_data.is_none() {
+        let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
         let name = lexer.slice(start, end)?.to_ascii_lowercase();
         if name == ":global" || name == ":local" {
-            if let Some(inside_start) = self.balanced.inside_mode_function() {
+            if mode_data.is_inside_mode_function() {
                 self.handle_warning
                     .handle_warning(Warning::ExpectedNotInside {
-                        range: Range::new(inside_start, end),
+                        range: Range::new(start, end),
                         pseudo: lexer.slice(start, end)?,
                     });
             }
@@ -1528,14 +1620,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 });
             return Some(());
         }
-        let is_import = name == ":import";
-        let is_export = name == ":export";
-        if matches!(self.scope, Scope::TopLevel) && (is_import || is_export) {
-            if is_import {
-                self.lex_icss_import(lexer)?;
-            } else if is_export {
-                self.lex_icss_export(lexer)?;
-            }
+        if matches!(self.scope, Scope::TopLevel) && name == ":export" {
+            self.lex_icss_export(lexer)?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",

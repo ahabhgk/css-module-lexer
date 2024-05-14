@@ -72,15 +72,17 @@ fn assert_import_dependency(
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
-fn assert_local_ident_dependency(input: &str, dependency: &Dependency, name: &str) {
+fn assert_local_ident_dependency(input: &str, dependency: &Dependency, name: &str, explicit: bool) {
     let Dependency::LocalIdent {
         name: actual_name,
+        explicit: actual_explicit,
         range,
     } = dependency
     else {
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
+    assert_eq!(*actual_explicit, explicit);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
 }
 
@@ -187,8 +189,37 @@ fn assert_replace_dependency(
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
-fn assert_icss_export_dependency(_input: &str, dependency: &Dependency, prop: &str, value: &str) {
-    let Dependency::ICSSExport {
+fn assert_icss_import_from_dependency(_input: &str, dependency: &Dependency, path: &str) {
+    let Dependency::ICSSImportFrom { path: actual_path } = dependency else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_path, path);
+}
+
+fn assert_icss_import_value_dependency(
+    _input: &str,
+    dependency: &Dependency,
+    prop: &str,
+    value: &str,
+) {
+    let Dependency::ICSSImportValue {
+        prop: actual_prop,
+        value: actual_value,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_prop, prop);
+    assert_eq!(*actual_value, value);
+}
+
+fn assert_icss_export_value_dependency(
+    _input: &str,
+    dependency: &Dependency,
+    prop: &str,
+    value: &str,
+) {
+    let Dependency::ICSSExportValue {
         prop: actual_prop,
         value: actual_value,
     } = dependency
@@ -531,11 +562,11 @@ fn css_modules_pseudo_1() {
     let input = ".localA :global .global-b .global-c :local(.localD.localE) .global-d";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".localA");
+    assert_local_ident_dependency(input, &dependencies[0], ".localA", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":local(");
-    assert_local_ident_dependency(input, &dependencies[3], ".localD");
-    assert_local_ident_dependency(input, &dependencies[4], ".localE");
+    assert_local_ident_dependency(input, &dependencies[3], ".localD", true);
+    assert_local_ident_dependency(input, &dependencies[4], ".localE", true);
     assert_replace_dependency(input, &dependencies[5], "", ")");
 }
 
@@ -549,9 +580,9 @@ fn css_modules_pseudo_2() {
     assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":global ");
     assert_replace_dependency(input, &dependencies[1], "", ":local ");
-    assert_local_ident_dependency(input, &dependencies[2], ".b");
+    assert_local_ident_dependency(input, &dependencies[2], ".b", true);
     assert_replace_dependency(input, &dependencies[3], "", ":global ");
-    assert_local_ident_dependency(input, &dependencies[4], ".d");
+    assert_local_ident_dependency(input, &dependencies[4], ".d", false);
     assert_eq!(dependencies.len(), 5);
 }
 
@@ -560,10 +591,10 @@ fn css_modules_pseudo_3() {
     let input = ".a:not(:global .b:not(.c:not(:global .d) .e) .f).g {}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":global ");
-    assert_local_ident_dependency(input, &dependencies[3], ".g");
+    assert_local_ident_dependency(input, &dependencies[3], ".g", false);
     assert_eq!(dependencies.len(), 4);
 }
 
@@ -572,13 +603,13 @@ fn css_modules_pseudo_4() {
     let input = ".a:not(:global .b:not(:local .c:not(:global .d) .e) .f).g {}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":local ");
-    assert_local_ident_dependency(input, &dependencies[3], ".c");
+    assert_local_ident_dependency(input, &dependencies[3], ".c", true);
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
-    assert_local_ident_dependency(input, &dependencies[5], ".e");
-    assert_local_ident_dependency(input, &dependencies[6], ".g");
+    assert_local_ident_dependency(input, &dependencies[5], ".e", true);
+    assert_local_ident_dependency(input, &dependencies[6], ".g", false);
     assert_eq!(dependencies.len(), 7);
 }
 
@@ -597,11 +628,11 @@ fn css_modules_pseudo_6() {
     let input = ".a:local( .b ).c {}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":local( ");
-    assert_local_ident_dependency(input, &dependencies[2], ".b");
+    assert_local_ident_dependency(input, &dependencies[2], ".b", true);
     assert_replace_dependency(input, &dependencies[3], "", " )");
-    assert_local_ident_dependency(input, &dependencies[4], ".c");
+    assert_local_ident_dependency(input, &dependencies[4], ".c", false);
     assert_eq!(dependencies.len(), 5);
 }
 
@@ -619,28 +650,28 @@ fn css_modules_missing_white_space() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     // .a:global,:global .b {}
-    assert_local_ident_dependency(input, &dependencies[0], ".a");
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global");
     assert_replace_dependency(input, &dependencies[2], "", ":global ");
     // .a{}:global .b{}
-    assert_local_ident_dependency(input, &dependencies[3], ".a");
+    assert_local_ident_dependency(input, &dependencies[3], ".a", false);
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
     // :global .a {}
     assert_replace_dependency(input, &dependencies[5], "", ":global ");
     // .a:not(:global .b) {}
-    assert_local_ident_dependency(input, &dependencies[6], ".a");
+    assert_local_ident_dependency(input, &dependencies[6], ".a", false);
     assert_replace_dependency(input, &dependencies[7], "", ":global ");
     // .a:not(.b :global) {}
-    assert_local_ident_dependency(input, &dependencies[8], ".a");
-    assert_local_ident_dependency(input, &dependencies[9], ".b");
+    assert_local_ident_dependency(input, &dependencies[8], ".a", false);
+    assert_local_ident_dependency(input, &dependencies[9], ".b", false);
     assert_replace_dependency(input, &dependencies[10], "", ":global");
     // .a :global,.b :global {}
-    assert_local_ident_dependency(input, &dependencies[11], ".a");
+    assert_local_ident_dependency(input, &dependencies[11], ".a", false);
     assert_replace_dependency(input, &dependencies[12], "", ":global");
-    assert_local_ident_dependency(input, &dependencies[13], ".b");
+    assert_local_ident_dependency(input, &dependencies[13], ".b", false);
     assert_replace_dependency(input, &dependencies[14], "", ":global ");
     // .a :global{}
-    assert_local_ident_dependency(input, &dependencies[15], ".a");
+    assert_local_ident_dependency(input, &dependencies[15], ".a", false);
     assert_replace_dependency(input, &dependencies[16], "", ":global");
     assert_eq!(dependencies.len(), 17);
 }
@@ -675,12 +706,17 @@ fn css_modules_nesting() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".nested");
-    assert_local_ident_dependency(input, &dependencies[1], ".nested-nested");
-    assert_local_ident_dependency(input, &dependencies[2], ".nested-at-rule");
-    assert_local_ident_dependency(input, &dependencies[3], ".nested-nested-at-rule-deep");
+    assert_local_ident_dependency(input, &dependencies[0], ".nested", false);
+    assert_local_ident_dependency(input, &dependencies[1], ".nested-nested", false);
+    assert_local_ident_dependency(input, &dependencies[2], ".nested-at-rule", false);
+    assert_local_ident_dependency(
+        input,
+        &dependencies[3],
+        ".nested-nested-at-rule-deep",
+        false,
+    );
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
-    assert_local_ident_dependency(input, &dependencies[5], ".nested2-nested");
+    assert_local_ident_dependency(input, &dependencies[5], ".nested2-nested", false);
     assert_eq!(dependencies.len(), 6);
 }
 
@@ -709,10 +745,10 @@ fn css_modules_local_var() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".vars");
+    assert_local_ident_dependency(input, &dependencies[0], ".vars", false);
     assert_local_var_dependency(input, &dependencies[1], "local-color");
     assert_local_var_decl_dependency(input, &dependencies[2], "local-color");
-    assert_local_ident_dependency(input, &dependencies[3], ".globalVars");
+    assert_local_ident_dependency(input, &dependencies[3], ".globalVars", false);
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
 }
 
@@ -729,7 +765,7 @@ fn css_modules_local_var_minified_2() {
     let input = ".table-primary{--bs-table-color:#000;--bs-table-border-color:#a6b5cc;color:var(--bs-table-color);border-color:var(--bs-table-border-color)}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".table-primary");
+    assert_local_ident_dependency(input, &dependencies[0], ".table-primary", false);
     assert_local_var_decl_dependency(input, &dependencies[1], "bs-table-color");
     assert_local_var_decl_dependency(input, &dependencies[2], "bs-table-border-color");
     assert_local_var_dependency(input, &dependencies[3], "bs-table-color");
@@ -751,7 +787,7 @@ fn css_modules_property() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
-    assert_local_ident_dependency(input, &dependencies[1], ".class");
+    assert_local_ident_dependency(input, &dependencies[1], ".class", false);
     assert_local_var_dependency(input, &dependencies[2], "my-color");
 }
 
@@ -795,7 +831,7 @@ fn css_modules_keyframes_1() {
     assert_local_var_dependency(input, &dependencies[1], "theme-color1");
     assert_local_var_dependency(input, &dependencies[2], "theme-color2");
     assert_local_keyframes_decl_dependency(input, &dependencies[3], "localkeyframes2");
-    assert_local_ident_dependency(input, &dependencies[4], ".animation");
+    assert_local_ident_dependency(input, &dependencies[4], ".animation", false);
     assert_local_keyframes_dependency(input, &dependencies[5], "localkeyframes");
     assert_local_keyframes_dependency(input, &dependencies[6], "localkeyframes");
     assert_local_keyframes_dependency(input, &dependencies[7], "localkeyframes2");
@@ -822,7 +858,7 @@ fn css_modules_keyframes_2() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_keyframes_decl_dependency(input, &dependencies[0], "slidein");
-    assert_local_ident_dependency(input, &dependencies[1], ".class");
+    assert_local_ident_dependency(input, &dependencies[1], ".class", false);
     assert_local_var_decl_dependency(input, &dependencies[2], "animation-name");
     assert_local_var_dependency(input, &dependencies[3], "animation-name");
     assert_local_var_dependency(input, &dependencies[4], "baz");
@@ -852,7 +888,7 @@ fn css_modules_at_rule_1() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".class");
+    assert_local_ident_dependency(input, &dependencies[0], ".class", false);
     assert_eq!(dependencies.len(), 1);
 }
 
@@ -872,8 +908,8 @@ fn css_modules_at_rule_2() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".class");
-    assert_local_ident_dependency(input, &dependencies[1], ".class2");
+    assert_local_ident_dependency(input, &dependencies[0], ".class", false);
+    assert_local_ident_dependency(input, &dependencies[1], ".class2", false);
     assert_eq!(dependencies.len(), 2);
 }
 
@@ -891,9 +927,9 @@ fn css_modules_at_rule_3() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".article-body");
-    assert_local_ident_dependency(input, &dependencies[1], ".article-body");
-    assert_local_ident_dependency(input, &dependencies[2], ".img");
+    assert_local_ident_dependency(input, &dependencies[0], ".article-body", false);
+    assert_local_ident_dependency(input, &dependencies[1], ".article-body", false);
+    assert_local_ident_dependency(input, &dependencies[2], ".img", false);
     assert_eq!(dependencies.len(), 3);
 }
 
@@ -907,7 +943,7 @@ fn css_modules_composes_1() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".exportName");
+    assert_local_ident_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(
         input,
         &dependencies[1],
@@ -945,7 +981,7 @@ fn css_modules_composes_2() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".duplicate");
+    assert_local_ident_dependency(input, &dependencies[0], ".duplicate", false);
     assert_composes_dependency(input, &dependencies[1], "a", Some("\"./aa.css\""));
     assert_composes_dependency(input, &dependencies[2], "b", Some("\"./bb.css\""));
     assert_composes_dependency(input, &dependencies[3], "c", Some("'./cc.css'"));
@@ -969,7 +1005,7 @@ fn css_modules_composes_3() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".spaces");
+    assert_local_ident_dependency(input, &dependencies[0], ".spaces", false);
     assert_composes_dependency(
         input,
         &dependencies[1],
@@ -1000,7 +1036,7 @@ fn css_modules_composes_4() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".unknown");
+    assert_local_ident_dependency(input, &dependencies[0], ".unknown", false);
     assert_composes_dependency(input, &dependencies[1], "foo bar", None);
     assert_composes_dependency(input, &dependencies[2], "baz", None);
     assert_replace_dependency(input, &dependencies[3], "", r#"composes: foo bar, baz;"#);
@@ -1016,7 +1052,7 @@ fn css_modules_composes_5() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_ident_dependency(input, &dependencies[0], ".mixed");
+    assert_local_ident_dependency(input, &dependencies[0], ".mixed", false);
     assert_composes_dependency(input, &dependencies[1], "foo bar", None);
     assert_composes_dependency(input, &dependencies[2], "baz", None);
     assert_composes_dependency(
@@ -1045,6 +1081,28 @@ fn icss_export_unexpected() {
 }
 
 #[test]
+fn icss_import() {
+    let input = indoc! {r#"
+        :import(col.ors-2) {}
+        :import("./colors.css") { i__blue: blue; i__red: red; }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(input, &dependencies[0], "col.ors-2");
+    assert_replace_dependency(input, &dependencies[1], "", ":import(col.ors-2) {}");
+    assert_icss_import_from_dependency(input, &dependencies[2], "\"./colors.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[3], "i__blue", "blue");
+    assert_icss_import_value_dependency(input, &dependencies[4], "i__red", "red");
+    assert_replace_dependency(
+        input,
+        &dependencies[5],
+        "",
+        ":import(\"./colors.css\") { i__blue: blue; i__red: red; }",
+    );
+    assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
 fn icss_export() {
     let input = indoc! {r#"
         :export {
@@ -1060,7 +1118,7 @@ fn icss_export() {
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_icss_export_dependency(input, &dependencies[0], "a", "a");
+    assert_icss_export_value_dependency(input, &dependencies[0], "a", "a");
     assert_replace_dependency(
         input,
         &dependencies[1],
@@ -1069,8 +1127,8 @@ fn icss_export() {
             a: a;
         }"#},
     );
-    assert_icss_export_dependency(input, &dependencies[2], "abc", "a b c");
-    assert_icss_export_dependency(
+    assert_icss_export_value_dependency(input, &dependencies[2], "abc", "a b c");
+    assert_icss_export_value_dependency(
         input,
         &dependencies[3],
         "comments",
@@ -1085,11 +1143,11 @@ fn icss_export() {
             comments: abc/****/   /* hello world *//****/   def
         }"#},
     );
-    assert_icss_export_dependency(input, &dependencies[5], "default", "default");
+    assert_icss_export_value_dependency(input, &dependencies[5], "default", "default");
     assert_replace_dependency(input, &dependencies[6], "", ":export{default:default}");
-    assert_icss_export_dependency(input, &dependencies[7], "$", "abc");
+    assert_icss_export_value_dependency(input, &dependencies[7], "$", "abc");
     assert_replace_dependency(input, &dependencies[8], "", ":export { $: abc; }");
-    assert_icss_export_dependency(input, &dependencies[9], "white space", "a b c");
+    assert_icss_export_value_dependency(input, &dependencies[9], "white space", "a b c");
     assert_replace_dependency(
         input,
         &dependencies[10],

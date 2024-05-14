@@ -867,101 +867,101 @@ fn not_ignore_custom_property_set() {
     );
 }
 
-// #[test]
-// fn not_localize_imported_alias() {
-//     test(
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+#[test]
+fn not_localize_imported_alias() {
+    test(
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             .foo > .a_value { }
-//         "#},
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+            .foo > .a_value { }
+        "#},
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local(.foo) > .a_value { }
-//         "#},
-//     );
-// }
+            :local(.foo) > .a_value { }
+        "#},
+    );
+}
 
-// #[test]
-// fn not_localize_nested_imported_alias() {
-//     test(
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+#[test]
+fn not_localize_nested_imported_alias() {
+    test(
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             .foo > .a_value > .bar { }
-//         "#},
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+            .foo > .a_value > .bar { }
+        "#},
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local(.foo) > .a_value > :local(.bar) { }
-//         "#},
-//     );
-// }
+            :local(.foo) > .a_value > :local(.bar) { }
+        "#},
+    );
+}
 
-// #[test]
-// fn ignore_imported_in_explicit_local() {
-//     test(
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+#[test]
+fn ignore_imported_in_explicit_local() {
+    test(
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local(.a_value) { }
-//         "#},
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+            :local(.a_value) { }
+        "#},
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local(.a_value) { }
-//         "#},
-//     );
-// }
+            :local(.a_value) { }
+        "#},
+    );
+}
 
-// #[test]
-// fn escape_local_context_with_explict_global() {
-//     test(
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+#[test]
+fn escape_local_context_with_explict_global() {
+    test(
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local .foo :global(.a_value) .bar { }
-//         "#},
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+            :local .foo :global(.a_value) .bar { }
+        "#},
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             :local(.foo) .a_value :local(.bar) { }
-//         "#},
-//     );
-// }
+            :local(.foo) .a_value :local(.bar) { }
+        "#},
+    );
+}
 
-// #[test]
-// fn respect_explicit_local() {
-//     test(
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+#[test]
+fn respect_explicit_local() {
+    test(
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             .a_value :local .a_value .foo :global .a_value { }
-//         "#},
-//         indoc! {r#"
-//             :import(foo) { a_value: some-value; }
+            .a_value :local .a_value .foo :global .a_value { }
+        "#},
+        indoc! {r#"
+            :import(foo) { a_value: some-value; }
 
-//             .a_value :local(.a_value) :local(.foo) .a_value { }
-//         "#},
-//     );
-// }
+            .a_value :local(.a_value) :local(.foo) .a_value { }
+        "#},
+    );
+}
 
-// #[test]
-// fn not_localize_imported_animation_name() {
-//     test(
-//         indoc! {r#"
-//             :import(file) { a_value: some-value; }
+#[test]
+fn not_localize_imported_animation_name() {
+    test(
+        indoc! {r#"
+            :import(file) { a_value: some-value; }
 
-//             .foo { animation-name: a_value; }
-//         "#},
-//         indoc! {r#"
-//             :import(file) { a_value: some-value; }
+            .foo { animation-name: a_value; }
+        "#},
+        indoc! {r#"
+            :import(file) { a_value: some-value; }
 
-//             :local(.foo) { animation-name: a_value; }
-//         "#},
-//     );
-// }
+            :local(.foo) { animation-name: a_value; }
+        "#},
+    );
+}
 
 #[test]
 fn throw_on_invalid_syntax_class_usage() {
