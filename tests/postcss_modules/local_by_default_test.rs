@@ -1,22 +1,21 @@
-use css_module_lexer::postcss_modules::local_by_default;
-use css_module_lexer::postcss_modules::LocalByDefaultOptions;
+use css_module_lexer::postcss_modules::LocalByDefault;
 use css_module_lexer::Mode;
 use indoc::indoc;
 
 fn test(input: &str, expected: &str) {
-    let (actual, warnings) = local_by_default(input, Default::default());
+    let (actual, warnings) = LocalByDefault::default().transform(input);
     assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
-fn test_with_options(input: &str, expected: &str, options: LocalByDefaultOptions) {
-    let (actual, warnings) = local_by_default(input, options);
+fn test_with_options(input: &str, expected: &str, options: LocalByDefault) {
+    let (actual, warnings) = options.transform(input);
     assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
-    let (actual, warnings) = local_by_default(input, Default::default());
+    let (actual, warnings) = LocalByDefault::default().transform(input);
     assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
@@ -25,13 +24,8 @@ fn test_with_warning(input: &str, expected: &str, warning: &str) {
     );
 }
 
-fn test_with_options_warning(
-    input: &str,
-    expected: &str,
-    options: LocalByDefaultOptions,
-    warning: &str,
-) {
-    let (actual, warnings) = local_by_default(input, options);
+fn test_with_options_warning(input: &str, expected: &str, options: LocalByDefault, warning: &str) {
+    let (actual, warnings) = options.transform(input);
     assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
@@ -527,11 +521,7 @@ fn handle_constructor_as_animation_name() {
 
 #[test]
 fn default_to_global_when_mode_provided() {
-    test_with_options(
-        ".foo {}",
-        ".foo {}",
-        LocalByDefaultOptions { mode: Mode::Global },
-    );
+    test_with_options(".foo {}", ".foo {}", LocalByDefault { mode: Mode::Global });
 }
 
 #[test]
@@ -539,7 +529,7 @@ fn default_to_local_when_mode_provided() {
     test_with_options(
         ".foo {}",
         ":local(.foo) {}",
-        LocalByDefaultOptions { mode: Mode::Local },
+        LocalByDefault { mode: Mode::Local },
     );
 }
 
@@ -570,7 +560,7 @@ fn use_correct_spacing() {
             :local(.a) .b {}
             :local(.a) .b {}
         "#},
-        LocalByDefaultOptions { mode: Mode::Global },
+        LocalByDefault { mode: Mode::Global },
     )
 }
 
@@ -603,7 +593,7 @@ fn localize_keyframes_in_global_default_mode() {
     test_with_options(
         "@keyframes foo {}",
         "@keyframes foo {}",
-        LocalByDefaultOptions { mode: Mode::Global },
+        LocalByDefault { mode: Mode::Global },
     );
 }
 
@@ -641,7 +631,7 @@ fn compile_in_pure_mode() {
     test_with_options(
         ":global(.foo).bar, [type=\"radio\"] ~ .label, :not(.foo), #bar {}",
         ".foo:local(.bar), [type=\"radio\"] ~ :local(.label), :not(:local(.foo)), :local(#bar) {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
 
@@ -725,7 +715,7 @@ fn throw_on_not_pure_selector_global_class() {
     test_with_options_warning(
         ":global(.foo) {}",
         ".foo {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
 }
@@ -735,13 +725,13 @@ fn throw_on_not_pure_selector_with_multiple() {
     test_with_options_warning(
         ".foo, :global(.bar) {}",
         ":local(.foo), .bar {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
     test_with_options_warning(
         ":global(.bar), .foo {}",
         ".bar, :local(.foo) {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
 }
@@ -751,13 +741,13 @@ fn throw_on_not_pure_selector_element() {
     test_with_options_warning(
         "input {}",
         "input {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
     test_with_options_warning(
         "[type=\"radio\"] {}",
         "[type=\"radio\"] {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
 }
@@ -767,7 +757,7 @@ fn throw_on_not_pure_keyframes() {
     test_with_options_warning(
         "@keyframes :global(foo) {}",
         "@keyframes foo {}",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "'@keyframes :global' is not allowed in pure mode",
     );
 }
@@ -1017,7 +1007,7 @@ fn consider_nesting_statements_as_pure() {
     test_with_options(
         ".foo { &:hover { a_value: some-value; } }",
         ":local(.foo) { &:hover { a_value: some-value; } }",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
 
@@ -1026,12 +1016,12 @@ fn consider_selector_nesting_statements_as_pure() {
     test_with_options(
         ".foo { html &:hover { a_value: some-value; } }",
         ":local(.foo) { html &:hover { a_value: some-value; } }",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
     test_with_options(
         ".foo { &:global(.bar) { a_value: some-value; } }",
         ":local(.foo) { &.bar { a_value: some-value; } }",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
 
@@ -1040,7 +1030,7 @@ fn throw_on_nested_nesting_selectors_without_a_local_selector() {
     test_with_options_warning(
         ":global(.foo) { &:hover { a_value: some-value; } }",
         ".foo { &:hover { a_value: some-value; } }",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
         "Selector is not pure",
     );
 }
@@ -1206,7 +1196,7 @@ fn css_nesting() {
                 }
             }
         "#},
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
 
@@ -1224,7 +1214,7 @@ fn consider_export_statements_pure() {
     test_with_options(
         ":export { foo: __foo; }",
         ":export { foo: __foo; }",
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
 
@@ -1389,7 +1379,7 @@ fn at_scope_at_rule() {
                 }
             }
         "#},
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
     test(
         indoc! {r#"
@@ -1450,6 +1440,6 @@ fn at_scope_at_rule() {
                 }
             }
         "#},
-        LocalByDefaultOptions { mode: Mode::Pure },
+        LocalByDefault { mode: Mode::Pure },
     );
 }
