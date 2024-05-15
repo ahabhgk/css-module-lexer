@@ -82,19 +82,19 @@ impl LocalByDefault {
 
 fn test(input: &str, expected: &str) {
     let (actual, warnings) = LocalByDefault::default().transform(input);
-    assert_eq!(expected, actual);
+    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_options(input: &str, expected: &str, options: LocalByDefault) {
     let (actual, warnings) = options.transform(input);
-    assert_eq!(expected, actual);
+    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
     let (actual, warnings) = LocalByDefault::default().transform(input);
-    assert_eq!(expected, actual);
+    similar_asserts::assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",
@@ -104,7 +104,7 @@ fn test_with_warning(input: &str, expected: &str, warning: &str) {
 
 fn test_with_options_warning(input: &str, expected: &str, options: LocalByDefault, warning: &str) {
     let (actual, warnings) = options.transform(input);
-    assert_eq!(expected, actual);
+    similar_asserts::assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",

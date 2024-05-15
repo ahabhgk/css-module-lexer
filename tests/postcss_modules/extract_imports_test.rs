@@ -27,7 +27,7 @@ impl ExtractImports {
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
                 Dependency::Composes { names, from } => {
-                    let names: Vec<_> = names.split(' ').collect();
+                    let names: Vec<_> = names.split_whitespace().collect();
                     let mut composes_content = String::new();
                     if let Some(from) = from {
                         if from == "global" {
@@ -48,7 +48,13 @@ impl ExtractImports {
                                 if let Some(value) = values.get(name) {
                                     composes_content += &value;
                                 } else {
-                                    let value = format!("i__imported_{name}_{postfix}");
+                                    let value = format!(
+                                        "i__imported_{}_{postfix}",
+                                        name.replace(
+                                            |c: char| !c.is_ascii_alphanumeric() && c != '_',
+                                            "_"
+                                        )
+                                    );
                                     postfix += 1;
                                     composes_content += &value;
                                     values.insert(name, value.into());
@@ -125,7 +131,7 @@ impl ExtractImports {
 
 fn test(input: &str, expected: &str) {
     let (actual, warnings) = ExtractImports::default().transform(input);
-    assert_eq!(expected, actual);
+    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
 }
 
@@ -246,7 +252,7 @@ fn import_media() {
                     other: rule2;
                 }
             }
-            
+
             :local(.exportName) {
                 composes: importName from "path/library.css";
                 other: rule;
@@ -283,6 +289,439 @@ fn import_multiple_classes() {
                 i__imported_secondImport_1: secondImport;
             }
             :local(.exportName) { composes: i__imported_importName_0 i__imported_secondImport_1; other: rule; }
+        "#},
+    );
+}
+
+#[test]
+fn import_multiple_references() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: importName secondImport from 'path/library.css';
+                composes: importName from 'path/library2.css';
+                composes: importName2 from 'path/library.css';
+            }
+            :local(.exportName2) {
+                composes: secondImport from 'path/library.css';
+                composes: secondImport from 'path/library.css';
+                composes: thirdDep from 'path/dep3.css';
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+                i__imported_secondImport_1: secondImport;
+                i__imported_importName2_3: importName2;
+            }
+            :import("path/library2.css") {
+                i__imported_importName_2: importName;
+            }
+            :import("path/dep3.css") {
+                i__imported_thirdDep_4: thirdDep;
+            }
+            :local(.exportName) {
+                composes: i__imported_importName_0 i__imported_secondImport_1;
+                composes: i__imported_importName_2;
+                composes: i__imported_importName2_3;
+            }
+            :local(.exportName2) {
+                composes: i__imported_secondImport_1;
+                composes: i__imported_secondImport_1;
+                composes: i__imported_thirdDep_4;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn import_only_whitelist() {
+    test(
+        ":local(.exportName) { imports: importName from \"path/library.css\"; something-else: otherLibImport from \"path/other-lib.css\"; }",
+        ":local(.exportName) { imports: importName from \"path/library.css\"; something-else: otherLibImport from \"path/other-lib.css\"; }",
+    );
+}
+
+#[test]
+fn import_preserving_order() {
+    test(
+        indoc! {r#"
+            .a {
+                composes: b from "./b.css";
+                composes: c from "./c.css";
+                color: #aaa;
+            }
+        "#},
+        indoc! {r#"
+            :import("./b.css") {
+                i__imported_b_0: b;
+            }
+            :import("./c.css") {
+                i__imported_c_1: c;
+            }
+            .a {
+                composes: i__imported_b_0;
+                composes: i__imported_c_1;
+                color: #aaa;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn import_single_quotes() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: importName from 'path/library.css';
+                other: rule;
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+            }
+            :local(.exportName) {
+                composes: i__imported_importName_0;
+                other: rule;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn import_spacing() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: importName  from   	"path/library.css";
+                composes: importName2 from   	"path/library.css";
+                composes: importName   importName2   from   "path/library.css";
+                other: rule;
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+                i__imported_importName2_1: importName2;
+            }
+            :local(.exportName) {
+                composes: i__imported_importName_0;
+                composes: i__imported_importName2_1;
+                composes: i__imported_importName_0 i__imported_importName2_1;
+                other: rule;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn import_within() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: importName from "path/library.css";
+                other: rule;
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+            }
+            :local(.exportName) {
+                composes: i__imported_importName_0;
+                other: rule;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn multiple_composes() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: importName from "path/library.css", beforeName from global, importName secondImport from global, firstImport secondImport from "path/library.css";
+                other: rule;
+            }
+
+            :local(.duplicate) {
+                composes: a from "./aa.css", b from "./bb.css", c from "./cc.css", a from "./aa.css", c from "./cc.css";
+            }
+
+            :local(.spaces) {
+                composes: importName importName2 from "path/library.css", importName3 importName4 from "path/library.css";
+            }
+
+            :local(.unknown) {
+                composes: foo bar, baz;
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+                i__imported_firstImport_1: firstImport;
+                i__imported_secondImport_2: secondImport;
+                i__imported_importName2_6: importName2;
+                i__imported_importName3_7: importName3;
+                i__imported_importName4_8: importName4;
+            }
+            :import("./aa.css") {
+                i__imported_a_3: a;
+            }
+            :import("./bb.css") {
+                i__imported_b_4: b;
+            }
+            :import("./cc.css") {
+                i__imported_c_5: c;
+            }
+            :local(.exportName) {
+                composes: i__imported_importName_0, global(beforeName), global(importName) global(secondImport), i__imported_firstImport_1 i__imported_secondImport_2;
+                other: rule;
+            }
+
+            :local(.duplicate) {
+                composes: i__imported_a_3, i__imported_b_4, i__imported_c_5, i__imported_a_3, i__imported_c_5;
+            }
+
+            :local(.spaces) {
+                composes: i__imported_importName_0 i__imported_importName2_6, i__imported_importName3_7 i__imported_importName4_8;
+            }
+
+            :local(.unknown) {
+                composes: foo bar, baz;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn nesting() {
+    test(
+        indoc! {r#"
+            :local(.foo) {
+                display: grid;
+
+                @media (orientation: landscape) {
+                    &:local(.bar) {
+                        grid-auto-flow: column;
+
+                        @media (min-width: 1024px) {
+                            &:local(.baz) {
+                                composes: importName from "path/library.css";
+                            }
+                        }
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_importName_0: importName;
+            }
+            :local(.foo) {
+                display: grid;
+            
+                @media (orientation: landscape) {
+                    &:local(.bar) {
+                        grid-auto-flow: column;
+
+                        @media (min-width: 1024px) {
+                            &:local(.baz) {
+                                composes: i__imported_importName_0;
+                            }
+                        }
+                    }
+                }
+            }
+        "#},
+    );
+}
+
+// #[test]
+// fn resolve_composes_order() {
+//     test(
+//         indoc! {r#"
+//             .a {
+//                 composes: c from "./c.css";
+//                 color: #bebebe;
+//             }
+
+//             .b {
+//                 /* `b` should be after `c` */
+//                 composes: b from "./b.css";
+//                 composes: c from "./c.css";
+//                 color: #aaa;
+//             }
+//         "#},
+//         indoc! {r#"
+//             :import("./b.css") {
+//                 i__imported_b_1: b;
+//             }
+//             :import("./c.css") {
+//                 i__imported_c_0: c;
+//             }
+//             .a {
+//                 composes: i__imported_c_0;
+//                 color: #bebebe;
+//             }
+
+//             .b {
+//                 /* `b` should be after `c` */
+//                 composes: i__imported_b_1;
+//                 composes: i__imported_c_0;
+//                 color: #aaa;
+//             }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn resolve_duplicates() {
+//     test(
+//         indoc! {r#"
+//             :import("./cc.css") {
+//                 smthing: somevalue;
+//             }
+
+//             .a {
+//                 composes: a from './aa.css';
+//                 composes: b from './bb.css';
+//                 composes: c from './cc.css';
+//                 composes: a from './aa.css';
+//                 composes: c from './cc.css';
+//             }
+//         "#},
+//         indoc! {r#"
+//             :import("./aa.css") {
+//                 i__imported_a_0: a;
+//             }
+//             :import("./bb.css") {
+//                 i__imported_b_1: b;
+//             }
+//             :import("./cc.css") {
+//                 smthing: somevalue;
+//                 i__imported_c_2: c;
+//             }
+
+//             .a {
+//                 composes: i__imported_a_0;
+//                 composes: i__imported_b_1;
+//                 composes: i__imported_c_2;
+//                 composes: i__imported_a_0;
+//                 composes: i__imported_c_2;
+//             }
+//         "#},
+//     );
+// }
+
+// #[test]
+// fn resolve_imports_order() {
+//     test(
+//         indoc! {r#"
+//             :import("custom-path.css") {
+//                 /* empty to check the order */
+//             }
+
+//             :import("./bb.css") {
+//                 somevalue: localvalue;
+//             }
+
+//             .a {
+//                 composes: aa from './aa.css';
+//             }
+
+//             .b {
+//                 composes: bb from './bb.css';
+//                 composes: bb from './aa.css';
+//             }
+
+//             .c {
+//                 composes: cc from './cc.css';
+//                 composes: cc from './aa.css';
+//             }
+
+//             .d {
+//                 composes: dd from './cc.css';
+//                 composes: dd from './bb.css';
+//                 composes: dd from './dd.css';
+//             }
+//         "#},
+//         indoc! {r#"
+//             :import("custom-path.css") {
+//                 /* empty to check the order */
+//             }
+
+//             :import("./cc.css") {
+//                 i__imported_cc_3: cc;
+//                 i__imported_dd_5: dd;
+//             }
+
+//             :import("./bb.css") {
+//                 somevalue: localvalue;
+//                 i__imported_bb_1: bb;
+//                 i__imported_dd_6: dd;
+//             }
+
+//             :import("./aa.css") {
+//                 i__imported_aa_0: aa;
+//                 i__imported_bb_2: bb;
+//                 i__imported_cc_4: cc;
+//             }
+
+//             :import("./dd.css") {
+//                 i__imported_dd_7: dd;
+//             }
+
+//             .a {
+//                 composes: i__imported_aa_0;
+//             }
+
+//             .b {
+//                 composes: i__imported_bb_1;
+//                 composes: i__imported_bb_2;
+//             }
+
+//             .c {
+//                 composes: i__imported_cc_3;
+//                 composes: i__imported_cc_4;
+//             }
+
+//             .d {
+//                 composes: i__imported_dd_5;
+//                 composes: i__imported_dd_6;
+//                 composes: i__imported_dd_7;
+//             }
+//         "#},
+//     );
+// }
+
+#[test]
+fn valid_characters() {
+    test(
+        indoc! {r#"
+            :local(.exportName) {
+                composes: a -b --c _d from "path/library.css";
+                composes: a_ b- c-- d\% from "path/library2.css";
+            }
+        "#},
+        indoc! {r#"
+            :import("path/library.css") {
+                i__imported_a_0: a;
+                i__imported__b_1: -b;
+                i__imported___c_2: --c;
+                i__imported__d_3: _d;
+            }
+            :import("path/library2.css") {
+                i__imported_a__4: a_;
+                i__imported_b__5: b-;
+                i__imported_c___6: c--;
+                i__imported_d___7: d\%;
+            }
+            :local(.exportName) {
+                composes: i__imported_a_0 i__imported__b_1 i__imported___c_2 i__imported__d_3;
+                composes: i__imported_a__4 i__imported_b__5 i__imported_c___6 i__imported_d___7;
+            }
         "#},
     );
 }
