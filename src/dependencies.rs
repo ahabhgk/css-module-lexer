@@ -348,50 +348,88 @@ impl ModeData {
 }
 
 #[derive(Debug)]
-struct AnimationProperty {
-    keywords: AnimationKeywords,
-    keyframes: Option<Range>,
+struct InProperty<T: ReservedValues> {
+    reserved: T,
+    rename: Option<Range>,
     balanced_len: usize,
 }
 
-impl AnimationProperty {
-    pub fn new(balanced_len: usize) -> Self {
+impl<T: ReservedValues> InProperty<T> {
+    pub fn new(reserved: T, balanced_len: usize) -> Self {
         Self {
-            keywords: AnimationKeywords::default(),
-            keyframes: None,
+            reserved,
+            rename: None,
             balanced_len,
         }
     }
 
-    fn check_keywords(&mut self, ident: &str) -> bool {
-        self.keywords.check(ident)
+    fn check_reserved(&mut self, ident: &str) -> bool {
+        self.reserved.check(ident)
     }
 
-    pub fn reset_keywords(&mut self) {
-        self.keywords.reset();
+    pub fn reset_reserved(&mut self) {
+        self.reserved.reset();
     }
 
-    pub fn set_keyframes(&mut self, ident: &str, range: Range) {
-        if self.check_keywords(ident) {
-            self.keyframes = Some(range);
+    pub fn set_rename(&mut self, ident: &str, range: Range) {
+        if self.check_reserved(ident) {
+            self.rename = Some(range);
         }
     }
 
-    pub fn take_keyframes(&mut self, balanced_len: usize) -> Option<Range> {
-        // Don't rename animation name when we in functions
+    pub fn take_rename(&mut self, balanced_len: usize) -> Option<Range> {
+        // Don't rename when we in functions
         if balanced_len != self.balanced_len {
             return None;
         }
-        std::mem::take(&mut self.keyframes)
+        std::mem::take(&mut self.rename)
     }
 }
 
+trait ReservedValues {
+    fn check(&mut self, ident: &str) -> bool;
+    fn reset(&mut self);
+}
+
 #[derive(Debug, Default)]
-struct AnimationKeywords {
+struct AnimationReserved {
     bits: u32,
 }
 
-impl AnimationKeywords {
+impl ReservedValues for AnimationReserved {
+    fn check(&mut self, ident: &str) -> bool {
+        match ident {
+            "normal" => self.check_and_update(Self::NORMAL),
+            "reverse" => self.check_and_update(Self::REVERSE),
+            "alternate" => self.check_and_update(Self::ALTERNATE),
+            "alternate-reverse" => self.check_and_update(Self::ALTERNATE_REVERSE),
+            "forwards" => self.check_and_update(Self::FORWARDS),
+            "backwards" => self.check_and_update(Self::BACKWARDS),
+            "both" => self.check_and_update(Self::BOTH),
+            "infinite" => self.check_and_update(Self::INFINITE),
+            "paused" => self.check_and_update(Self::PAUSED),
+            "running" => self.check_and_update(Self::RUNNING),
+            "ease" => self.check_and_update(Self::EASE),
+            "ease-in" => self.check_and_update(Self::EASE_IN),
+            "ease-out" => self.check_and_update(Self::EASE_OUT),
+            "ease-in-out" => self.check_and_update(Self::EASE_IN_OUT),
+            "linear" => self.check_and_update(Self::LINEAR),
+            "step-end" => self.check_and_update(Self::STEP_END),
+            "step-start" => self.check_and_update(Self::STEP_START),
+            // keywords values
+            "none" | 
+            // global values
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
+            _ => true,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.bits = 0;
+    }
+}
+
+impl AnimationReserved {
     const NORMAL: u32 = 1 << 0;
     const REVERSE: u32 = 1 << 1;
     const ALTERNATE: u32 = 1 << 2;
@@ -410,41 +448,93 @@ impl AnimationKeywords {
     const STEP_END: u32 = 1 << 15;
     const STEP_START: u32 = 1 << 16;
 
-    pub fn check(&mut self, ident: &str) -> bool {
-        match ident {
-            "normal" => self.keyword_check(Self::NORMAL),
-            "reverse" => self.keyword_check(Self::REVERSE),
-            "alternate" => self.keyword_check(Self::ALTERNATE),
-            "alternate-reverse" => self.keyword_check(Self::ALTERNATE_REVERSE),
-            "forwards" => self.keyword_check(Self::FORWARDS),
-            "backwards" => self.keyword_check(Self::BACKWARDS),
-            "both" => self.keyword_check(Self::BOTH),
-            "infinite" => self.keyword_check(Self::INFINITE),
-            "paused" => self.keyword_check(Self::PAUSED),
-            "running" => self.keyword_check(Self::RUNNING),
-            "ease" => self.keyword_check(Self::EASE),
-            "ease-in" => self.keyword_check(Self::EASE_IN),
-            "ease-out" => self.keyword_check(Self::EASE_OUT),
-            "ease-in-out" => self.keyword_check(Self::EASE_IN_OUT),
-            "linear" => self.keyword_check(Self::LINEAR),
-            "step-end" => self.keyword_check(Self::STEP_END),
-            "step-start" => self.keyword_check(Self::STEP_START),
-            "none" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
-            _ => true,
-        }
-    }
-
-    fn keyword_check(&mut self, bit: u32) -> bool {
+    fn check_and_update(&mut self, bit: u32) -> bool {
         if self.bits & bit == bit {
             return true;
         }
         self.bits |= bit;
         false
     }
+}
 
-    pub fn reset(&mut self) {
-        self.bits = 0;
+#[derive(Debug, Default)]
+struct ListStyleReserved;
+
+impl ReservedValues for ListStyleReserved {
+    fn check(&mut self, ident: &str) -> bool {
+        match ident {
+            // https://www.w3.org/TR/css-counter-styles-3/#simple-numeric
+            "decimal"
+            | "decimal-leading-zero"
+            | "arabic-indic"
+            | "armenian"
+            | "upper-armenian"
+            | "lower-armenian"
+            | "bengali"
+            | "cambodian"
+            | "khmer"
+            | "cjk-decimal"
+            | "devanagari"
+            | "georgian"
+            | "gujarati"
+            | "gurmukhi"
+            | "hebrew"
+            | "kannada"
+            | "lao"
+            | "malayalam"
+            | "mongolian"
+            | "myanmar"
+            | "oriya"
+            | "persian"
+            | "lower-roman"
+            | "upper-roman"
+            | "tamil"
+            | "telugu"
+            | "thai"
+            | "tibetan"
+            // https://www.w3.org/TR/css-counter-styles-3/#simple-alphabetic
+            | "lower-alpha"
+            | "lower-latin"
+            | "upper-alpha"
+            | "upper-latin"
+            | "lower-greek"
+            | "hiragana"
+            | "hiragana-iroha"
+            | "katakana"
+            | "katakana-iroha"
+            // https://www.w3.org/TR/css-counter-styles-3/#simple-symbolic
+            | "disc"
+            | "circle"
+            | "square"
+            | "disclosure-open"
+            | "disclosure-closed"
+            // https://www.w3.org/TR/css-counter-styles-3/#simple-fixed
+            | "cjk-earthly-branch"
+            | "cjk-heavenly-stem"
+            // https://www.w3.org/TR/css-counter-styles-3/#complex-cjk
+            | "japanese-informal"
+            | "japanese-formal"
+            | "korean-hangul-formal"
+            | "korean-hanja-informal"
+            | "korean-hanja-formal"
+            | "simp-chinese-informal"
+            | "simp-chinese-formal"
+            | "trad-chinese-informal"
+            | "trad-chinese-formal"
+            | "ethiopic-numeric"
+            // keywords values
+            | "none"
+            // global values
+            | "initial"
+            | "inherit"
+            | "unset"
+            | "revert"
+            | "revert-layer" => false,
+            _ => true,
+        }
     }
+
+    fn reset(&mut self) {}
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -487,6 +577,14 @@ pub enum Dependency<'s> {
         range: Range,
     },
     LocalKeyframesDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalCounterStyle {
+        name: &'s str,
+        range: Range,
+    },
+    LocalCounterStyleDecl {
         name: &'s str,
         range: Range,
     },
@@ -577,7 +675,8 @@ pub struct LexDependencies<'s, D, W> {
     allow_import_at_rule: bool,
     balanced: BalancedStack,
     is_next_rule_prelude: bool,
-    in_animation_property: Option<AnimationProperty>,
+    in_animation_property: Option<InProperty<AnimationReserved>>,
+    in_list_style_property: Option<InProperty<ListStyleReserved>>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -592,6 +691,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             balanced: Default::default(),
             is_next_rule_prelude: true,
             in_animation_property: None,
+            in_list_style_property: None,
             handle_dependency,
             handle_warning,
         }
@@ -618,11 +718,25 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 
     fn enter_animation_property(&mut self) {
-        self.in_animation_property = Some(AnimationProperty::new(self.balanced.len()));
+        self.in_animation_property = Some(InProperty::new(
+            AnimationReserved::default(),
+            self.balanced.len(),
+        ));
     }
 
     fn exit_animation_property(&mut self) {
         self.in_animation_property = None;
+    }
+
+    fn enter_list_style_property(&mut self) {
+        self.in_list_style_property = Some(InProperty::new(
+            ListStyleReserved::default(),
+            self.balanced.len(),
+        ));
+    }
+
+    fn exit_list_style_property(&mut self) {
+        self.in_list_style_property = None;
     }
 
     fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
@@ -960,15 +1074,54 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 
     fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
-        if let Some(animation) = &mut self.in_animation_property {
-            if let Some(range) = animation.take_keyframes(self.balanced.len()) {
-                self.handle_dependency
-                    .handle_dependency(Dependency::LocalKeyframes {
-                        name: lexer.slice(range.start, range.end)?,
-                        range,
-                    });
-            }
-            animation.reset_keywords();
+        let animation = self.in_animation_property.as_mut().unwrap();
+        if let Some(range) = animation.take_rename(self.balanced.len()) {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalKeyframes {
+                    name: lexer.slice(range.start, range.end)?,
+                    range,
+                });
+        }
+        animation.reset_reserved();
+        Some(())
+    }
+
+    fn lex_local_counter_style_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        let start = lexer.cur_pos()?;
+        if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected ident during parsing of '@counter-style'",
+                range: Range::new(start, lexer.peek2_pos()?),
+            });
+            return Some(());
+        }
+        lexer.consume_ident_sequence()?;
+        let end = lexer.cur_pos()?;
+        self.handle_dependency
+            .handle_dependency(Dependency::LocalCounterStyleDecl {
+                name: lexer.slice(start, end)?,
+                range: Range::new(start, end),
+            });
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_LEFT_CURLY {
+            self.handle_warning.handle_warning(Warning::Unexpected {
+                message: "Expected '{' during parsing of '@counter-style'",
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+            });
+            return Some(());
+        }
+        Some(())
+    }
+
+    fn handle_local_counter_style_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+        let list_style = self.in_list_style_property.as_mut().unwrap();
+        if let Some(range) = list_style.take_rename(self.balanced.len()) {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalCounterStyle {
+                    name: lexer.slice(range.start, range.end)?,
+                    range,
+                });
         }
         Some(())
     }
@@ -1172,6 +1325,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.lex_local_keyframes_decl(lexer)?;
             } else if name == "@property" {
                 self.lex_local_property_decl(lexer)?;
+            } else if name == "@counter-style" {
+                self.lex_local_counter_style_decl(lexer)?;
             } else {
                 self.is_next_rule_prelude = name == "@scope";
             }
@@ -1277,8 +1432,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     mode_data.pure_global = Some(end);
 
                     if mode_data.is_property_local_mode() {
-                        self.handle_local_keyframes_dependency(lexer)?;
-                        self.exit_animation_property();
+                        if self.in_animation_property.is_some() {
+                            self.handle_local_keyframes_dependency(lexer)?;
+                            self.exit_animation_property();
+                        }
+                        if self.in_list_style_property.is_some() {
+                            self.handle_local_counter_style_dependency(&lexer)?;
+                            self.exit_list_style_property();
+                        }
                     }
 
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1378,8 +1539,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            animation
-                                .set_keyframes(lexer.slice(start, end)?, Range::new(start, end));
+                            animation.set_rename(lexer.slice(start, end)?, Range::new(start, end));
+                        }
+                        return Some(());
+                    }
+                    if let Some(list_style) = &mut self.in_list_style_property {
+                        // Not inside functions
+                        if self.balanced.is_empty() {
+                            list_style.set_rename(lexer.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
@@ -1396,6 +1563,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         || with_vendor_prefixed_eq(&ident, "animation-name")
                     {
                         self.enter_animation_property();
+                        return Some(());
+                    }
+
+                    if ident == "list-style" || ident == "list-style-type" {
+                        self.enter_list_style_property();
                         return Some(());
                     }
 
@@ -1516,8 +1688,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 mode_data.pure_global = Some(end);
 
                 if mode_data.is_property_local_mode() {
-                    self.handle_local_keyframes_dependency(lexer)?;
-                    self.exit_animation_property();
+                    if self.in_animation_property.is_some() {
+                        self.handle_local_keyframes_dependency(lexer)?;
+                        self.exit_animation_property();
+                    }
+                    if self.in_list_style_property.is_some() {
+                        self.handle_local_counter_style_dependency(&lexer)?;
+                        self.exit_list_style_property();
+                    }
                 }
             }
 
@@ -1665,7 +1843,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         }
 
         if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {
-            self.handle_local_keyframes_dependency(lexer)?;
+            if self.in_animation_property.is_some() {
+                self.handle_local_keyframes_dependency(lexer)?;
+            }
         }
 
         Some(())

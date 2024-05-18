@@ -2,6 +2,7 @@ mod postcss_modules;
 
 use css_module_lexer::collect_css_dependencies;
 use css_module_lexer::collect_css_modules_dependencies;
+use css_module_lexer::collect_css_modules_global_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::UrlRangeKind;
@@ -145,6 +146,30 @@ fn assert_local_keyframes_decl_dependency(input: &str, dependency: &Dependency, 
 
 fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name: &str) {
     let Dependency::LocalKeyframes {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_counter_style_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalCounterStyleDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalCounterStyle {
         name: actual_name,
         range,
     } = dependency
@@ -799,6 +824,28 @@ fn css_modules_property() {
 }
 
 #[test]
+fn css_modules_counter_style() {
+    let input = indoc! {r#"
+        @counter-style circles {
+            symbols: Ⓐ Ⓑ Ⓒ;
+        }
+        ul {
+            list-style: circles;
+        }
+        ol {
+            list-style-type: none;
+        }
+        li {
+            list-style-type: disc;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_counter_style_decl_dependency(input, &dependencies[0], "circles");
+    assert_local_counter_style_dependency(input, &dependencies[1], "circles");
+}
+
+#[test]
 fn css_modules_keyframes_unexpected() {
     let input = indoc! {r#"
         @keyframes $aaa {
@@ -882,6 +929,34 @@ fn css_modules_keyframes_3() {
     assert_local_keyframes_decl_dependency(input, &dependencies[1], "foo");
     assert_replace_dependency(input, &dependencies[2], "", ")");
     assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn css_modules_keyframes_4() {
+    let input = indoc! {r#"
+        @keyframes foo {}
+        :local(.class) {
+            animation-name: foo;
+        }
+        @keyframes :local(bar) {}
+        :local .class2 {
+            animation-name: bar;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_global_dependencies(input);
+    assert!(warnings.is_empty());
+    // @keyframes foo
+    assert_replace_dependency(input, &dependencies[0], "", ":local(");
+    assert_local_ident_dependency(input, &dependencies[1], ".class", true);
+    assert_replace_dependency(input, &dependencies[2], "", ")");
+    // @keyframes :local(bar)
+    assert_replace_dependency(input, &dependencies[3], "", ":local(");
+    assert_local_keyframes_decl_dependency(input, &dependencies[4], "bar");
+    assert_replace_dependency(input, &dependencies[5], "", ")");
+    assert_replace_dependency(input, &dependencies[6], "", ":local ");
+    assert_local_ident_dependency(input, &dependencies[7], ".class2", true);
+    assert_local_keyframes_dependency(input, &dependencies[8], "bar");
+    assert_eq!(dependencies.len(), 9);
 }
 
 #[test]

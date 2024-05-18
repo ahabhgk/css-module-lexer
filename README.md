@@ -17,8 +17,11 @@ Lexes CSS modules returning their dependencies metadata.
 - [ ] CSS Modules
   - [x] :local, :local(), :global, :global()
   - [x] local scope by default
-  - [x] nesting
-  - [x] var(), @property
-  - [x] @keyframe
   - [x] composes
+  - [x] nesting
+  - [x] local @keyframe
+  - [x] local var()
+  - [x] local @property
+  - [x] local @counter-style
+  - [ ] local grid
   - [ ] @values
