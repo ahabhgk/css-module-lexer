@@ -291,8 +291,7 @@ impl<'s> Lexer<'s> {
         let start = self.cur_pos()?;
         self.consume_ident_sequence()?;
         let peek_pos = self.peek_pos()?;
-        if self.cur_pos()? == start + 3
-            && self.slice(start, peek_pos)?.to_ascii_lowercase() == "url("
+        if self.cur_pos()? == start + 3 && self.slice(start, peek_pos)?.eq_ignore_ascii_case("url(")
         {
             self.consume();
             while is_white_space(self.cur()?) {

@@ -219,7 +219,7 @@ impl BalancedItemKind {
         match name {
             "url(" => Self::Url,
             "image-set(" => Self::ImageSet,
-            _ if with_vendor_prefixed_eq(name, "image-set(") => Self::ImageSet,
+            _ if with_vendor_prefixed_eq(name, "image-set(", false) => Self::ImageSet,
             "layer(" => Self::Layer,
             "supports(" => Self::Supports,
             "palette-mix(" => Self::PaletteMix,
@@ -248,18 +248,20 @@ impl BalancedItemKind {
     }
 }
 
-fn with_vendor_prefixed_eq(left: &str, right: &str) -> bool {
-    left.strip_prefix("-webkit-") == Some(right)
-        || left.strip_prefix("-moz-") == Some(right)
-        || left.strip_prefix("-ms-") == Some(right)
-        || left.strip_prefix("-o-") == Some(right)
-}
-
-fn with_at_vendor_prefixed_eq(left: &str, right: &str) -> bool {
-    if let Some(left) = left.strip_prefix('@') {
-        return with_vendor_prefixed_eq(left, right);
-    }
-    false
+fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
+    let left = if at_rule {
+        if let Some(left) = left.strip_prefix('@') {
+            left
+        } else {
+            return false;
+        }
+    } else {
+        left
+    };
+    matches!(left.strip_prefix("-webkit-"), Some(left) if left.eq_ignore_ascii_case(right))
+        || matches!(left.strip_prefix("-moz-"), Some(left) if left.eq_ignore_ascii_case(right))
+        || matches!(left.strip_prefix("-ms-"), Some(left) if left.eq_ignore_ascii_case(right))
+        || matches!(left.strip_prefix("-o-"), Some(left) if left.eq_ignore_ascii_case(right))
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -1070,16 +1072,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let start = lexer.cur_pos()?;
             lexer.consume_potential_pseudo(self)?;
             let end = lexer.cur_pos()?;
-            let pseudo = lexer.slice(start, end)?.to_ascii_lowercase();
+            let pseudo = lexer.slice(start, end)?;
             let mode_data = self.mode_data.as_ref().unwrap();
-            if mode_data.is_pure_mode() && pseudo == ":global(" || pseudo == ":global" {
+            if mode_data.is_pure_mode() && pseudo.eq_ignore_ascii_case(":global(")
+                || pseudo.eq_ignore_ascii_case(":global")
+            {
                 self.handle_warning.handle_warning(Warning::NotPure {
                     range: Range::new(start, end),
                     message: "'@keyframes :global' is not allowed in pure mode",
                 });
             }
-            is_function = pseudo == ":local(" || pseudo == ":global(";
-            if !is_function && pseudo != ":local" && pseudo != ":global" {
+            is_function =
+                pseudo.eq_ignore_ascii_case(":local(") || pseudo.eq_ignore_ascii_case(":global(");
+            if !is_function
+                && !pseudo.eq_ignore_ascii_case(":local")
+                && !pseudo.eq_ignore_ascii_case(":global")
+            {
                 self.handle_warning.handle_warning(Warning::Unexpected {
                     message: "Expected ':local', ':local()', ':global', or ':global()' during parsing of '@keyframes' name",
                     range: Range::new(start, end),
@@ -1377,14 +1385,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        let name = lexer.slice(start, end)?.to_ascii_lowercase();
-        if name == "@namespace" {
+        let name = lexer.slice(start, end)?;
+        if name.eq_ignore_ascii_case("@namespace") {
             self.scope = Scope::AtNamespaceInvalid;
             self.handle_warning
                 .handle_warning(Warning::NamespaceNotSupportedInBundledCss {
                     range: Range::new(start, end),
                 });
-        } else if name == "@import" {
+        } else if name.eq_ignore_ascii_case("@import") {
             if !self.allow_import_at_rule {
                 self.scope = Scope::AtImportInvalid;
                 self.handle_warning
@@ -1395,9 +1403,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if self.mode_data.is_some() {
-            if name == "@keyframes" || with_at_vendor_prefixed_eq(&name, "keyframes") {
+            if name.eq_ignore_ascii_case("@keyframes")
+                || with_vendor_prefixed_eq(name, "keyframes", true)
+            {
                 self.lex_local_keyframes_decl(lexer)?;
-            } else if name == "@property" {
+            } else if name.eq_ignore_ascii_case("@property") {
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalPropertyDecl { name, range },
@@ -1410,9 +1420,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         range,
                     },
                 )?;
-            } else if name == "@counter-style" {
+            } else if name.eq_ignore_ascii_case("@counter-style") {
                 self.lex_local_counter_style_decl(lexer)?;
-            } else if name == "@font-palette-values" {
+            } else if name.eq_ignore_ascii_case("@font-palette-values") {
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalFontPaletteDecl { name, range },
@@ -1427,7 +1437,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     },
                 )?;
             } else {
-                self.is_next_rule_prelude = name == "@scope";
+                self.is_next_rule_prelude = name.eq_ignore_ascii_case("@scope");
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();
@@ -1554,14 +1564,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        let name = lexer.slice(start, end)?.to_ascii_lowercase();
-        self.balanced.push(
-            BalancedItem::new(&name, start, end),
-            self.mode_data.as_mut(),
-        );
+        let name = lexer.slice(start, end)?;
+        self.balanced
+            .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if name == "supports(" {
+            if name.eq_ignore_ascii_case("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
@@ -1569,7 +1577,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        if mode_data.is_current_local_mode() && name == "var(" {
+        if mode_data.is_current_local_mode() && name.eq_ignore_ascii_case("var(") {
             self.lex_local_var(lexer)?;
         }
         Some(())
@@ -1671,33 +1679,34 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         return self.lex_local_var_decl(lexer, name, start, end);
                     }
 
-                    let ident = ident.to_ascii_lowercase();
-                    if ident == "animation"
-                        || ident == "animation-name"
-                        || with_vendor_prefixed_eq(&ident, "animation")
-                        || with_vendor_prefixed_eq(&ident, "animation-name")
+                    if ident.eq_ignore_ascii_case("animation")
+                        || ident.eq_ignore_ascii_case("animation-name")
+                        || with_vendor_prefixed_eq(ident, "animation", false)
+                        || with_vendor_prefixed_eq(ident, "animation-name", false)
                     {
                         self.enter_animation_property();
                         return Some(());
                     }
 
-                    if ident == "list-style" || ident == "list-style-type" {
+                    if ident.eq_ignore_ascii_case("list-style")
+                        || ident.eq_ignore_ascii_case("list-style-type")
+                    {
                         self.enter_list_style_property();
                         return Some(());
                     }
 
-                    if ident == "font-palette" {
+                    if ident.eq_ignore_ascii_case("font-palette") {
                         self.enter_font_palette_property();
                         return Some(());
                     }
 
-                    if ident == "composes" {
+                    if ident.eq_ignore_ascii_case("composes") {
                         return self.lex_composes(lexer, start);
                     }
                 }
             }
             Scope::InAtImport(ref mut import_data) => {
-                if lexer.slice(start, end)?.to_ascii_lowercase() == "layer" {
+                if lexer.slice(start, end)?.eq_ignore_ascii_case("layer") {
                     import_data.layer = ImportDataLayer::EndLayer {
                         value: "",
                         range: Range::new(start, end),
@@ -1837,9 +1846,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        let name = lexer.slice(start, end)?.to_ascii_lowercase();
+        let name = lexer.slice(start, end)?;
         if let Some(mode_data) = &mut self.mode_data {
-            if name == ":import(" {
+            if name.eq_ignore_ascii_case(":import(") {
                 self.lex_icss_import(lexer);
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
@@ -1848,7 +1857,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
                 return Some(());
             }
-            if name == ":global(" || name == ":local(" {
+            if name.eq_ignore_ascii_case(":global(") || name.eq_ignore_ascii_case(":local(") {
                 if mode_data.is_inside_mode_function() {
                     self.handle_warning
                         .handle_warning(Warning::ExpectedNotInside {
@@ -1865,10 +1874,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
             }
         }
-        self.balanced.push(
-            BalancedItem::new(&name, start, end),
-            self.mode_data.as_mut(),
-        );
+        self.balanced
+            .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
         Some(())
     }
 
@@ -1876,8 +1883,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        let name = lexer.slice(start, end)?.to_ascii_lowercase();
-        if name == ":global" || name == ":local" {
+        let name = lexer.slice(start, end)?;
+        if name.eq_ignore_ascii_case(":global") || name.eq_ignore_ascii_case(":local") {
             if mode_data.is_inside_mode_function() {
                 self.handle_warning
                     .handle_warning(Warning::ExpectedNotInside {
@@ -1909,10 +1916,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
             }
 
-            self.balanced.push(
-                BalancedItem::new(&name, start, end),
-                self.mode_data.as_mut(),
-            );
+            self.balanced
+                .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
             let end2 = lexer.cur_pos()?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
@@ -1921,7 +1926,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 });
             return Some(());
         }
-        if matches!(self.scope, Scope::TopLevel) && name == ":export" {
+        if matches!(self.scope, Scope::TopLevel) && name.eq_ignore_ascii_case(":export") {
             self.lex_icss_export(lexer)?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
