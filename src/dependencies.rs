@@ -563,6 +563,7 @@ pub enum Dependency<'s> {
     LocalVar {
         name: &'s str,
         range: Range,
+        from: Option<&'s str>,
     },
     LocalVarDecl {
         name: &'s str,
@@ -729,10 +730,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 
     fn enter_list_style_property(&mut self) {
-        self.in_list_style_property = Some(InProperty::new(
-            ListStyleReserved::default(),
-            self.balanced.len(),
-        ));
+        self.in_list_style_property = Some(InProperty::new(ListStyleReserved, self.balanced.len()));
     }
 
     fn exit_list_style_property(&mut self) {
@@ -944,10 +942,37 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_ident_sequence()?;
         let name_start = start + 2;
         let end = lexer.cur_pos()?;
+        lexer.consume_white_space_and_comments()?;
+        let from_start = lexer.cur_pos()?;
+        let from = if matches!(lexer.slice(from_start, from_start + 4), Some("from")) {
+            lexer.consume();
+            lexer.consume();
+            lexer.consume();
+            lexer.consume();
+            lexer.consume_white_space_and_comments()?;
+            let c = lexer.cur()?;
+            let path_start = lexer.cur_pos()?;
+            if c == '\'' || c == '"' {
+                lexer.consume();
+                lexer.consume_string(self, c)?;
+            } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
+                lexer.consume_ident_sequence()?;
+            } else {
+                self.handle_warning.handle_warning(Warning::Unexpected {
+                    message: "Expected string or ident during parsing of 'composes'",
+                    range: Range::new(path_start, lexer.peek_pos()?),
+                });
+                return Some(());
+            }
+            Some(lexer.slice(path_start, lexer.cur_pos()?)?)
+        } else {
+            None
+        };
         self.handle_dependency
             .handle_dependency(Dependency::LocalVar {
                 name: lexer.slice(name_start, end)?,
                 range: Range::new(start, end),
+                from,
             });
         Some(())
     }
@@ -1437,7 +1462,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             self.exit_animation_property();
                         }
                         if self.in_list_style_property.is_some() {
-                            self.handle_local_counter_style_dependency(&lexer)?;
+                            self.handle_local_counter_style_dependency(lexer)?;
                             self.exit_list_style_property();
                         }
                     }
@@ -1693,7 +1718,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         self.exit_animation_property();
                     }
                     if self.in_list_style_property.is_some() {
-                        self.handle_local_counter_style_dependency(&lexer)?;
+                        self.handle_local_counter_style_dependency(lexer)?;
                         self.exit_list_style_property();
                     }
                 }
@@ -1842,10 +1867,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
         }
 
-        if matches!(self.scope, Scope::InBlock) && mode_data.is_property_local_mode() {
-            if self.in_animation_property.is_some() {
-                self.handle_local_keyframes_dependency(lexer)?;
-            }
+        if matches!(self.scope, Scope::InBlock)
+            && mode_data.is_property_local_mode()
+            && self.in_animation_property.is_some()
+        {
+            self.handle_local_keyframes_dependency(lexer)?;
         }
 
         Some(())

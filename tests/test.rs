@@ -87,15 +87,22 @@ fn assert_local_ident_dependency(input: &str, dependency: &Dependency, name: &st
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
 }
 
-fn assert_local_var_dependency(input: &str, dependency: &Dependency, name: &str) {
+fn assert_local_var_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    from: Option<&str>,
+) {
     let Dependency::LocalVar {
         name: actual_name,
         range,
+        from: actual_from,
     } = dependency
     else {
         return assert!(false);
     };
     assert_eq!(*actual_name, name);
+    assert_eq!(*actual_from, from);
     assert_eq!(
         Lexer::slice_range(input, range).unwrap(),
         format!("--{}", name)
@@ -764,7 +771,7 @@ fn css_modules_local_var_unexpected() {
 }
 
 #[test]
-fn css_modules_local_var() {
+fn css_modules_local_var_1() {
     let input = indoc! {r#"
         .vars {
             color: var(--local-color, red);
@@ -778,10 +785,28 @@ fn css_modules_local_var() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_ident_dependency(input, &dependencies[0], ".vars", false);
-    assert_local_var_dependency(input, &dependencies[1], "local-color");
+    assert_local_var_dependency(input, &dependencies[1], "local-color", None);
     assert_local_var_decl_dependency(input, &dependencies[2], "local-color");
     assert_local_ident_dependency(input, &dependencies[3], ".globalVars", false);
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
+}
+
+#[test]
+fn css_modules_local_var_2() {
+    let input = indoc! {r#"
+        .bar {
+            a: var(--color1 from "./b.css", red);
+            b: var(--color2 from './b.css', red);
+            c: var(--color3 from global, red);
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_ident_dependency(input, &dependencies[0], ".bar", false);
+    assert_local_var_dependency(input, &dependencies[1], "color1", Some("\"./b.css\""));
+    assert_local_var_dependency(input, &dependencies[2], "color2", Some("'./b.css'"));
+    assert_local_var_dependency(input, &dependencies[3], "color3", Some("global"));
+    assert_eq!(dependencies.len(), 4);
 }
 
 #[test]
@@ -789,7 +814,7 @@ fn css_modules_local_var_minified_1() {
     let input = "body{margin:0;font-family:var(--bs-body-font-family);}";
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
-    assert_local_var_dependency(input, &dependencies[0], "bs-body-font-family");
+    assert_local_var_dependency(input, &dependencies[0], "bs-body-font-family", None);
 }
 
 #[test]
@@ -800,8 +825,8 @@ fn css_modules_local_var_minified_2() {
     assert_local_ident_dependency(input, &dependencies[0], ".table-primary", false);
     assert_local_var_decl_dependency(input, &dependencies[1], "bs-table-color");
     assert_local_var_decl_dependency(input, &dependencies[2], "bs-table-border-color");
-    assert_local_var_dependency(input, &dependencies[3], "bs-table-color");
-    assert_local_var_dependency(input, &dependencies[4], "bs-table-border-color");
+    assert_local_var_dependency(input, &dependencies[3], "bs-table-color", None);
+    assert_local_var_dependency(input, &dependencies[4], "bs-table-border-color", None);
 }
 
 #[test]
@@ -820,7 +845,7 @@ fn css_modules_property() {
     assert!(warnings.is_empty());
     assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
     assert_local_ident_dependency(input, &dependencies[1], ".class", false);
-    assert_local_var_dependency(input, &dependencies[2], "my-color");
+    assert_local_var_dependency(input, &dependencies[2], "my-color", None);
 }
 
 #[test]
@@ -856,8 +881,8 @@ fn css_modules_keyframes_unexpected() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert_warning(input, &warnings[0], "$a");
     assert_eq!(warnings.len(), 1);
-    assert_local_var_dependency(input, &dependencies[0], "theme-color1");
-    assert_local_var_dependency(input, &dependencies[1], "theme-color2");
+    assert_local_var_dependency(input, &dependencies[0], "theme-color1", None);
+    assert_local_var_dependency(input, &dependencies[1], "theme-color2", None);
     assert_eq!(dependencies.len(), 2);
 }
 
@@ -882,8 +907,8 @@ fn css_modules_keyframes_1() {
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
     assert!(warnings.is_empty());
     assert_local_keyframes_decl_dependency(input, &dependencies[0], "localkeyframes");
-    assert_local_var_dependency(input, &dependencies[1], "theme-color1");
-    assert_local_var_dependency(input, &dependencies[2], "theme-color2");
+    assert_local_var_dependency(input, &dependencies[1], "theme-color1", None);
+    assert_local_var_dependency(input, &dependencies[2], "theme-color2", None);
     assert_local_keyframes_decl_dependency(input, &dependencies[3], "localkeyframes2");
     assert_local_ident_dependency(input, &dependencies[4], ".animation", false);
     assert_local_keyframes_dependency(input, &dependencies[5], "localkeyframes");
@@ -914,8 +939,8 @@ fn css_modules_keyframes_2() {
     assert_local_keyframes_decl_dependency(input, &dependencies[0], "slidein");
     assert_local_ident_dependency(input, &dependencies[1], ".class", false);
     assert_local_var_decl_dependency(input, &dependencies[2], "animation-name");
-    assert_local_var_dependency(input, &dependencies[3], "animation-name");
-    assert_local_var_dependency(input, &dependencies[4], "baz");
+    assert_local_var_dependency(input, &dependencies[3], "animation-name", None);
+    assert_local_var_dependency(input, &dependencies[4], "baz", None);
     assert_local_keyframes_dependency(input, &dependencies[5], "slidein");
     assert_eq!(dependencies.len(), 6);
 }
