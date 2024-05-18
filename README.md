@@ -23,5 +23,6 @@ Lexes CSS modules returning their dependencies metadata.
   - [x] local var()
   - [x] local @property
   - [x] local @counter-style
+  - [x] local @font-palette-values
   - [ ] local grid
   - [ ] @values

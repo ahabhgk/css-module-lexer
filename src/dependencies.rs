@@ -206,6 +206,7 @@ enum BalancedItemKind {
     ImageSet,
     Layer,
     Supports,
+    PaletteMix,
     LocalFn,
     GlobalFn,
     LocalClass,
@@ -221,6 +222,7 @@ impl BalancedItemKind {
             _ if with_vendor_prefixed_eq(name, "image-set(") => Self::ImageSet,
             "layer(" => Self::Layer,
             "supports(" => Self::Supports,
+            "palette-mix(" => Self::PaletteMix,
             ":local(" => Self::LocalFn,
             ":global(" => Self::GlobalFn,
             ":local" => Self::LocalClass,
@@ -537,6 +539,17 @@ impl ReservedValues for ListStyleReserved {
     fn reset(&mut self) {}
 }
 
+#[derive(Debug, Default)]
+struct FontPaletteReserved;
+
+impl ReservedValues for FontPaletteReserved {
+    fn check(&mut self, ident: &str) -> bool {
+        ident.starts_with("--")
+    }
+
+    fn reset(&mut self) {}
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
@@ -586,6 +599,14 @@ pub enum Dependency<'s> {
         range: Range,
     },
     LocalCounterStyleDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalFontPalette {
+        name: &'s str,
+        range: Range,
+    },
+    LocalFontPaletteDecl {
         name: &'s str,
         range: Range,
     },
@@ -678,6 +699,7 @@ pub struct LexDependencies<'s, D, W> {
     is_next_rule_prelude: bool,
     in_animation_property: Option<InProperty<AnimationReserved>>,
     in_list_style_property: Option<InProperty<ListStyleReserved>>,
+    in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -693,6 +715,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             is_next_rule_prelude: true,
             in_animation_property: None,
             in_list_style_property: None,
+            in_font_palette_property: None,
             handle_dependency,
             handle_warning,
         }
@@ -735,6 +758,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn exit_list_style_property(&mut self) {
         self.in_list_style_property = None;
+    }
+
+    fn enter_font_palette_property(&mut self) {
+        self.in_font_palette_property =
+            Some(InProperty::new(FontPaletteReserved, self.balanced.len()));
+    }
+
+    fn exit_font_palette_property(&mut self) {
+        self.in_font_palette_property = None;
     }
 
     fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
@@ -997,30 +1029,35 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
-    fn lex_local_property_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+    fn lex_local_dashed_ident_decl(
+        &mut self,
+        lexer: &mut Lexer<'s>,
+        local_decl_dependency: impl FnOnce(&'s str, Range) -> Dependency<'s>,
+        dashed_warning: impl FnOnce(Range) -> Warning<'s>,
+        left_curly_warning: impl FnOnce(Range) -> Warning<'s>,
+    ) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected starts with '--' during parsing of '@property'",
-                range: Range::new(start, lexer.peek2_pos()?),
-            });
+            self.handle_warning
+                .handle_warning(dashed_warning(Range::new(start, lexer.peek2_pos()?)));
             return Some(());
         }
         lexer.consume_ident_sequence()?;
         let name_start = start + 2;
         let end = lexer.cur_pos()?;
         self.handle_dependency
-            .handle_dependency(Dependency::LocalPropertyDecl {
-                name: lexer.slice(name_start, end)?,
-                range: Range::new(start, end),
-            });
+            .handle_dependency(local_decl_dependency(
+                lexer.slice(name_start, end)?,
+                Range::new(start, end),
+            ));
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_LEFT_CURLY {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected '{' during parsing of '@property'",
-                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
-            });
+            self.handle_warning
+                .handle_warning(left_curly_warning(Range::new(
+                    lexer.cur_pos()?,
+                    lexer.peek_pos()?,
+                )));
             return Some(());
         }
         Some(())
@@ -1145,6 +1182,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             self.handle_dependency
                 .handle_dependency(Dependency::LocalCounterStyle {
                     name: lexer.slice(range.start, range.end)?,
+                    range,
+                });
+        }
+        Some(())
+    }
+
+    fn handle_local_font_palette_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+        let font_palette = self.in_font_palette_property.as_mut().unwrap();
+        if let Some(range) = font_palette.take_rename(self.balanced.len()) {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalFontPalette {
+                    name: lexer.slice(range.start + 2, range.end)?,
                     range,
                 });
         }
@@ -1349,9 +1398,34 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             if name == "@keyframes" || with_at_vendor_prefixed_eq(&name, "keyframes") {
                 self.lex_local_keyframes_decl(lexer)?;
             } else if name == "@property" {
-                self.lex_local_property_decl(lexer)?;
+                self.lex_local_dashed_ident_decl(
+                    lexer,
+                    |name, range| Dependency::LocalPropertyDecl { name, range },
+                    |range| Warning::Unexpected {
+                        message: "Expected starts with '--' during parsing of '@property'",
+                        range,
+                    },
+                    |range| Warning::Unexpected {
+                        message: "Expected '{' during parsing of '@property'",
+                        range,
+                    },
+                )?;
             } else if name == "@counter-style" {
                 self.lex_local_counter_style_decl(lexer)?;
+            } else if name == "@font-palette-values" {
+                self.lex_local_dashed_ident_decl(
+                    lexer,
+                    |name, range| Dependency::LocalFontPaletteDecl { name, range },
+                    |range| Warning::Unexpected {
+                        message:
+                            "Expected starts with '--' during parsing of '@font-palette-values'",
+                        range,
+                    },
+                    |range| Warning::Unexpected {
+                        message: "Expected '{' during parsing of '@font-palette-values'",
+                        range,
+                    },
+                )?;
             } else {
                 self.is_next_rule_prelude = name == "@scope";
             }
@@ -1465,6 +1539,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             self.handle_local_counter_style_dependency(lexer)?;
                             self.exit_list_style_property();
                         }
+                        if self.in_font_palette_property.is_some() {
+                            self.handle_local_font_palette_dependency(lexer)?;
+                            self.exit_font_palette_property();
+                        }
                     }
 
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1568,10 +1646,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         }
                         return Some(());
                     }
+
                     if let Some(list_style) = &mut self.in_list_style_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
                             list_style.set_rename(lexer.slice(start, end)?, Range::new(start, end));
+                        }
+                        return Some(());
+                    }
+
+                    if let Some(font_palette) = &mut self.in_font_palette_property {
+                        // Not inside functions or inside palette-mix()
+                        if self.balanced.is_empty()
+                            || matches!(self.balanced.last(), Some(last) if matches!(last.kind, BalancedItemKind::PaletteMix))
+                        {
+                            font_palette
+                                .set_rename(lexer.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
@@ -1593,6 +1683,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
                     if ident == "list-style" || ident == "list-style-type" {
                         self.enter_list_style_property();
+                        return Some(());
+                    }
+
+                    if ident == "font-palette" {
+                        self.enter_font_palette_property();
                         return Some(());
                     }
 
@@ -1720,6 +1815,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if self.in_list_style_property.is_some() {
                         self.handle_local_counter_style_dependency(lexer)?;
                         self.exit_list_style_property();
+                    }
+                    if self.in_font_palette_property.is_some() {
+                        self.handle_local_font_palette_dependency(lexer)?;
+                        self.exit_font_palette_property();
                     }
                 }
             }

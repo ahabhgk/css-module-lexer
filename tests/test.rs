@@ -187,6 +187,36 @@ fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, n
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
 }
 
+fn assert_local_font_palette_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFontPaletteDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
+fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFontPalette {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
 fn assert_composes_dependency(
     _input: &str,
     dependency: &Dependency,
@@ -868,6 +898,26 @@ fn css_modules_counter_style() {
     assert!(warnings.is_empty());
     assert_local_counter_style_decl_dependency(input, &dependencies[0], "circles");
     assert_local_counter_style_dependency(input, &dependencies[1], "circles");
+}
+
+#[test]
+fn css_modules_font_palette() {
+    let input = indoc! {r#"
+        @font-palette-values --Cooler {
+            font-family: Bixa;
+            base-palette: 1;
+            override-colors: 1 #7EB7E4;
+        }
+        .foo {
+            font-palette: --Cooler;
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    assert!(warnings.is_empty());
+    assert_local_font_palette_decl_dependency(input, &dependencies[0], "Cooler");
+    assert_local_ident_dependency(input, &dependencies[1], ".foo", false);
+    assert_local_font_palette_dependency(input, &dependencies[2], "Cooler");
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]
