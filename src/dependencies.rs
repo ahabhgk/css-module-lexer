@@ -1252,6 +1252,46 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         lexer.consume();
         let mut end;
+        lexer.consume_white_space_and_comments()?;
+        let maybe_global_start = lexer.cur_pos()?;
+        if matches!(
+            lexer.slice(maybe_global_start, maybe_global_start + 7),
+            Some("global(")
+        ) {
+            for _ in 0..7 {
+                lexer.consume();
+            }
+            let name_start = lexer.cur_pos()?;
+            if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
+                self.handle_warning.handle_warning(Warning::Unexpected {
+                    message: "Expected ident during parsing of 'composes'",
+                    range: Range::new(name_start, lexer.peek2_pos()?),
+                });
+                return Some(());
+            }
+            lexer.consume_ident_sequence()?;
+            end = lexer.cur_pos()?;
+            self.handle_dependency
+                .handle_dependency(Dependency::Composes {
+                    names: lexer.slice(name_start, end)?,
+                    from: Some("global"),
+                });
+            self.eat(
+                lexer,
+                &[C_RIGHT_PARENTHESIS],
+                "Expected ')' during parsing of 'composes'",
+            );
+            if lexer.cur()? == C_SEMICOLON {
+                lexer.consume();
+                end = lexer.cur_pos()?;
+            }
+            self.handle_dependency
+                .handle_dependency(Dependency::Replace {
+                    content: "",
+                    range: Range::new(start, end),
+                });
+            return Some(());
+        }
         let mut has_from = false;
         loop {
             lexer.consume_white_space_and_comments()?;
@@ -1743,7 +1783,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         return Some(());
                     }
 
-                    if ident.eq_ignore_ascii_case("composes") {
+                    if ident.eq_ignore_ascii_case("composes")
+                        || ident.eq_ignore_ascii_case("compose-with")
+                    {
                         return self.lex_composes(lexer, start, end);
                     }
                 }

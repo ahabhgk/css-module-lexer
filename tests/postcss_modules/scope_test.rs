@@ -57,11 +57,15 @@ impl Scope {
                     rename_local(&mut result, &mut exports, name, index, range.start);
                     index = range.end;
                 }
-                Dependency::Composes { names, .. } => {
+                Dependency::Composes { names, from } => {
                     let names: Vec<_> = names.split_whitespace().collect();
                     let local_class = last_local_class.unwrap();
                     for name in names {
-                        let new_name = generate_local_name(name);
+                        let new_name = if matches!(from, Some("global")) {
+                            name.to_string()
+                        } else {
+                            generate_local_name(name)
+                        };
                         exports.get_mut(local_class).unwrap().push(new_name);
                     }
                 }
@@ -233,32 +237,35 @@ fn at_rule_scope() {
     );
 }
 
-// #[test]
-// fn composes_only_allowed() {
-//     test(
-//         indoc! {r#"
-//             :local(.class) {
-//                 composes: global(a);
-//                 compose-with: global(b);
-//                 a-composes: global(c);
-//                 composes-b: global(d);
-//                 a-composes-b: global(e);
-//                 a-compose-with-b: global(b);
-//             }
-//         "#},
-//         indoc! {r#"
-//             ._input__class {
-//                 a-composes: global(c);
-//                 composes-b: global(d);
-//                 a-composes-b: global(e);
-//                 a-compose-with-b: global(b);
-//             }
-//             :export {
-//                 class: _input__class a b;
-//             }
-//         "#},
-//     );
-// }
+#[test]
+fn composes_only_allowed() {
+    test(
+        indoc! {r#"
+            :local(.class) {
+                composes: global(a);
+                compose-with: global(b);
+                a-composes: global(c);
+                composes-b: global(d);
+                a-composes-b: global(e);
+                a-compose-with-b: global(b);
+            }
+        "#},
+        indoc! {r#"
+            ._input__class {
+                
+                
+                a-composes: global(c);
+                composes-b: global(d);
+                a-composes-b: global(e);
+                a-compose-with-b: global(b);
+            }
+
+            :export {
+                class: _input__class a b;
+            }
+        "#},
+    );
+}
 
 #[test]
 fn css_nesting() {
