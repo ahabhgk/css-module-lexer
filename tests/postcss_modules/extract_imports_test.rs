@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
@@ -13,7 +15,72 @@ use linked_hash_map::LinkedHashMap;
 #[derive(Debug, Default, Clone, Hash, PartialEq, Eq)]
 pub struct ExtractImports;
 
+enum StateMarker {
+    Permanent,
+    Temporary,
+}
+
 impl ExtractImports {
+    fn add_import_to_graph<'import>(
+        import: &'import str,
+        rule_index: u32,
+        graph: &mut LinkedHashMap<&'import str, Vec<&'import str>>,
+        visited: &mut HashSet<String>,
+        siblings: &mut HashMap<u32, Vec<&'import str>>,
+    ) {
+        let visited_id = format!("{rule_index}_{import}");
+        if visited.contains(&visited_id) {
+            return;
+        }
+        let children = graph.entry(import).or_default();
+        if let Some(siblings) = siblings.get(&rule_index) {
+            children.extend(siblings);
+        }
+        visited.insert(visited_id);
+        siblings.entry(rule_index).or_default().push(import);
+    }
+
+    fn walk_graph<'import>(
+        import: &'import str,
+        graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
+        state: &mut HashMap<&'import str, StateMarker>,
+        result: &mut Vec<&'import str>,
+        warnings: &mut Vec<Warning<'import>>,
+    ) {
+        if let Some(marker) = state.get(import) {
+            match marker {
+                StateMarker::Permanent => {
+                    return;
+                }
+                StateMarker::Temporary => {
+                    warnings.push(Warning::Unexpected {
+                        range: Range::new(0, 0),
+                        message: "Failed to resolve order of composed modules",
+                    });
+                    return;
+                }
+            }
+        }
+        state.insert(import, StateMarker::Temporary);
+        for child in &graph[import] {
+            Self::walk_graph(child, graph, state, result, warnings);
+        }
+        state.insert(import, StateMarker::Permanent);
+        result.push(import);
+    }
+
+    fn topological_sort<'import>(
+        graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
+        warnings: &mut Vec<Warning<'import>>,
+    ) -> Vec<&'import str> {
+        let mut result = Vec::new();
+        let mut state = HashMap::new();
+        for import in graph.keys() {
+            Self::walk_graph(import, graph, &mut state, &mut result, warnings);
+        }
+        result
+    }
+
     pub fn transform<'s>(&self, input: &'s str) -> (String, Vec<Warning<'s>>) {
         let mut imported = String::new();
         let mut result = String::new();
@@ -22,10 +89,16 @@ impl ExtractImports {
         let mut lexer = Lexer::new(input);
         let mut composes_contents = Vec::new();
         let mut postfix = 0;
-        let mut imported_values: LinkedHashMap<&str, LinkedHashMap<&str, Cow<str>>> =
-            LinkedHashMap::new();
+        let mut imports: LinkedHashMap<&str, LinkedHashMap<&str, Cow<str>>> = LinkedHashMap::new();
+        let mut rule_index = 0;
+        let mut graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::new();
+        let mut visited = HashSet::new();
+        let mut siblings = HashMap::new();
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
+                Dependency::LocalIdent { .. } => {
+                    rule_index += 1;
+                }
                 Dependency::Composes { names, from } => {
                     let names: Vec<_> = names.split_whitespace().collect();
                     let mut composes_content = String::new();
@@ -42,7 +115,14 @@ impl ExtractImports {
                             }
                         } else {
                             let path = from.trim_matches(|c| c == '\'' || c == '"');
-                            let values = imported_values.entry(path).or_default();
+                            Self::add_import_to_graph(
+                                path,
+                                rule_index,
+                                &mut graph,
+                                &mut visited,
+                                &mut siblings,
+                            );
+                            let values = imports.entry(path).or_default();
                             for i in 0..names.len() {
                                 let name = names[i];
                                 if let Some(value) = values.get(name) {
@@ -96,10 +176,17 @@ impl ExtractImports {
                 }
                 Dependency::ICSSImportFrom { path } => {
                     let path = path.trim_matches(|c| c == '\'' || c == '"');
-                    imported_values.insert(path, LinkedHashMap::new());
+                    imports.insert(path, LinkedHashMap::new());
+                    Self::add_import_to_graph(
+                        path,
+                        rule_index,
+                        &mut graph,
+                        &mut visited,
+                        &mut siblings,
+                    );
                 }
                 Dependency::ICSSImportValue { prop, value } => {
-                    let (_, values) = imported_values.iter_mut().last().unwrap();
+                    let (_, values) = imports.iter_mut().last().unwrap();
                     values.insert(value, prop.into());
                 }
                 _ => {}
@@ -112,9 +199,11 @@ impl ExtractImports {
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
         }
-        for (path, values) in imported_values {
+        let order = Self::topological_sort(&graph, &mut warnings);
+        for import in order {
+            let values = &imports[import];
             imported += ":import(\"";
-            imported += path;
+            imported += import;
             imported += "\") {\n";
             for (value, prop) in values {
                 imported += "    ";
@@ -125,7 +214,7 @@ impl ExtractImports {
             }
             imported += "}\n";
         }
-        (imported + &result, warnings)
+        (imported + result.trim_start(), warnings)
     }
 }
 
@@ -159,7 +248,6 @@ fn existing_import() {
                 something: else;
                 i__imported_importName_0: importName;
             }
-
             :local(.exportName) {
                 composes: i__imported_importName_0;
             }
@@ -538,163 +626,156 @@ fn nesting() {
     );
 }
 
-// #[test]
-// fn resolve_composes_order() {
-//     test(
-//         indoc! {r#"
-//             .a {
-//                 composes: c from "./c.css";
-//                 color: #bebebe;
-//             }
+#[test]
+fn resolve_composes_order() {
+    test(
+        indoc! {r#"
+            .a {
+                composes: c from "./c.css";
+                color: #bebebe;
+            }
 
-//             .b {
-//                 /* `b` should be after `c` */
-//                 composes: b from "./b.css";
-//                 composes: c from "./c.css";
-//                 color: #aaa;
-//             }
-//         "#},
-//         indoc! {r#"
-//             :import("./b.css") {
-//                 i__imported_b_1: b;
-//             }
-//             :import("./c.css") {
-//                 i__imported_c_0: c;
-//             }
-//             .a {
-//                 composes: i__imported_c_0;
-//                 color: #bebebe;
-//             }
+            .b {
+                /* `b` should be after `c` */
+                composes: b from "./b.css";
+                composes: c from "./c.css";
+                color: #aaa;
+            }
+        "#},
+        indoc! {r#"
+            :import("./b.css") {
+                i__imported_b_1: b;
+            }
+            :import("./c.css") {
+                i__imported_c_0: c;
+            }
+            .a {
+                composes: i__imported_c_0;
+                color: #bebebe;
+            }
 
-//             .b {
-//                 /* `b` should be after `c` */
-//                 composes: i__imported_b_1;
-//                 composes: i__imported_c_0;
-//                 color: #aaa;
-//             }
-//         "#},
-//     );
-// }
+            .b {
+                /* `b` should be after `c` */
+                composes: i__imported_b_1;
+                composes: i__imported_c_0;
+                color: #aaa;
+            }
+        "#},
+    );
+}
 
-// #[test]
-// fn resolve_duplicates() {
-//     test(
-//         indoc! {r#"
-//             :import("./cc.css") {
-//                 smthing: somevalue;
-//             }
+#[test]
+fn resolve_duplicates() {
+    test(
+        indoc! {r#"
+            :import("./cc.css") {
+                smthing: somevalue;
+            }
 
-//             .a {
-//                 composes: a from './aa.css';
-//                 composes: b from './bb.css';
-//                 composes: c from './cc.css';
-//                 composes: a from './aa.css';
-//                 composes: c from './cc.css';
-//             }
-//         "#},
-//         indoc! {r#"
-//             :import("./aa.css") {
-//                 i__imported_a_0: a;
-//             }
-//             :import("./bb.css") {
-//                 i__imported_b_1: b;
-//             }
-//             :import("./cc.css") {
-//                 smthing: somevalue;
-//                 i__imported_c_2: c;
-//             }
+            .a {
+                composes: a from './aa.css';
+                composes: b from './bb.css';
+                composes: c from './cc.css';
+                composes: a from './aa.css';
+                composes: c from './cc.css';
+            }
+        "#},
+        indoc! {r#"
+            :import("./aa.css") {
+                i__imported_a_0: a;
+            }
+            :import("./bb.css") {
+                i__imported_b_1: b;
+            }
+            :import("./cc.css") {
+                smthing: somevalue;
+                i__imported_c_2: c;
+            }
+            .a {
+                composes: i__imported_a_0;
+                composes: i__imported_b_1;
+                composes: i__imported_c_2;
+                composes: i__imported_a_0;
+                composes: i__imported_c_2;
+            }
+        "#},
+    );
+}
 
-//             .a {
-//                 composes: i__imported_a_0;
-//                 composes: i__imported_b_1;
-//                 composes: i__imported_c_2;
-//                 composes: i__imported_a_0;
-//                 composes: i__imported_c_2;
-//             }
-//         "#},
-//     );
-// }
+#[test]
+fn resolve_imports_order() {
+    test(
+        indoc! {r#"
+            :import("custom-path.css") {
+                /* empty to check the order */
+            }
 
-// #[test]
-// fn resolve_imports_order() {
-//     test(
-//         indoc! {r#"
-//             :import("custom-path.css") {
-//                 /* empty to check the order */
-//             }
+            :import("./bb.css") {
+                somevalue: localvalue;
+            }
 
-//             :import("./bb.css") {
-//                 somevalue: localvalue;
-//             }
+            .a {
+                composes: aa from './aa.css';
+            }
 
-//             .a {
-//                 composes: aa from './aa.css';
-//             }
+            .b {
+                composes: bb from './bb.css';
+                composes: bb from './aa.css';
+            }
 
-//             .b {
-//                 composes: bb from './bb.css';
-//                 composes: bb from './aa.css';
-//             }
+            .c {
+                composes: cc from './cc.css';
+                composes: cc from './aa.css';
+            }
 
-//             .c {
-//                 composes: cc from './cc.css';
-//                 composes: cc from './aa.css';
-//             }
+            .d {
+                composes: dd from './cc.css';
+                composes: dd from './bb.css';
+                composes: dd from './dd.css';
+            }
+        "#},
+        indoc! {r#"
+            :import("custom-path.css") {
+            }
+            :import("./cc.css") {
+                i__imported_cc_3: cc;
+                i__imported_dd_5: dd;
+            }
+            :import("./bb.css") {
+                somevalue: localvalue;
+                i__imported_bb_1: bb;
+                i__imported_dd_6: dd;
+            }
+            :import("./aa.css") {
+                i__imported_aa_0: aa;
+                i__imported_bb_2: bb;
+                i__imported_cc_4: cc;
+            }
+            :import("./dd.css") {
+                i__imported_dd_7: dd;
+            }
+            .a {
+                composes: i__imported_aa_0;
+            }
 
-//             .d {
-//                 composes: dd from './cc.css';
-//                 composes: dd from './bb.css';
-//                 composes: dd from './dd.css';
-//             }
-//         "#},
-//         indoc! {r#"
-//             :import("custom-path.css") {
-//                 /* empty to check the order */
-//             }
+            .b {
+                composes: i__imported_bb_1;
+                composes: i__imported_bb_2;
+            }
 
-//             :import("./cc.css") {
-//                 i__imported_cc_3: cc;
-//                 i__imported_dd_5: dd;
-//             }
+            .c {
+                composes: i__imported_cc_3;
+                composes: i__imported_cc_4;
+            }
 
-//             :import("./bb.css") {
-//                 somevalue: localvalue;
-//                 i__imported_bb_1: bb;
-//                 i__imported_dd_6: dd;
-//             }
-
-//             :import("./aa.css") {
-//                 i__imported_aa_0: aa;
-//                 i__imported_bb_2: bb;
-//                 i__imported_cc_4: cc;
-//             }
-
-//             :import("./dd.css") {
-//                 i__imported_dd_7: dd;
-//             }
-
-//             .a {
-//                 composes: i__imported_aa_0;
-//             }
-
-//             .b {
-//                 composes: i__imported_bb_1;
-//                 composes: i__imported_bb_2;
-//             }
-
-//             .c {
-//                 composes: i__imported_cc_3;
-//                 composes: i__imported_cc_4;
-//             }
-
-//             .d {
-//                 composes: i__imported_dd_5;
-//                 composes: i__imported_dd_6;
-//                 composes: i__imported_dd_7;
-//             }
-//         "#},
-//     );
-// }
+            .d {
+                composes: i__imported_dd_5;
+                composes: i__imported_dd_6;
+                composes: i__imported_dd_7;
+            }
+        "#},
+    );
+}
 
 #[test]
 fn valid_characters() {
