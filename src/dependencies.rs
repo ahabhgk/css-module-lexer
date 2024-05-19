@@ -589,7 +589,12 @@ pub enum Dependency<'s> {
         content: &'s str,
         range: Range,
     },
-    LocalIdent {
+    LocalClass {
+        name: &'s str,
+        range: Range,
+        explicit: bool,
+    },
+    LocalId {
         name: &'s str,
         range: Range,
         explicit: bool,
@@ -1823,7 +1828,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         }
         if mode_data.is_current_local_mode() {
             self.handle_dependency
-                .handle_dependency(Dependency::LocalIdent {
+                .handle_dependency(Dependency::LocalClass {
                     name,
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
@@ -1855,7 +1860,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         }
         if mode_data.is_current_local_mode() {
             self.handle_dependency
-                .handle_dependency(Dependency::LocalIdent {
+                .handle_dependency(Dependency::LocalId {
                     name,
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),

@@ -3,7 +3,6 @@ use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::ModeData;
-use css_module_lexer::Pos;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use indoc::indoc;
@@ -25,36 +24,29 @@ impl Scope {
         let mut exports = LinkedHashMap::new();
         // This is not correct, only for passing tests
         let mut last_local_class = None;
-        let rename_local = |result: &mut String,
-                            exports: &mut LinkedHashMap<String, Vec<String>>,
-                            name: &str,
-                            start: Pos,
-                            end: Pos| {
-            *result += Lexer::slice_range(input, &Range::new(start, end)).unwrap();
-            let is_class = name.starts_with('.');
-            let is_id = name.starts_with('#');
-            let name = if is_class || is_id { &name[1..] } else { name };
-            if is_class {
-                *result += ".";
-            } else if is_id {
-                *result += "#";
-            }
-            let new_name = generate_local_name(name);
-            *result += &new_name;
-            exports.insert(name.to_string(), vec![new_name]);
-        };
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
-                Dependency::LocalIdent { name, range, .. } => {
-                    if let Some(name) = name.strip_prefix('.') {
-                        last_local_class = Some(name);
-                    }
-                    rename_local(&mut result, &mut exports, name, index, range.start);
+                Dependency::LocalClass { name, range, .. } => {
+                    let name = &name[1..];
+                    last_local_class = Some(name);
+                    result += ".";
+                    let new_name = generate_local_name(name);
+                    result += &new_name;
+                    exports.insert(name.to_string(), vec![new_name]);
+                    index = range.end;
+                }
+                Dependency::LocalId { name, range, .. } => {
+                    result += "#";
+                    let new_name = generate_local_name(name);
+                    result += &new_name;
+                    exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range }
                 | Dependency::LocalKeyframesDecl { name, range } => {
-                    rename_local(&mut result, &mut exports, name, index, range.start);
+                    let new_name = generate_local_name(name);
+                    result += &new_name;
+                    exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
                 Dependency::Composes { names, from } => {

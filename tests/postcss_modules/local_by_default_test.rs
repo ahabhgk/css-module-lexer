@@ -30,16 +30,18 @@ impl LocalByDefault {
         };
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
-                Dependency::LocalIdent {
+                Dependency::LocalClass {
+                    name,
+                    range,
+                    explicit,
+                }
+                | Dependency::LocalId {
                     name,
                     range,
                     explicit,
                 } => {
-                    if name.starts_with('.') || name.starts_with('#') {
-                        let name = &name[1..];
-                        if !explicit && local_alias.contains(name) {
-                            return;
-                        }
+                    if !explicit && local_alias.contains(&name[1..]) {
+                        return;
                     }
                     add_local(&mut result, name, index, range.start);
                     index = range.end;

@@ -96,7 +96,7 @@ impl ExtractImports {
         let mut siblings = HashMap::new();
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
-                Dependency::LocalIdent { .. } => {
+                Dependency::LocalClass { .. } | Dependency::LocalId { .. } => {
                     rule_index += 1;
                 }
                 Dependency::Composes { names, from } => {
