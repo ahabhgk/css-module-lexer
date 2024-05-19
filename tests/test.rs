@@ -21,7 +21,8 @@ fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
         | Warning::InconsistentModeResult { range }
         | Warning::ExpectedNotInside { range, .. }
         | Warning::MissingWhitespace { range, .. }
-        | Warning::NotPure { range, .. } => {
+        | Warning::NotPure { range, .. }
+        | Warning::UnexpectedComposition { range, .. } => {
             assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
         }
     };
@@ -1099,6 +1100,7 @@ fn css_modules_composes_1() {
         }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    dbg!(&warnings);
     assert!(warnings.is_empty());
     assert_local_ident_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(
@@ -1225,6 +1227,32 @@ fn css_modules_composes_5() {
         r#"composes: foo bar, baz, importName importName2 from "path/library.css""#,
     );
     assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
+fn css_modules_composes_6() {
+    let input = indoc! {r#"
+        .a, .b, .c {
+            composes: foo
+        }
+        a, .b, .c {
+            composes: foo
+        }
+    "#};
+    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    // .a, .b, .c
+    assert_local_ident_dependency(input, &dependencies[0], ".a", false);
+    assert_local_ident_dependency(input, &dependencies[1], ".b", false);
+    assert_local_ident_dependency(input, &dependencies[2], ".c", false);
+    assert_composes_dependency(input, &dependencies[3], "foo", None);
+    assert_replace_dependency(input, &dependencies[4], "", "composes: foo");
+    // a, .b, .c
+    assert_warning(input, &warnings[0], "composes");
+    assert_local_ident_dependency(input, &dependencies[5], ".b", false);
+    assert_local_ident_dependency(input, &dependencies[6], ".c", false);
+    assert_composes_dependency(input, &dependencies[7], "foo", None);
+    assert_replace_dependency(input, &dependencies[8], "", "composes: foo");
+    assert_eq!(dependencies.len(), 9);
 }
 
 #[test]

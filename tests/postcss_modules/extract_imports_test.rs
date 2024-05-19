@@ -20,67 +20,67 @@ enum StateMarker {
     Temporary,
 }
 
-impl ExtractImports {
-    fn add_import_to_graph<'import>(
-        import: &'import str,
-        rule_index: u32,
-        graph: &mut LinkedHashMap<&'import str, Vec<&'import str>>,
-        visited: &mut HashSet<String>,
-        siblings: &mut HashMap<u32, Vec<&'import str>>,
-    ) {
-        let visited_id = format!("{rule_index}_{import}");
-        if visited.contains(&visited_id) {
-            return;
-        }
-        let children = graph.entry(import).or_default();
-        if let Some(siblings) = siblings.get(&rule_index) {
-            children.extend(siblings);
-        }
-        visited.insert(visited_id);
-        siblings.entry(rule_index).or_default().push(import);
+fn add_import_to_graph<'import>(
+    import: &'import str,
+    rule_index: u32,
+    graph: &mut LinkedHashMap<&'import str, Vec<&'import str>>,
+    visited: &mut HashSet<String>,
+    siblings: &mut HashMap<u32, Vec<&'import str>>,
+) {
+    let visited_id = format!("{rule_index}_{import}");
+    if visited.contains(&visited_id) {
+        return;
     }
+    let children = graph.entry(import).or_default();
+    if let Some(siblings) = siblings.get(&rule_index) {
+        children.extend(siblings);
+    }
+    visited.insert(visited_id);
+    siblings.entry(rule_index).or_default().push(import);
+}
 
-    fn walk_graph<'import>(
-        import: &'import str,
-        graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
-        state: &mut HashMap<&'import str, StateMarker>,
-        result: &mut Vec<&'import str>,
-        warnings: &mut Vec<Warning<'import>>,
-    ) {
-        if let Some(marker) = state.get(import) {
-            match marker {
-                StateMarker::Permanent => {
-                    return;
-                }
-                StateMarker::Temporary => {
-                    warnings.push(Warning::Unexpected {
-                        range: Range::new(0, 0),
-                        message: "Failed to resolve order of composed modules",
-                    });
-                    return;
-                }
+fn walk_graph<'import>(
+    import: &'import str,
+    graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
+    state: &mut HashMap<&'import str, StateMarker>,
+    result: &mut Vec<&'import str>,
+    warnings: &mut Vec<Warning<'import>>,
+) {
+    if let Some(marker) = state.get(import) {
+        match marker {
+            StateMarker::Permanent => {
+                return;
+            }
+            StateMarker::Temporary => {
+                warnings.push(Warning::Unexpected {
+                    range: Range::new(0, 0),
+                    message: "Failed to resolve order of composed modules",
+                });
+                return;
             }
         }
-        state.insert(import, StateMarker::Temporary);
-        for child in &graph[import] {
-            Self::walk_graph(child, graph, state, result, warnings);
-        }
-        state.insert(import, StateMarker::Permanent);
-        result.push(import);
     }
-
-    fn topological_sort<'import>(
-        graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
-        warnings: &mut Vec<Warning<'import>>,
-    ) -> Vec<&'import str> {
-        let mut result = Vec::new();
-        let mut state = HashMap::new();
-        for import in graph.keys() {
-            Self::walk_graph(import, graph, &mut state, &mut result, warnings);
-        }
-        result
+    state.insert(import, StateMarker::Temporary);
+    for child in &graph[import] {
+        walk_graph(child, graph, state, result, warnings);
     }
+    state.insert(import, StateMarker::Permanent);
+    result.push(import);
+}
 
+fn topological_sort<'import>(
+    graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
+    warnings: &mut Vec<Warning<'import>>,
+) -> Vec<&'import str> {
+    let mut result = Vec::new();
+    let mut state = HashMap::new();
+    for import in graph.keys() {
+        walk_graph(import, graph, &mut state, &mut result, warnings);
+    }
+    result
+}
+
+impl ExtractImports {
     pub fn transform<'s>(&self, input: &'s str) -> (String, Vec<Warning<'s>>) {
         let mut imported = String::new();
         let mut result = String::new();
@@ -115,7 +115,7 @@ impl ExtractImports {
                             }
                         } else {
                             let path = from.trim_matches(|c| c == '\'' || c == '"');
-                            Self::add_import_to_graph(
+                            add_import_to_graph(
                                 path,
                                 rule_index,
                                 &mut graph,
@@ -177,13 +177,7 @@ impl ExtractImports {
                 Dependency::ICSSImportFrom { path } => {
                     let path = path.trim_matches(|c| c == '\'' || c == '"');
                     imports.insert(path, LinkedHashMap::new());
-                    Self::add_import_to_graph(
-                        path,
-                        rule_index,
-                        &mut graph,
-                        &mut visited,
-                        &mut siblings,
-                    );
+                    add_import_to_graph(path, rule_index, &mut graph, &mut visited, &mut siblings);
                 }
                 Dependency::ICSSImportValue { prop, value } => {
                     let (_, values) = imports.iter_mut().last().unwrap();
@@ -199,7 +193,7 @@ impl ExtractImports {
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
         }
-        let order = Self::topological_sort(&graph, &mut warnings);
+        let order = topological_sort(&graph, &mut warnings);
         for import in order {
             let values = &imports[import];
             imported += ":import(\"";
@@ -220,8 +214,18 @@ impl ExtractImports {
 
 fn test(input: &str, expected: &str) {
     let (actual, warnings) = ExtractImports::default().transform(input);
-    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
+    similar_asserts::assert_eq!(expected, actual);
+}
+
+fn test_with_warning(input: &str, expected: &str, warning: &str) {
+    let (actual, warnings) = ExtractImports::default().transform(input);
+    assert!(
+        warnings[0].to_string().contains(warning),
+        "{}",
+        &warnings[0]
+    );
+    similar_asserts::assert_eq!(expected, actual);
 }
 
 #[test]
@@ -585,7 +589,7 @@ fn multiple_composes() {
 
 #[test]
 fn nesting() {
-    test(
+    test_with_warning(
         indoc! {r#"
             :local(.foo) {
                 display: grid;
@@ -623,6 +627,7 @@ fn nesting() {
                 }
             }
         "#},
+        "Composition is not allowed in nested rule",
     );
 }
 
@@ -805,4 +810,78 @@ fn valid_characters() {
             }
         "#},
     );
+}
+
+#[test]
+fn check_import_order() {
+    test_with_warning(
+        indoc! {r#"
+            .aa {
+                composes: b from './b.css';
+                composes: c from './c.css';
+            }
+    
+            .bb {
+                composes: c from './c.css';
+                composes: b from './b.css';
+            }
+        "#},
+        indoc! {r#"
+            :import("./c.css") {
+                i__imported_c_1: c;
+            }
+            :import("./b.css") {
+                i__imported_b_0: b;
+            }
+            .aa {
+                composes: i__imported_b_0;
+                composes: i__imported_c_1;
+            }
+
+            .bb {
+                composes: i__imported_c_1;
+                composes: i__imported_b_0;
+            }
+        "#},
+        "Failed to resolve order of composed modules",
+    );
+}
+
+mod topological_sort {
+    use super::*;
+
+    #[test]
+    fn should_resolve_graphs() {
+        let mut warnings = Vec::new();
+        let graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::from_iter([
+            ("v1", vec!["v2", "v5"]),
+            ("v2", vec![]),
+            ("v3", vec!["v2", "v4", "v5"]),
+            ("v4", vec![]),
+            ("v5", vec![]),
+        ]);
+        let order = topological_sort(&graph, &mut warnings);
+        assert_eq!(order, vec!["v2", "v5", "v1", "v4", "v3"]);
+        assert!(warnings.is_empty());
+        let graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::from_iter([
+            ("v1", vec!["v2", "v5"]),
+            ("v2", vec!["v4"]),
+            ("v3", vec!["v2", "v4", "v5"]),
+            ("v4", vec![]),
+            ("v5", vec![]),
+        ]);
+        let order = topological_sort(&graph, &mut warnings);
+        assert_eq!(order, vec!["v4", "v2", "v5", "v1", "v3"]);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn cycle_in_the_graph() {
+        let mut warnings = Vec::new();
+        let graph: LinkedHashMap<&str, Vec<&str>> =
+            LinkedHashMap::from_iter([("v1", vec!["v3"]), ("v2", vec![]), ("v3", vec!["v1"])]);
+        let order = topological_sort(&graph, &mut warnings);
+        assert_eq!(order, vec!["v3", "v1", "v2"]);
+        assert!(!warnings.is_empty());
+    }
 }

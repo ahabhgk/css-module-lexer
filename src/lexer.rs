@@ -744,7 +744,7 @@ mod tests {
         let mut l = Lexer::new(input);
         l.lex(&mut s);
         assert!(l.cur().is_none());
-        assert_eq!(s.snapshot(), snapshot);
+        similar_asserts::assert_eq!(s.snapshot(), snapshot);
     }
 
     #[test]
@@ -929,6 +929,30 @@ mod tests {
                 ident: b
                 url: #\
                 hash
+                right_curly: }
+            "#},
+        );
+    }
+
+    #[test]
+    fn parse_pseudo_elements() {
+        assert_lexer_snapshot(
+            indoc! {r#"
+                a::after {
+                    content: ' (' attr(href) ')';
+                }
+            "#},
+            indoc! {r#"
+                ident: a
+                pseudo_class: :after
+                left_curly: {
+                ident: content
+                string: ' ('
+                function: attr(
+                ident: href
+                right_parenthesis: )
+                string: ')'
+                semicolon: ;
                 right_curly: }
             "#},
         );

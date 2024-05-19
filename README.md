@@ -14,7 +14,7 @@ Lexes CSS modules returning their dependencies metadata.
 - [x] iCSS
   - [x] :import
   - [x] :export
-- [ ] CSS Modules
+- [x] CSS Modules
   - [x] :local, :local(), :global, :global()
   - [x] local scope by default
   - [x] composes

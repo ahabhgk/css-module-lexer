@@ -35,7 +35,8 @@ impl LocalByDefault {
                     range,
                     explicit,
                 } => {
-                    if let Some(name) = name.strip_prefix('.') {
+                    if name.starts_with('.') || name.starts_with('#') {
+                        let name = &name[1..];
                         if !explicit && local_alias.contains(name) {
                             return;
                         }
@@ -82,34 +83,34 @@ impl LocalByDefault {
 
 fn test(input: &str, expected: &str) {
     let (actual, warnings) = LocalByDefault::default().transform(input);
-    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
+    similar_asserts::assert_eq!(expected, actual);
 }
 
 fn test_with_options(input: &str, expected: &str, options: LocalByDefault) {
     let (actual, warnings) = options.transform(input);
-    similar_asserts::assert_eq!(expected, actual);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
+    similar_asserts::assert_eq!(expected, actual);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
     let (actual, warnings) = LocalByDefault::default().transform(input);
-    similar_asserts::assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",
         &warnings[0]
     );
+    similar_asserts::assert_eq!(expected, actual);
 }
 
 fn test_with_options_warning(input: &str, expected: &str, options: LocalByDefault, warning: &str) {
     let (actual, warnings) = options.transform(input);
-    similar_asserts::assert_eq!(expected, actual);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",
         &warnings[0]
     );
+    similar_asserts::assert_eq!(expected, actual);
 }
 
 #[test]
