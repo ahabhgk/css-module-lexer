@@ -70,7 +70,12 @@ impl Scope {
                         } else {
                             generate_local_name(name)
                         };
-                        exports.get_mut(last_local).unwrap().push(new_name);
+                        if let Some(existing) = exports.get(name) {
+                            let existing = existing.clone();
+                            exports.get_mut(last_local).unwrap().extend(existing);
+                        } else {
+                            exports.get_mut(last_local).unwrap().push(new_name);
+                        }
                     }
                 }
                 Dependency::Replace { content, range } => {
@@ -717,7 +722,7 @@ fn error_multiple_nested_media() {
 
 #[test]
 fn error_not_allowed_in_local() {
-    // TODO: should warning for :local(body)
+    // TODO: validate selector, should warning for :local(body)
     test(
         indoc! {r#"
             :local(body) {
@@ -734,7 +739,7 @@ fn error_not_allowed_in_local() {
 
 #[test]
 fn error_when_attribute_is_href() {
-    // TODO: should warning for :local(.exportName1[href^="https"])
+    // TODO: validate selector, should warning for :local(.exportName1[href^="https"])
     test(
         indoc! {r#"
             :local(.exportName1[href^="https"]) {
@@ -755,7 +760,7 @@ fn error_when_attribute_is_href() {
 
 #[test]
 fn error_when_attribute_is_target() {
-    // TODO: should warning for :local(.exportName1[target="_blank"])
+    // TODO: validate selector, should warning for :local(.exportName1[target="_blank"])
     test(
         indoc! {r#"
             :local(.exportName1[target="_blank"]) {
@@ -776,7 +781,7 @@ fn error_when_attribute_is_target() {
 
 #[test]
 fn error_when_attribute_is_title() {
-    // TODO: should warning for :local(.exportName1[title="flower"])
+    // TODO: validate selector, should warning for :local(.exportName1[title="flower"])
     test(
         indoc! {r#"
             :local(.exportName1[title="flower"]) {
@@ -797,7 +802,7 @@ fn error_when_attribute_is_title() {
 
 #[test]
 fn error_when_attribute_is_type() {
-    // TODO: should warning for :local(.exportName1[type="text"])
+    // TODO: validate selector, should warning for :local(.exportName1[type="text"])
     test(
         indoc! {r#"
             :local(.exportName1[type="text"]) {
@@ -1392,7 +1397,7 @@ fn export_with_composes() {
 
 #[test]
 fn export_with_composes_imported_class() {
-    // TODO: should be `exportName: _lib_extender__exportName imported_otherClass;`
+    // TODO: replace import value, should be `exportName: _lib_extender__exportName imported_otherClass;`
     test(
         indoc! {r#"
             :import("./file.css") {
@@ -1442,15 +1447,207 @@ fn export_with_global_composes() {
 }
 
 #[test]
-fn t() {
+fn export_with_multiple_composes() {
+    test(
+        indoc! {r#"
+            :local(.otherClass) { background: red; }
+            :local(.andAgain) { font-size: 2em; }
+            :local(.aThirdClass) { color: red; }
+            :local(.exportName) { compose-with: otherClass andAgain; compose-with: aThirdClass; color: green; }
+        "#},
+        indoc! {r#"
+            ._input__otherClass { background: red; }
+            ._input__andAgain { font-size: 2em; }
+            ._input__aThirdClass { color: red; }
+            ._input__exportName {   color: green; }
+
+            :export {
+                otherClass: _input__otherClass;
+                andAgain: _input__andAgain;
+                aThirdClass: _input__aThirdClass;
+                exportName: _input__exportName _input__otherClass _input__andAgain _input__aThirdClass;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn export_with_transitive_composes() {
+    test(
+        indoc! {r#"
+            :local(.aThirdClass) {
+                font-size: 2em;
+            }
+            :local(.otherClass) {
+                composes: aThirdClass;
+                background: red;
+            }
+            :local(.exportName) {
+                composes: otherClass;
+                color: green;
+            }
+        "#},
+        indoc! {r#"
+            ._input__aThirdClass {
+                font-size: 2em;
+            }
+            ._input__otherClass {
+                
+                background: red;
+            }
+            ._input__exportName {
+                
+                color: green;
+            }
+
+            :export {
+                aThirdClass: _input__aThirdClass;
+                otherClass: _input__otherClass _input__aThirdClass;
+                exportName: _input__exportName _input__otherClass _input__aThirdClass;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn ignore_custom_property_set() {
+    test(
+        indoc! {r#"
+            :root {
+                --title-align: center;
+                --sr-only: {
+                    position: absolute;
+                }
+            }
+        "#},
+        indoc! {r#"
+            :root {
+                --title-align: center;
+                --sr-only: {
+                    position: absolute;
+                }
+            }
+        "#},
+    );
+}
+
+#[test]
+fn multiple_composes() {
+    // TODO: replace import value
+    test(
+        indoc! {r#"
+            :import("path") {
+                i__i_a_0: a;
+                i__i_b_0: b;
+                i__i_c_0: c;
+                i__i_d_0: d;
+            }
+            :local(.class) {
+                composes: i__i_a_0 i__i_b_0, i__i_c_0, global(d) global(e), global(f), i__i_d_0;
+                color: red;
+            }
+        "#},
+        indoc! {r#"
+            :import("path") {
+                i__i_a_0: a;
+                i__i_b_0: b;
+                i__i_c_0: c;
+                i__i_d_0: d;
+            }
+            ._input__class {
+                
+                color: red;
+            }
+
+            :export {
+                class: _input__class _input__i__i_a_0 _input__i__i_b_0 _input__i__i_c_0 d e f _input__i__i_d_0;
+            }
+        "#},
+    );
+}
+
+#[test]
+fn nested_rule() {
+    test(
+        indoc! {r#"
+            :root {
+                --test: {
+                    --test: foo;
+                    --bar: 1;
+                }
+            }
+        "#},
+        indoc! {r#"
+            :root {
+                --test: {
+                    --test: foo;
+                    --bar: 1;
+                }
+            }
+        "#},
+    );
+}
+
+#[test]
+fn nothing() {
+    test(
+        indoc! {r#"
+            .exportName {
+                color: green;
+            }
+
+            .exportName:hover {
+                color: red;
+            }
+
+            @media screen {
+                body {
+                    background: red;
+                }
+            }
+        "#},
+        indoc! {r#"
+            .exportName {
+                color: green;
+            }
+
+            .exportName:hover {
+                color: red;
+            }
+
+            @media screen {
+                body {
+                    background: red;
+                }
+            }
+        "#},
+    );
+}
+
+#[test]
+fn options_generate_scoped_name() {
     test(
         indoc! {r#"
             :local(.exportName) {
                 color: green;
             }
+
+            :local(.exportName):hover {
+                color: red;
+            }
         "#},
         indoc! {r#"
-            {}
+            ._input__exportName {
+                color: green;
+            }
+
+            ._input__exportName:hover {
+                color: red;
+            }
+
+            :export {
+                exportName: _input__exportName;
+            }
         "#},
     );
 }
