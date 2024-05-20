@@ -100,7 +100,6 @@ impl ExtractImports {
                     rule_index += 1;
                 }
                 Dependency::Composes { names, from } => {
-                    let names: Vec<_> = names.split_whitespace().collect();
                     let mut composes_content = String::new();
                     if let Some(from) = from {
                         if from == "global" {

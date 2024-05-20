@@ -8,6 +8,7 @@ use css_module_lexer::Lexer;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
 use indoc::indoc;
+use smallvec::SmallVec;
 
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
     match warning {
@@ -245,7 +246,10 @@ fn assert_composes_dependency(
     else {
         return assert!(false);
     };
-    assert_eq!(*actual_names, names);
+    assert_eq!(
+        *actual_names,
+        SmallVec::<[&str; 3]>::from_iter(names.split(' '))
+    );
     assert_eq!(*actual_from, from);
 }
 
@@ -1115,7 +1119,6 @@ fn css_modules_composes_1() {
         }
     "#};
     let (dependencies, warnings) = collect_css_modules_dependencies(input);
-    dbg!(&warnings);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(

@@ -5,7 +5,6 @@ use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::ModeData;
-use css_module_lexer::Pos;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use indoc::indoc;
@@ -22,8 +21,7 @@ impl LocalByDefault {
         let mut index = 0;
         let mut lexer = Lexer::new(input);
         let mut local_alias = HashSet::new();
-        let add_local = |result: &mut String, name: &str, start: Pos, end: Pos| {
-            *result += Lexer::slice_range(input, &Range::new(start, end)).unwrap();
+        let add_local = |result: &mut String, name: &str| {
             *result += ":local(";
             *result += name;
             *result += ")";
@@ -43,18 +41,21 @@ impl LocalByDefault {
                     if !explicit && local_alias.contains(&name[1..]) {
                         return;
                     }
-                    add_local(&mut result, name, index, range.start);
+                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    add_local(&mut result, name);
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range } => {
                     if local_alias.contains(name) {
                         return;
                     }
-                    add_local(&mut result, name, index, range.start);
+                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    add_local(&mut result, name);
                     index = range.end;
                 }
                 Dependency::LocalKeyframesDecl { name, range } => {
-                    add_local(&mut result, name, index, range.start);
+                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    add_local(&mut result, name);
                     index = range.end;
                 }
                 Dependency::Replace { content, range } => {

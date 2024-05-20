@@ -6,16 +6,17 @@ Lexes CSS modules returning their dependencies metadata.
 - Error tolerant: uninterrupted by bad syntax, no errors, only warnings.
 - Syntax rich: supports CSS, iCSS, and CSS Modules.
 
-## Roadmap
+## Dependencies
 
 - [x] CSS:
   - [x] @import
   - [x] url(), image-set()
 - [x] iCSS
-  - [x] :import
+  - [ ] :import
   - [x] :export
 - [x] CSS Modules
   - [x] :local, :local(), :global, :global()
+  - [x] local .class, local #id
   - [x] local scope by default
   - [x] composes
   - [x] nesting
