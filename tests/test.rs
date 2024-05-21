@@ -11,22 +11,10 @@ use indoc::indoc;
 use smallvec::SmallVec;
 
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
-    match warning {
-        Warning::Unexpected { range, .. }
-        | Warning::DuplicateUrl { range, .. }
-        | Warning::NamespaceNotSupportedInBundledCss { range }
-        | Warning::NotPrecededAtImport { range }
-        | Warning::ExpectedUrl { range, .. }
-        | Warning::ExpectedUrlBefore { range, .. }
-        | Warning::ExpectedLayerBefore { range, .. }
-        | Warning::InconsistentModeResult { range }
-        | Warning::ExpectedNotInside { range, .. }
-        | Warning::MissingWhitespace { range, .. }
-        | Warning::NotPure { range, .. }
-        | Warning::UnexpectedComposition { range, .. } => {
-            assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
-        }
-    };
+    assert_eq!(
+        Lexer::slice_range(input, warning.range()).unwrap(),
+        range_content
+    );
 }
 
 fn assert_url_dependency(

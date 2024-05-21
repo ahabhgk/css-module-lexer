@@ -661,59 +661,79 @@ pub enum UrlRangeKind {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum Warning<'s> {
-    Unexpected { range: Range, message: &'s str },
-    DuplicateUrl { range: Range, when: &'s str },
-    NamespaceNotSupportedInBundledCss { range: Range },
-    NotPrecededAtImport { range: Range },
-    ExpectedUrl { range: Range, when: &'s str },
-    ExpectedUrlBefore { range: Range, when: &'s str },
-    ExpectedLayerBefore { range: Range, when: &'s str },
-    InconsistentModeResult { range: Range },
-    ExpectedNotInside { range: Range, pseudo: &'s str },
-    MissingWhitespace { range: Range, surrounding: &'s str },
-    NotPure { range: Range, message: &'s str },
-    UnexpectedComposition { range: Range, message: &'s str },
+pub struct Warning<'s> {
+    range: Range,
+    kind: WarningKind<'s>,
+}
+
+impl<'s> Warning<'s> {
+    pub fn new(range: Range, kind: WarningKind<'s>) -> Self {
+        Self { range, kind }
+    }
+
+    pub fn range(&self) -> &Range {
+        &self.range
+    }
+
+    pub fn kind(&self) -> &WarningKind<'s> {
+        &self.kind
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum WarningKind<'s> {
+    Unexpected { message: &'s str },
+    DuplicateUrl { when: &'s str },
+    NamespaceNotSupportedInBundledCss,
+    NotPrecededAtImport,
+    ExpectedUrl { when: &'s str },
+    ExpectedUrlBefore { when: &'s str },
+    ExpectedLayerBefore { when: &'s str },
+    InconsistentModeResult,
+    ExpectedNotInside { pseudo: &'s str },
+    MissingWhitespace { surrounding: &'s str },
+    NotPure { message: &'s str },
+    UnexpectedComposition { message: &'s str },
 }
 
 impl Display for Warning<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Warning::Unexpected { message, .. } => write!(f, "{message}"),
-            Warning::DuplicateUrl { when, .. } => write!(
+        match self.kind {
+            WarningKind::Unexpected { message, .. } => write!(f, "{message}"),
+            WarningKind::DuplicateUrl { when, .. } => write!(
                 f,
                 "Duplicate of 'url(...)' in '{when}'"
             ),
-            Warning::NamespaceNotSupportedInBundledCss { .. } => write!(
+            WarningKind::NamespaceNotSupportedInBundledCss { .. } => write!(
                 f,
                 "'@namespace' is not supported in bundled CSS"
             ),
-            Warning::NotPrecededAtImport { .. } => {
+            WarningKind::NotPrecededAtImport { .. } => {
                 write!(f, "Any '@import' rules must precede all other rules")
             }
-            Warning::ExpectedUrl { when, .. } => write!(f, "Expected URL in '{when}'"),
-            Warning::ExpectedUrlBefore { when, .. } => write!(
+            WarningKind::ExpectedUrl { when, .. } => write!(f, "Expected URL in '{when}'"),
+            WarningKind::ExpectedUrlBefore { when, .. } => write!(
                 f,
                 "An URL in '{when}' should be before 'layer(...)' or 'supports(...)'"
             ),
-            Warning::ExpectedLayerBefore { when, .. } => write!(
+            WarningKind::ExpectedLayerBefore { when, .. } => write!(
                 f,
                 "The 'layer(...)' in '{when}' should be before 'supports(...)'"
             ),
-            Warning::InconsistentModeResult { .. } => write!(
+            WarningKind::InconsistentModeResult { .. } => write!(
                 f,
                 "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"
             ),
-            Warning::ExpectedNotInside { pseudo, .. } => write!(
+            WarningKind::ExpectedNotInside { pseudo, .. } => write!(
                 f,
                 "A '{pseudo}' is not allowed inside of a ':local()' or ':global()'"
             ),
-            Warning::MissingWhitespace { surrounding, .. } => write!(
+            WarningKind::MissingWhitespace { surrounding, .. } => write!(
                 f,
                 "Missing {surrounding} whitespace"
             ),
-            Warning::NotPure { message, .. } => write!(f, "Pure globals is not allowed in pure mode, {message}"),
-            Warning::UnexpectedComposition {  message, .. } => write!(f, "Composition is {message}"),
+            WarningKind::NotPure { message, .. } => write!(f, "Pure globals is not allowed in pure mode, {message}"),
+            WarningKind::UnexpectedComposition {  message, .. } => write!(f, "Composition is {message}"),
         }
     }
 }
@@ -849,8 +869,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn eat(&mut self, lexer: &mut Lexer<'s>, chars: &[char], message: &'s str) -> Option<bool> {
         if !chars.contains(&lexer.cur()?) {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message,
+            self.handle_warning.handle_warning(Warning {
+                kind: WarningKind::Unexpected { message },
                 range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
             });
             return Some(false);
@@ -994,8 +1014,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_white_space_and_comments()?;
         let start = lexer.cur_pos()?;
         if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected starts with '--' during parsing of 'var()'",
+            self.handle_warning.handle_warning(Warning {
+                kind: WarningKind::Unexpected {
+                    message: "Expected starts with '--' during parsing of 'var()'",
+                },
                 range: Range::new(start, lexer.peek2_pos()?),
             });
             return Some(());
@@ -1019,9 +1041,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
                 lexer.consume_ident_sequence()?;
             } else {
-                self.handle_warning.handle_warning(Warning::Unexpected {
-                    message: "Expected string or ident during parsing of 'composes'",
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(path_start, lexer.peek_pos()?),
+                    kind: WarningKind::Unexpected {
+                        message: "Expected string or ident during parsing of 'composes'",
+                    },
                 });
                 return Some(());
             }
@@ -1104,9 +1128,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             if mode_data.is_pure_mode() && pseudo.eq_ignore_ascii_case(":global(")
                 || pseudo.eq_ignore_ascii_case(":global")
             {
-                self.handle_warning.handle_warning(Warning::NotPure {
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
-                    message: "'@keyframes :global' is not allowed in pure mode",
+                    kind: WarningKind::NotPure {
+                        message: "'@keyframes :global' is not allowed in pure mode",
+                    },
                 });
             }
             is_function =
@@ -1115,9 +1141,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 && !pseudo.eq_ignore_ascii_case(":local")
                 && !pseudo.eq_ignore_ascii_case(":global")
             {
-                self.handle_warning.handle_warning(Warning::Unexpected {
-                    message: "Expected ':local', ':local()', ':global', or ':global()' during parsing of '@keyframes' name",
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
+                    kind: WarningKind::Unexpected {
+                        message: "Expected ':local', ':local()', ':global', or ':global()' during parsing of '@keyframes' name",
+                    }
                 });
                 return Some(());
             }
@@ -1125,9 +1153,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         let start = lexer.cur_pos()?;
         if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected ident during parsing of '@keyframes' name",
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, lexer.peek2_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected ident during parsing of '@keyframes' name",
+                },
             });
             return Some(());
         }
@@ -1144,9 +1174,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_white_space_and_comments()?;
         if is_function {
             if lexer.cur()? != C_RIGHT_PARENTHESIS {
-                self.handle_warning.handle_warning(Warning::Unexpected {
-                    message: "Expected ')' during parsing of '@keyframes :local(' or '@keyframes :global('",
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                    kind: WarningKind::Unexpected {
+                        message: "Expected ')' during parsing of '@keyframes :local(' or '@keyframes :global('",
+                    }
                 });
                 return Some(());
             }
@@ -1161,9 +1193,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             lexer.consume_white_space_and_comments()?;
         }
         if lexer.cur()? != C_LEFT_CURLY {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected '{' during parsing of '@keyframes'",
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected '{' during parsing of '@keyframes'",
+                },
             });
             return Some(());
         }
@@ -1187,9 +1221,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume_white_space_and_comments()?;
         let start = lexer.cur_pos()?;
         if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected ident during parsing of '@counter-style'",
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, lexer.peek2_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected ident during parsing of '@counter-style'",
+                },
             });
             return Some(());
         }
@@ -1202,9 +1238,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             });
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_LEFT_CURLY {
-            self.handle_warning.handle_warning(Warning::Unexpected {
-                message: "Expected '{' during parsing of '@counter-style'",
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected '{' during parsing of '@counter-style'",
+                },
             });
             return Some(());
         }
@@ -1263,9 +1301,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     }
                     let name_start = lexer.cur_pos()?;
                     if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
-                        self.handle_warning.handle_warning(Warning::Unexpected {
-                            message: "Expected ident during parsing of 'composes'",
+                        self.handle_warning.handle_warning(Warning {
                             range: Range::new(name_start, lexer.peek2_pos()?),
+                            kind: WarningKind::Unexpected {
+                                message: "Expected ident during parsing of 'composes'",
+                            },
                         });
                         return Some(());
                     }
@@ -1283,9 +1323,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     );
                 } else {
                     if !start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
-                        self.handle_warning.handle_warning(Warning::Unexpected {
-                            message: "Expected ident during parsing of 'composes'",
+                        self.handle_warning.handle_warning(Warning {
                             range: Range::new(name_start, lexer.peek2_pos()?),
+                            kind: WarningKind::Unexpected {
+                                message: "Expected ident during parsing of 'composes'",
+                            },
                         });
                         return Some(());
                     }
@@ -1326,9 +1368,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
                 lexer.consume_ident_sequence()?;
             } else {
-                self.handle_warning.handle_warning(Warning::Unexpected {
-                    message: "Expected string or ident during parsing of 'composes'",
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(path_start, lexer.peek_pos()?),
+                    kind: WarningKind::Unexpected {
+                        message: "Expected string or ident during parsing of 'composes'",
+                    },
                 });
                 return Some(());
             }
@@ -1379,9 +1423,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     return Some(());
                 }
                 if import_data.url.is_some() {
-                    self.handle_warning.handle_warning(Warning::DuplicateUrl {
+                    self.handle_warning.handle_warning(Warning {
                         range: Range::new(import_data.start, end),
-                        when: lexer.slice(import_data.start, end)?,
+                        kind: WarningKind::DuplicateUrl {
+                            when: lexer.slice(import_data.start, end)?,
+                        },
                     });
                     return Some(());
                 }
@@ -1412,9 +1458,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
 
                 if inside_url && import_data.url.is_some() {
-                    self.handle_warning.handle_warning(Warning::DuplicateUrl {
+                    self.handle_warning.handle_warning(Warning {
                         range: Range::new(import_data.start, end),
-                        when: lexer.slice(import_data.start, end)?,
+                        kind: WarningKind::DuplicateUrl {
+                            when: lexer.slice(import_data.start, end)?,
+                        },
                     });
                     return Some(());
                 }
@@ -1451,17 +1499,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let name = lexer.slice(start, end)?;
         if name.eq_ignore_ascii_case("@namespace") {
             self.scope = Scope::AtNamespaceInvalid;
-            self.handle_warning
-                .handle_warning(Warning::NamespaceNotSupportedInBundledCss {
-                    range: Range::new(start, end),
-                });
+            self.handle_warning.handle_warning(Warning {
+                range: Range::new(start, end),
+                kind: WarningKind::NamespaceNotSupportedInBundledCss,
+            });
         } else if name.eq_ignore_ascii_case("@import") {
             if !self.allow_import_at_rule {
                 self.scope = Scope::AtImportInvalid;
-                self.handle_warning
-                    .handle_warning(Warning::NotPrecededAtImport {
-                        range: Range::new(start, end),
-                    });
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::NotPrecededAtImport,
+                });
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
@@ -1474,13 +1522,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalPropertyDecl { name, range },
-                    |range| Warning::Unexpected {
-                        message: "Expected starts with '--' during parsing of '@property'",
+                    |range| Warning {
                         range,
+                        kind: WarningKind::Unexpected {
+                            message: "Expected starts with '--' during parsing of '@property'",
+                        },
                     },
-                    |range| Warning::Unexpected {
-                        message: "Expected '{' during parsing of '@property'",
+                    |range| Warning {
                         range,
+                        kind: WarningKind::Unexpected {
+                            message: "Expected '{' during parsing of '@property'",
+                        },
                     },
                 )?;
             } else if name.eq_ignore_ascii_case("@counter-style") {
@@ -1489,14 +1541,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalFontPaletteDecl { name, range },
-                    |range| Warning::Unexpected {
-                        message:
-                            "Expected starts with '--' during parsing of '@font-palette-values'",
+                    |range| Warning {
                         range,
+                        kind: WarningKind::Unexpected {
+                            message: "Expected starts with '--' during parsing of '@font-palette-values'",
+                        }
                     },
-                    |range| Warning::Unexpected {
-                        message: "Expected '{' during parsing of '@font-palette-values'",
+                    |range| Warning {
                         range,
+                        kind: WarningKind::Unexpected {
+                            message: "Expected '{' during parsing of '@font-palette-values'",
+                        }
                     },
                 )?;
             } else {
@@ -1517,17 +1572,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
-                    self.handle_warning.handle_warning(Warning::ExpectedUrl {
+                    self.handle_warning.handle_warning(Warning {
                         range: Range::new(import_data.start, end),
-                        when: lexer.slice(import_data.start, end)?,
+                        kind: WarningKind::ExpectedUrl {
+                            when: lexer.slice(import_data.start, end)?,
+                        },
                     });
                     self.scope = Scope::TopLevel;
                     return Some(());
                 };
                 let Some(url_range) = &import_data.url_range else {
-                    self.handle_warning.handle_warning(Warning::Unexpected {
-                        message: "Unexpected ';' during parsing of '@import url()'",
+                    self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, end),
+                        kind: WarningKind::Unexpected {
+                            message: "Unexpected ';' during parsing of '@import url()'",
+                        },
                     });
                     self.scope = Scope::TopLevel;
                     return Some(());
@@ -1536,11 +1595,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     ImportDataLayer::None => None,
                     ImportDataLayer::EndLayer { value, range } => {
                         if url_range.start > range.start {
-                            self.handle_warning
-                                .handle_warning(Warning::ExpectedUrlBefore {
-                                    range: url_range.clone(),
+                            self.handle_warning.handle_warning(Warning {
+                                range: url_range.clone(),
+                                kind: WarningKind::ExpectedUrlBefore {
                                     when: lexer.slice(range.start, url_range.end)?,
-                                });
+                                },
+                            });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -1550,19 +1610,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let supports = match &import_data.supports {
                     ImportDataSupports::None => None,
                     ImportDataSupports::InSupports => {
-                        self.handle_warning.handle_warning(Warning::Unexpected {
-                            message: "Unexpected ';' during parsing of 'supports()'",
+                        self.handle_warning.handle_warning(Warning {
                             range: Range::new(start, end),
+                            kind: WarningKind::Unexpected {
+                                message: "Unexpected ';' during parsing of 'supports()'",
+                            },
                         });
                         None
                     }
                     ImportDataSupports::EndSupports { value, range } => {
                         if url_range.start > range.start {
-                            self.handle_warning
-                                .handle_warning(Warning::ExpectedUrlBefore {
-                                    range: url_range.clone(),
+                            self.handle_warning.handle_warning(Warning {
+                                range: url_range.clone(),
+                                kind: WarningKind::ExpectedUrlBefore {
                                     when: lexer.slice(range.start, url_range.end)?,
-                                });
+                                },
+                            });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -1572,11 +1635,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 if let Some(layer_range) = import_data.layer_range() {
                     if let Some(supports_range) = import_data.supports_range() {
                         if layer_range.start > supports_range.start {
-                            self.handle_warning
-                                .handle_warning(Warning::ExpectedLayerBefore {
-                                    range: layer_range.clone(),
+                            self.handle_warning.handle_warning(Warning {
+                                range: layer_range.clone(),
+                                kind: WarningKind::ExpectedLayerBefore {
                                     when: lexer.slice(supports_range.start, layer_range.end)?,
-                                });
+                                },
+                            });
                             self.scope = Scope::TopLevel;
                             return Some(());
                         }
@@ -1678,9 +1742,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let start = start - distance;
                 let maybe_left_parenthesis_start = start - 1;
                 if lexer.slice(start - 1, start)? == "(" {
-                    self.handle_warning.handle_warning(Warning::Unexpected {
+                    self.handle_warning.handle_warning(Warning {
                         range: Range::new(maybe_left_parenthesis_start, end),
-                        message: "':global()' or ':local()' can't be empty",
+                        kind: WarningKind::Unexpected {
+                            message: "':global()' or ':local()' can't be empty",
+                        },
                     });
                 }
                 self.handle_dependency
@@ -1775,18 +1841,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     || ident.eq_ignore_ascii_case("compose-with")
                 {
                     if self.block_nesting_level != 1 {
-                        self.handle_warning
-                            .handle_warning(Warning::UnexpectedComposition {
-                                range: Range::new(start, end),
+                        self.handle_warning.handle_warning(Warning {
+                            range: Range::new(start, end),
+                            kind: WarningKind::UnexpectedComposition {
                                 message: "not allowed in nested rule",
-                            });
+                            },
+                        });
                     }
                     if !matches!(mode_data.single_local_class, SingleLocalClass::Single) {
-                        self.handle_warning
-                            .handle_warning(Warning::UnexpectedComposition {
-                                range: Range::new(start, end),
+                        self.handle_warning.handle_warning(Warning {
+                            range: Range::new(start, end),
+                            kind: WarningKind::UnexpectedComposition {
                                 message: "only allowed when selector is single :local class",
-                            });
+                            },
+                        });
                     }
                     return self.lex_composes(lexer, start);
                 }
@@ -1816,9 +1884,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         };
         let name = lexer.slice(start, end)?;
         if name == "." {
-            self.handle_warning.handle_warning(Warning::Unexpected {
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, end),
-                message: "Invalid class selector syntax",
+                kind: WarningKind::Unexpected {
+                    message: "Invalid class selector syntax",
+                },
             });
             return Some(());
         }
@@ -1848,9 +1918,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         };
         let name = lexer.slice(start, end)?;
         if name == "#" {
-            self.handle_warning.handle_warning(Warning::Unexpected {
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, end),
-                message: "Invalid id selector syntax",
+                kind: WarningKind::Unexpected {
+                    message: "Invalid id selector syntax",
+                },
             });
             return Some(());
         }
@@ -1889,18 +1961,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         if let Some(mode_data) = &mut self.mode_data {
             if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
                 let pure_global_start = mode_data.pure_global.unwrap();
-                self.handle_warning.handle_warning(Warning::NotPure {
+                self.handle_warning.handle_warning(Warning {
                     range: Range::new(pure_global_start, start),
-                    message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+                    kind: WarningKind::NotPure {
+                        message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+                    }
                 });
             }
 
             if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
                 let resulting_global_start = mode_data.resulting_global.unwrap();
-                self.handle_warning
-                    .handle_warning(Warning::InconsistentModeResult {
-                        range: Range::new(resulting_global_start, start),
-                    });
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(resulting_global_start, start),
+                    kind: WarningKind::InconsistentModeResult,
+                });
             }
             mode_data.resulting_global = None;
 
@@ -1971,11 +2045,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             if name.eq_ignore_ascii_case(":global(") || name.eq_ignore_ascii_case(":local(") {
                 if mode_data.is_inside_mode_function() {
-                    self.handle_warning
-                        .handle_warning(Warning::ExpectedNotInside {
-                            range: Range::new(start, end),
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, end),
+                        kind: WarningKind::ExpectedNotInside {
                             pseudo: lexer.slice(start, end)?,
-                        });
+                        },
+                    });
                 }
 
                 lexer.consume_white_space_and_comments()?;
@@ -2000,11 +2075,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let name = lexer.slice(start, end)?;
         if name.eq_ignore_ascii_case(":global") || name.eq_ignore_ascii_case(":local") {
             if mode_data.is_inside_mode_function() {
-                self.handle_warning
-                    .handle_warning(Warning::ExpectedNotInside {
-                        range: Range::new(start, end),
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::ExpectedNotInside {
                         pseudo: lexer.slice(start, end)?,
-                    });
+                    },
+                });
             }
 
             let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
@@ -2016,18 +2092,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     || c == C_LEFT_CURLY
                     || c == C_COMMA)
             {
-                self.handle_warning
-                    .handle_warning(Warning::MissingWhitespace {
-                        range: Range::new(start, end),
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::MissingWhitespace {
                         surrounding: "trailing",
-                    });
+                    },
+                });
             }
             if !should_have_after_white_space && has_after_white_space {
-                self.handle_warning
-                    .handle_warning(Warning::MissingWhitespace {
-                        range: Range::new(start, end),
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::MissingWhitespace {
                         surrounding: "leading",
-                    });
+                    },
+                });
             }
 
             self.balanced
@@ -2061,9 +2139,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
         if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
             let pure_global_start = mode_data.pure_global.unwrap();
-            self.handle_warning.handle_warning(Warning::NotPure {
+            self.handle_warning.handle_warning(Warning {
                 range: Range::new(pure_global_start, start),
-                message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+                kind: WarningKind::NotPure {
+                    message: "Selector is not pure (pure selectors must contain at least one local class or id)",
+                }
             });
         }
         mode_data.pure_global = Some(end);
@@ -2075,10 +2155,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
         if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
             let resulting_global_start = mode_data.resulting_global.unwrap();
-            self.handle_warning
-                .handle_warning(Warning::InconsistentModeResult {
-                    range: Range::new(resulting_global_start, start),
-                });
+            self.handle_warning.handle_warning(Warning {
+                range: Range::new(resulting_global_start, start),
+                kind: WarningKind::InconsistentModeResult,
+            });
         }
 
         if self.balanced.len() == 1 {

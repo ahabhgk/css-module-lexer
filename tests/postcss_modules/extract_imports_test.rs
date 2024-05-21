@@ -9,6 +9,7 @@ use css_module_lexer::Mode;
 use css_module_lexer::ModeData;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
+use css_module_lexer::WarningKind;
 use indoc::indoc;
 use linked_hash_map::LinkedHashMap;
 
@@ -52,10 +53,12 @@ fn walk_graph<'import>(
                 return;
             }
             StateMarker::Temporary => {
-                warnings.push(Warning::Unexpected {
-                    range: Range::new(0, 0),
-                    message: "Failed to resolve order of composed modules",
-                });
+                warnings.push(Warning::new(
+                    Range::new(0, 0),
+                    WarningKind::Unexpected {
+                        message: "Failed to resolve order of composed modules",
+                    },
+                ));
                 return;
             }
         }
