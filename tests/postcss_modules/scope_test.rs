@@ -2,7 +2,6 @@ use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
-use css_module_lexer::ModeData;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use indoc::indoc;
@@ -90,7 +89,7 @@ impl Scope {
                 _ => {}
             },
             |warning| warnings.push(warning),
-            Some(ModeData::new(Mode::Global)),
+            Mode::Global,
         );
         lexer.lex(&mut visitor);
         let len = input.len() as u32;

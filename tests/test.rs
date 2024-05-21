@@ -1,10 +1,9 @@
 mod postcss_modules;
 
-use css_module_lexer::collect_css_dependencies;
-use css_module_lexer::collect_css_modules_dependencies;
-use css_module_lexer::collect_css_modules_global_dependencies;
+use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
+use css_module_lexer::Mode;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
 use indoc::indoc;
@@ -301,7 +300,7 @@ fn assert_icss_export_value_dependency(
 
 #[test]
 fn empty() {
-    let (dependencies, warnings) = collect_css_dependencies("");
+    let (dependencies, warnings) = collect_dependencies("", Mode::Css);
     assert!(warnings.is_empty());
     assert!(dependencies.is_empty());
 }
@@ -310,21 +309,30 @@ fn empty() {
 fn url() {
     let input = indoc! {r#"
         body {
+            --a: url("./logo.png");
             background: url(
                 https://example\2f4a8f.com\
         /image.png
             )
         }
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_url_dependency(
         input,
         &dependencies[0],
+        "./logo.png",
+        UrlRangeKind::String,
+        "\"./logo.png\"",
+    );
+    assert_url_dependency(
+        input,
+        &dependencies[1],
         "https://example\\2f4a8f.com\\\n/image.png",
         UrlRangeKind::Function,
         "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )",
     );
+    assert_eq!(dependencies.len(), 2);
 }
 
 #[test]
@@ -335,7 +343,7 @@ fn duplicate_url() {
         @import url("./a.css") url(./a.css);
         @import url("./a.css") url("./a.css");
     "#};
-    let (_, warnings) = collect_css_dependencies(input);
+    let (_, warnings) = collect_dependencies(input, Mode::Css);
     assert_warning(input, &warnings[0], "@import url(./a.css) url(./a.css)");
     assert_warning(input, &warnings[1], "@import url(./a.css) url(\"./a.css\"");
     assert_warning(input, &warnings[2], "@import url(\"./a.css\") url(./a.css)");
@@ -352,7 +360,7 @@ fn not_preceded_at_import() {
         body {}
         @import url(./a.css);
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
     assert_warning(input, &warnings[0], "@import");
 }
@@ -373,7 +381,7 @@ fn url_string() {
             );
         }
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_url_dependency(
         input,
@@ -426,7 +434,7 @@ fn empty_url() {
             f: image-set(url(""));
         }
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
@@ -458,7 +466,7 @@ fn expect_url() {
     let input = indoc! {r#"
         @import ;
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
     assert_warning(&input, &warnings[0], "@import ;");
 }
@@ -473,7 +481,7 @@ fn import() {
         @import url('https://example\2f4a8f.com\
         /style.css') /* */;
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
@@ -509,7 +517,7 @@ fn unexpected_semicolon_in_supports() {
     let input = indoc! {r#"
         @import "style.css" supports(display: flex; display: grid);
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert_import_dependency(
         input,
         &dependencies[0],
@@ -528,7 +536,7 @@ fn unexpected_semicolon_import_url_string() {
         @import url("style.css";);
         @import url("style.css" layer;);
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
     assert_warning(input, &warnings[0], ";");
     assert_warning(input, &warnings[1], ";");
@@ -542,7 +550,7 @@ fn expected_before() {
         @import layer "style.css";
         @import "style.css" supports(display: flex) layer;
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
     assert_warning(input, &warnings[0], "\"style.css\"");
     assert_warning(input, &warnings[1], "\"style.css\"");
@@ -555,7 +563,7 @@ fn import_media() {
     let input = indoc! {r#"
         @import url("style.css") screen and (orientation: portrait);
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
@@ -577,7 +585,7 @@ fn import_attributes() {
         @import url("style.css") layer supports() /* comments */;
         @import url("style.css") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);
     "#};
-    let (dependencies, warnings) = collect_css_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
@@ -629,7 +637,7 @@ fn import_attributes() {
 #[test]
 fn css_modules_pseudo_1() {
     let input = ".localA :global .global-b .global-c :local(.localD.localE) .global-d";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".localA", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
@@ -645,7 +653,7 @@ fn css_modules_pseudo_2() {
         :global .a :local .b :global .c {}
         .d #e {}
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":global ");
     assert_replace_dependency(input, &dependencies[1], "", ":local ");
@@ -659,7 +667,7 @@ fn css_modules_pseudo_2() {
 #[test]
 fn css_modules_pseudo_3() {
     let input = ".a:not(:global .b:not(.c:not(:global .d) .e) .f).g {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
@@ -671,7 +679,7 @@ fn css_modules_pseudo_3() {
 #[test]
 fn css_modules_pseudo_4() {
     let input = ".a:not(:global .b:not(:local .c:not(:global .d) .e) .f).g {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":global ");
@@ -686,7 +694,7 @@ fn css_modules_pseudo_4() {
 #[test]
 fn css_modules_pseudo_5() {
     let input = ":global(.a, .b) {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":global(");
     assert_replace_dependency(input, &dependencies[1], "", ")");
@@ -696,7 +704,7 @@ fn css_modules_pseudo_5() {
 #[test]
 fn css_modules_pseudo_6() {
     let input = ".a:local( .b ).c {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_replace_dependency(input, &dependencies[1], "", ":local( ");
@@ -717,7 +725,7 @@ fn css_modules_missing_white_space_1() {
         .a :global,.b :global {}
         .a :global{}
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     // .a:global,:global .b {}
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
@@ -749,7 +757,7 @@ fn css_modules_missing_white_space_1() {
 #[test]
 fn css_modules_missing_white_space_2() {
     let input = ".a:not(.b:not(:global .c):local .d) {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert_warning(input, &warnings[0], ":local");
     assert_eq!(warnings.len(), 1);
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
@@ -781,7 +789,7 @@ fn css_modules_nesting() {
             }
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".nested", false);
     assert_local_class_dependency(input, &dependencies[1], ".nested-nested", false);
@@ -804,7 +812,7 @@ fn css_modules_local_var_unexpected() {
             color: var(local-color);
         }
     "#};
-    let (_, warnings) = collect_css_modules_dependencies(input);
+    let (_, warnings) = collect_dependencies(input, Mode::Local);
     assert_warning(input, &warnings[0], "lo");
 }
 
@@ -820,7 +828,7 @@ fn css_modules_local_var_1() {
             --global-color: red;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".vars", false);
     assert_local_var_dependency(input, &dependencies[1], "local-color", None);
@@ -838,7 +846,7 @@ fn css_modules_local_var_2() {
             c: var(--color3 from global, red);
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".bar", false);
     assert_local_var_dependency(input, &dependencies[1], "color1", Some("\"./b.css\""));
@@ -850,7 +858,7 @@ fn css_modules_local_var_2() {
 #[test]
 fn css_modules_local_var_minified_1() {
     let input = "body{margin:0;font-family:var(--bs-body-font-family);}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_var_dependency(input, &dependencies[0], "bs-body-font-family", None);
 }
@@ -858,7 +866,7 @@ fn css_modules_local_var_minified_1() {
 #[test]
 fn css_modules_local_var_minified_2() {
     let input = ".table-primary{--bs-table-color:#000;--bs-table-border-color:#a6b5cc;color:var(--bs-table-color);border-color:var(--bs-table-border-color)}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".table-primary", false);
     assert_local_var_decl_dependency(input, &dependencies[1], "bs-table-color");
@@ -879,7 +887,7 @@ fn css_modules_property() {
             color: var(--my-color);
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_property_decl_dependency(input, &dependencies[0], "my-color");
     assert_local_class_dependency(input, &dependencies[1], ".class", false);
@@ -902,7 +910,7 @@ fn css_modules_counter_style() {
             list-style-type: disc;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_counter_style_decl_dependency(input, &dependencies[0], "circles");
     assert_local_counter_style_dependency(input, &dependencies[1], "circles");
@@ -920,7 +928,7 @@ fn css_modules_font_palette() {
             font-palette: --Cooler;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_font_palette_decl_dependency(input, &dependencies[0], "Cooler");
     assert_local_class_dependency(input, &dependencies[1], ".foo", false);
@@ -936,7 +944,7 @@ fn css_modules_keyframes_unexpected() {
             100% { color: var(--theme-color2); }
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert_warning(input, &warnings[0], "$a");
     assert_eq!(warnings.len(), 1);
     assert_local_var_dependency(input, &dependencies[0], "theme-color1", None);
@@ -962,7 +970,7 @@ fn css_modules_keyframes_1() {
             --theme-color2: blue;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_keyframes_decl_dependency(input, &dependencies[0], "localkeyframes");
     assert_local_var_dependency(input, &dependencies[1], "theme-color1", None);
@@ -992,7 +1000,7 @@ fn css_modules_keyframes_2() {
                 3s linear env(slidein, var(--baz)) infinite running slidein;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_keyframes_decl_dependency(input, &dependencies[0], "slidein");
     assert_local_class_dependency(input, &dependencies[1], ".class", false);
@@ -1006,7 +1014,7 @@ fn css_modules_keyframes_2() {
 #[test]
 fn css_modules_keyframes_3() {
     let input = "@keyframes :local(foo) {}";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":local(");
     assert_local_keyframes_decl_dependency(input, &dependencies[1], "foo");
@@ -1026,7 +1034,7 @@ fn css_modules_keyframes_4() {
             animation-name: bar;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_global_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
     assert!(warnings.is_empty());
     // @keyframes foo
     assert_replace_dependency(input, &dependencies[0], "", ":local(");
@@ -1051,7 +1059,7 @@ fn css_modules_at_rule_1() {
             }
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".class", false);
     assert_eq!(dependencies.len(), 1);
@@ -1071,7 +1079,7 @@ fn css_modules_at_rule_2() {
             }
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".class", false);
     assert_local_class_dependency(input, &dependencies[1], ".class2", false);
@@ -1090,7 +1098,7 @@ fn css_modules_at_rule_3() {
             }
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".article-body", false);
     assert_local_class_dependency(input, &dependencies[1], ".article-body", false);
@@ -1106,7 +1114,7 @@ fn css_modules_composes_1() {
             other: rule;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(
@@ -1144,7 +1152,7 @@ fn css_modules_composes_2() {
             composes: a from "./aa.css", b from "./bb.css", c from './cc.css', a from './aa.css', c from './cc.css'
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".duplicate", false);
     assert_composes_dependency(input, &dependencies[1], "a", Some("\"./aa.css\""));
@@ -1168,7 +1176,7 @@ fn css_modules_composes_3() {
             composes: importName importName2 from "path/library.css", importName3 importName4 from "path/library.css";
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".spaces", false);
     assert_composes_dependency(
@@ -1199,7 +1207,7 @@ fn css_modules_composes_4() {
             composes: foo bar, baz;
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".unknown", false);
     assert_composes_dependency(input, &dependencies[1], "foo bar", None);
@@ -1215,7 +1223,7 @@ fn css_modules_composes_5() {
             composes: foo bar, baz, importName importName2 from "path/library.css"
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".mixed", false);
     assert_composes_dependency(input, &dependencies[1], "foo bar", None);
@@ -1245,7 +1253,7 @@ fn css_modules_composes_6() {
             composes: foo
         }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     // .a, .b, .c
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
@@ -1264,7 +1272,7 @@ fn css_modules_composes_6() {
 #[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert_warning(input, &warnings[0], ";");
     assert_eq!(warnings.len(), 1);
     assert_replace_dependency(input, &dependencies[0], "", ":export {\n/sl/ash");
@@ -1277,7 +1285,7 @@ fn icss_import() {
         :import(col.ors-2) {}
         :import("./colors.css") { i__blue: blue; i__red: red; }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_icss_import_from_dependency(input, &dependencies[0], "col.ors-2");
     assert_replace_dependency(input, &dependencies[1], "", ":import(col.ors-2) {}");
@@ -1307,7 +1315,7 @@ fn icss_export() {
         :export { $: abc; }
         :export { white space: a b c; }
     "#};
-    let (dependencies, warnings) = collect_css_modules_dependencies(input);
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_icss_export_value_dependency(input, &dependencies[0], "a", "a");
     assert_replace_dependency(

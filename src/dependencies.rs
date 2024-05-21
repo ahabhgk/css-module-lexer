@@ -277,12 +277,12 @@ impl Range {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Mode {
-    #[default]
     Local,
     Global,
     Pure,
+    Css,
 }
 
 #[derive(Debug)]
@@ -319,6 +319,7 @@ impl ModeData {
         match self.current {
             Mode::Local | Mode::Pure => true,
             Mode::Global => false,
+            Mode::Css => unreachable!(),
         }
     }
 
@@ -326,6 +327,7 @@ impl ModeData {
         match self.property {
             Mode::Local | Mode::Pure => true,
             Mode::Global => false,
+            Mode::Css => unreachable!(),
         }
     }
 
@@ -754,9 +756,13 @@ pub struct LexDependencies<'s, D, W> {
 }
 
 impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W> {
-    pub fn new(handle_dependency: D, handle_warning: W, mode_data: Option<ModeData>) -> Self {
+    pub fn new(handle_dependency: D, handle_warning: W, mode: Mode) -> Self {
         Self {
-            mode_data,
+            mode_data: if mode == Mode::Css {
+                None
+            } else {
+                Some(ModeData::new(mode))
+            },
             scope: Scope::TopLevel,
             block_nesting_level: 0,
             allow_import_at_rule: true,

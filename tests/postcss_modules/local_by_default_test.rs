@@ -4,12 +4,11 @@ use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
-use css_module_lexer::ModeData;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use indoc::indoc;
 
-#[derive(Debug, Default, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct LocalByDefault {
     pub mode: Mode,
 }
@@ -73,7 +72,7 @@ impl LocalByDefault {
                 _ => {}
             },
             |warning| warnings.push(warning),
-            Some(ModeData::new(self.mode)),
+            self.mode,
         );
         lexer.lex(&mut visitor);
         let len = input.len() as u32;
@@ -85,7 +84,7 @@ impl LocalByDefault {
 }
 
 fn test(input: &str, expected: &str) {
-    let (actual, warnings) = LocalByDefault::default().transform(input);
+    let (actual, warnings) = LocalByDefault { mode: Mode::Local }.transform(input);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
     similar_asserts::assert_eq!(expected, actual);
 }
@@ -97,7 +96,7 @@ fn test_with_options(input: &str, expected: &str, options: LocalByDefault) {
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
-    let (actual, warnings) = LocalByDefault::default().transform(input);
+    let (actual, warnings) = LocalByDefault { mode: Mode::Local }.transform(input);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",
