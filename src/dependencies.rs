@@ -286,18 +286,18 @@ pub enum Mode {
 }
 
 #[derive(Debug)]
-pub struct ModeData {
+pub struct ModeData<'s> {
     default: Mode,
     current: Mode,
     property: Mode,
     resulting_global: Option<Pos>,
     pure_global: Option<Pos>,
-    single_local_class: SingleLocalClass,
+    composes_local_classes: ComposesLocalClasses<'s>,
     inside_mode_function: u32,
     inside_mode_class: u32,
 }
 
-impl ModeData {
+impl ModeData<'_> {
     pub fn new(default: Mode) -> Self {
         Self {
             default,
@@ -305,7 +305,7 @@ impl ModeData {
             property: default,
             resulting_global: None,
             pure_global: Some(0),
-            single_local_class: SingleLocalClass::Initial,
+            composes_local_classes: ComposesLocalClasses::default(),
             inside_mode_function: 0,
             inside_mode_class: 0,
         }
@@ -356,21 +356,70 @@ impl ModeData {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SingleLocalClass {
-    Initial,
-    Single,
-    AtKeyword,
-    End,
+#[derive(Debug, Default, Clone)]
+struct ComposesLocalClasses<'s> {
+    is_single: SingleLocalClass,
+    local_classes: SmallVec<[&'s str; 2]>,
 }
 
-impl SingleLocalClass {
-    pub fn end(self) -> Self {
-        match self {
-            Self::AtKeyword => Self::AtKeyword,
-            _ => Self::End,
+impl<'s> ComposesLocalClasses<'s> {
+    pub fn take_valid_local_classes(
+        &mut self,
+        lexer: &Lexer<'s>,
+    ) -> Option<SmallVec<[&'s str; 2]>> {
+        if let SingleLocalClass::Single(range) = &self.is_single {
+            let mut local_classes = self.local_classes.clone();
+            local_classes.push(lexer.slice(range.start, range.end)?);
+            Some(local_classes)
+        } else {
+            self.reset_is_single();
+            None
         }
     }
+
+    pub fn invalidate(&mut self) {
+        if !matches!(self.is_single, SingleLocalClass::AtKeyword) {
+            self.is_single = SingleLocalClass::Invalid
+        }
+    }
+
+    pub fn find_local_class(&mut self, start: Pos, end: Pos) {
+        match self.is_single {
+            SingleLocalClass::Initial => {
+                self.is_single = SingleLocalClass::Single(Range::new(start, end))
+            }
+            SingleLocalClass::Single(_) => self.is_single = SingleLocalClass::Invalid,
+            _ => {}
+        };
+    }
+
+    pub fn find_at_keyword(&mut self) {
+        self.is_single = SingleLocalClass::AtKeyword;
+    }
+
+    pub fn reset_is_single(&mut self) {
+        self.is_single = SingleLocalClass::Initial;
+    }
+
+    pub fn find_comma(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+        if let SingleLocalClass::Single(range) = &self.is_single {
+            self.local_classes
+                .push(lexer.slice(range.start, range.end)?);
+            self.is_single = SingleLocalClass::Initial
+        } else {
+            self.is_single = SingleLocalClass::Invalid;
+        }
+        Some(())
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+enum SingleLocalClass {
+    #[default]
+    Initial,
+    Single(Range),
+    AtKeyword,
+    Invalid,
 }
 
 #[derive(Debug)]
@@ -640,6 +689,7 @@ pub enum Dependency<'s> {
         range: Range,
     },
     Composes {
+        local_classes: SmallVec<[&'s str; 2]>,
         names: SmallVec<[&'s str; 2]>,
         from: Option<&'s str>,
         range: Range,
@@ -743,7 +793,7 @@ impl Display for Warning<'_> {
 
 #[derive(Debug)]
 pub struct LexDependencies<'s, D, W> {
-    mode_data: Option<ModeData>,
+    mode_data: Option<ModeData<'s>>,
     scope: Scope<'s>,
     block_nesting_level: u32,
     allow_import_at_rule: bool,
@@ -1280,7 +1330,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
-    fn lex_composes(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+    fn lex_composes(
+        &mut self,
+        lexer: &mut Lexer<'s>,
+        local_classes: SmallVec<[&'s str; 2]>,
+        start: Pos,
+    ) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         if lexer.cur()? != C_COLON {
             return Some(());
@@ -1326,6 +1381,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     );
                     self.handle_dependency
                         .handle_dependency(Dependency::Composes {
+                            local_classes: local_classes.clone(),
                             names: smallvec![lexer.slice(name_start, name_end)?],
                             from: Some("global"),
                             range: Range::new(maybe_global_start, lexer.cur_pos()?),
@@ -1361,6 +1417,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 if !names.is_empty() {
                     self.handle_dependency
                         .handle_dependency(Dependency::Composes {
+                            local_classes: local_classes.clone(),
                             names: std::mem::take(&mut names),
                             from: None,
                             range: Range::new(start, end),
@@ -1392,6 +1449,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let from = Some(lexer.slice(path_start, path_end)?);
             self.handle_dependency
                 .handle_dependency(Dependency::Composes {
+                    local_classes: local_classes.clone(),
                     names: std::mem::take(&mut names),
                     from,
                     range: Range::new(start, end),
@@ -1571,7 +1629,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();
-            mode_data.single_local_class = SingleLocalClass::AtKeyword;
+            mode_data.composes_local_classes.find_at_keyword();
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1699,7 +1757,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                     if self.is_next_rule_prelude {
                         let mode_data = self.mode_data.as_mut().unwrap();
-                        mode_data.single_local_class = SingleLocalClass::Initial;
+                        mode_data.composes_local_classes.reset_is_single();
                     }
                 }
             }
@@ -1860,15 +1918,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             },
                         });
                     }
-                    if !matches!(mode_data.single_local_class, SingleLocalClass::Single) {
+
+                    let Some(local_classes) = mode_data
+                        .composes_local_classes
+                        .take_valid_local_classes(lexer)
+                    else {
                         self.handle_warning.handle_warning(Warning {
                             range: Range::new(start, end),
                             kind: WarningKind::UnexpectedComposition {
                                 message: "only allowed when selector is single :local class",
                             },
                         });
-                    }
-                    return self.lex_composes(lexer, start);
+                        return Some(());
+                    };
+                    return self.lex_composes(lexer, local_classes, start);
                 }
             }
             Scope::InAtImport(ref mut import_data) => {
@@ -1883,7 +1946,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let Some(mode_data) = &mut self.mode_data else {
                     return Some(());
                 };
-                mode_data.single_local_class = mode_data.single_local_class.end();
+                mode_data.composes_local_classes.invalidate();
             }
             _ => {}
         }
@@ -1911,11 +1974,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
-            mode_data.single_local_class = match mode_data.single_local_class {
-                SingleLocalClass::Initial => SingleLocalClass::Single,
-                SingleLocalClass::Single => SingleLocalClass::End,
-                other => other,
-            };
+            mode_data
+                .composes_local_classes
+                .find_local_class(start + 1, end);
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1945,7 +2006,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
-            mode_data.single_local_class = mode_data.single_local_class.end();
+            mode_data.composes_local_classes.invalidate();
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1960,7 +2021,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.allow_import_at_rule = false;
                 self.scope = Scope::InBlock;
                 if self.mode_data.is_none()
-                    || matches!(&self.mode_data, Some(mode_data) if !matches!(mode_data.single_local_class, SingleLocalClass::AtKeyword))
+                    || matches!(&self.mode_data, Some(mode_data) if !matches!(mode_data.composes_local_classes.is_single, SingleLocalClass::AtKeyword))
                 {
                     self.block_nesting_level = 1;
                 }
@@ -1995,7 +2056,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             if self.is_next_rule_prelude {
                 let mode_data = self.mode_data.as_mut().unwrap();
-                mode_data.single_local_class = SingleLocalClass::Initial;
+                mode_data.composes_local_classes.reset_is_single();
             }
         }
         debug_assert!(
@@ -2033,10 +2094,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.scope = Scope::TopLevel;
                 if let Some(mode_data) = &mut self.mode_data {
                     self.is_next_rule_prelude = true;
-                    mode_data.single_local_class = SingleLocalClass::Initial;
+                    mode_data.composes_local_classes.reset_is_single();
                 }
             } else if let Some(mode_data) = &mut self.mode_data {
-                mode_data.single_local_class = SingleLocalClass::Initial;
+                mode_data.composes_local_classes.reset_is_single();
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
         }
@@ -2072,7 +2133,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         range: Range::new(start, lexer.cur_pos()?),
                     });
             } else {
-                mode_data.single_local_class = mode_data.single_local_class.end();
+                mode_data.composes_local_classes.invalidate();
             }
         }
         self.balanced
@@ -2140,7 +2201,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         }
 
-        mode_data.single_local_class = mode_data.single_local_class.end();
+        mode_data.composes_local_classes.invalidate();
         Some(())
     }
 
@@ -2160,10 +2221,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         }
         mode_data.pure_global = Some(end);
 
-        mode_data.single_local_class = match mode_data.single_local_class {
-            SingleLocalClass::Single => SingleLocalClass::Initial,
-            _ => SingleLocalClass::End,
-        };
+        mode_data.composes_local_classes.find_comma(lexer)?;
 
         if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
             let resulting_global_start = mode_data.resulting_global.unwrap();

@@ -21,14 +21,11 @@ impl Scope {
         let mut index = 0;
         let mut lexer = Lexer::new(input);
         let mut exports = LinkedHashMap::new();
-        // This is not correct, only for passing tests
-        let mut last_local = None;
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
                 Dependency::LocalClass { name, range, .. } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let name = &name[1..];
-                    last_local = Some(name);
                     result += ".";
                     let new_name = generate_local_name(name);
                     result += &new_name;
@@ -38,7 +35,6 @@ impl Scope {
                 Dependency::LocalId { name, range, .. } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let name = &name[1..];
-                    last_local = Some(name);
                     result += "#";
                     let new_name = generate_local_name(name);
                     result += &new_name;
@@ -59,21 +55,25 @@ impl Scope {
                     exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
-                Dependency::Composes { names, from, .. } => {
-                    let Some(last_local) = last_local else {
-                        return;
-                    };
+                Dependency::Composes {
+                    local_classes,
+                    names,
+                    from,
+                    ..
+                } => {
                     for name in names {
                         let new_name = if matches!(from, Some("global")) {
                             name.to_string()
                         } else {
                             generate_local_name(name)
                         };
-                        if let Some(existing) = exports.get(name) {
-                            let existing = existing.clone();
-                            exports.get_mut(last_local).unwrap().extend(existing);
-                        } else {
-                            exports.get_mut(last_local).unwrap().push(new_name);
+                        for &local_class in local_classes.iter() {
+                            if let Some(existing) = exports.get(name) {
+                                let existing = existing.clone();
+                                exports.get_mut(local_class).unwrap().extend(existing);
+                            } else {
+                                exports.get_mut(local_class).unwrap().push(new_name.clone());
+                            }
                         }
                     }
                 }
@@ -404,7 +404,6 @@ fn css_nesting_composes() {
 
 #[test]
 fn error_comma_in_local() {
-    // TODO: should be `:export { a: _input__a _input__className`
     test(
         indoc! {r#"
             :local(.a, .b) {
@@ -417,7 +416,7 @@ fn error_comma_in_local() {
             }
 
             :export {
-                a: _input__a;
+                a: _input__a _input__className;
                 b: _input__b _input__className;
             }
         "#},
@@ -558,12 +557,12 @@ fn error_composes_keyframes() {
                 }
                 
                 to {
-                    
+                    composes: bar;
                 }
             }
             
             :export {
-                bar: _input__bar _input__bar;
+                bar: _input__bar;
             }
         "#},
         "Composition is only allowed when selector is single :local class",
@@ -580,11 +579,11 @@ fn error_composes_not_allowed_in_local_id() {
         "#},
         indoc! {r#"
             #_input__idName {
-                
+                composes: className;
             }
 
             :export {
-                idName: _input__idName _input__className;
+                idName: _input__idName;
             }
         "#},
         "Composition is only allowed when selector is single :local class",
@@ -601,12 +600,12 @@ fn error_composes_not_allowed_in_multiple() {
         "#},
         indoc! {r#"
             ._input__a ._input__b {
-                
+                composes: className;
             }
 
             :export {
                 a: _input__a;
-                b: _input__b _input__className;
+                b: _input__b;
             }
         "#},
         "Composition is only allowed when selector is single :local class",
@@ -623,7 +622,7 @@ fn error_composes_not_allowed_in_simple() {
         "#},
         indoc! {r#"
             body {
-                
+                composes: className;
             }
         "#},
         "Composition is only allowed when selector is single :local class",
@@ -640,12 +639,12 @@ fn error_composes_not_allowed_in_wrong_local() {
         "#},
         indoc! {r#"
             ._input__a._input__b {
-                
+                composes: className;
             }
 
             :export {
                 a: _input__a;
-                b: _input__b _input__className;
+                b: _input__b;
             }
         "#},
         "Composition is only allowed when selector is single :local class",
@@ -705,14 +704,14 @@ fn error_multiple_nested_media() {
                     grid-auto-flow: column;
             
                     @media (min-width: 1024px) {
-                        
+                        composes: bar;
                     }
                 }
             }
 
             :export {
                 bar: _input__bar;
-                foo: _input__foo _input__bar;
+                foo: _input__foo;
             }
         "#},
         "Composition is not allowed in nested rule",
