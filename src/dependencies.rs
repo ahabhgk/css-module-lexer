@@ -640,8 +640,9 @@ pub enum Dependency<'s> {
         range: Range,
     },
     Composes {
-        names: SmallVec<[&'s str; 3]>,
+        names: SmallVec<[&'s str; 2]>,
         from: Option<&'s str>,
+        range: Range,
     },
     ICSSImportFrom {
         path: &'s str,
@@ -1285,14 +1286,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         lexer.consume();
-        let mut names: SmallVec<[&'s str; 3]> = SmallVec::new();
+        let mut names: SmallVec<[&'s str; 2]> = SmallVec::new();
         let mut end;
         let mut has_from = false;
         loop {
             lexer.consume_white_space_and_comments()?;
-            end = lexer.cur_pos()?;
+            let start = lexer.cur_pos()?;
+            end = start;
             loop {
-                let name_start = lexer.cur_pos()?;
                 let c = lexer.cur()?;
                 if c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
                     break;
@@ -1317,17 +1318,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     }
                     lexer.consume_ident_sequence()?;
                     let name_end = lexer.cur_pos()?;
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            names: smallvec![lexer.slice(name_start, name_end)?],
-                            from: Some("global"),
-                        });
+                    lexer.consume_white_space_and_comments()?;
                     self.eat(
                         lexer,
                         &[C_RIGHT_PARENTHESIS],
                         "Expected ')' during parsing of 'composes'",
                     );
+                    self.handle_dependency
+                        .handle_dependency(Dependency::Composes {
+                            names: smallvec![lexer.slice(name_start, name_end)?],
+                            from: Some("global"),
+                            range: Range::new(maybe_global_start, lexer.cur_pos()?),
+                        });
                 } else {
+                    let name_start = lexer.cur_pos()?;
                     if !start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
                         self.handle_warning.handle_warning(Warning {
                             range: Range::new(name_start, lexer.peek2_pos()?),
@@ -1359,6 +1363,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         .handle_dependency(Dependency::Composes {
                             names: std::mem::take(&mut names),
                             from: None,
+                            range: Range::new(start, end),
                         });
                 }
                 if c == C_COMMA {
@@ -1389,6 +1394,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 .handle_dependency(Dependency::Composes {
                     names: std::mem::take(&mut names),
                     from,
+                    range: Range::new(start, end),
                 });
             lexer.consume_white_space_and_comments()?;
             if lexer.cur()? != C_COMMA {

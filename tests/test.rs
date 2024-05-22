@@ -221,14 +221,16 @@ fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, na
 }
 
 fn assert_composes_dependency(
-    _input: &str,
+    input: &str,
     dependency: &Dependency,
     names: &str,
     from: Option<&str>,
+    range_content: &str,
 ) {
     let Dependency::Composes {
         names: actual_names,
         from: actual_from,
+        range,
     } = dependency
     else {
         return assert!(false);
@@ -238,6 +240,7 @@ fn assert_composes_dependency(
         SmallVec::<[&str; 3]>::from_iter(names.split(' '))
     );
     assert_eq!(*actual_from, from);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_replace_dependency(
@@ -1122,19 +1125,28 @@ fn css_modules_composes_1() {
         &dependencies[1],
         "importName",
         Some("\"path/library.css\""),
+        "importName from \"path/library.css\"",
     );
-    assert_composes_dependency(input, &dependencies[2], "beforeName", Some("global"));
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "beforeName",
+        Some("global"),
+        "beforeName from global",
+    );
     assert_composes_dependency(
         input,
         &dependencies[3],
         "importName secondImport",
         Some("global"),
+        "importName secondImport from global",
     );
     assert_composes_dependency(
         input,
         &dependencies[4],
         "firstImport secondImport",
         Some("\"path/library.css\""),
+        "firstImport secondImport from \"path/library.css\"",
     );
     assert_replace_dependency(
         input,
@@ -1155,11 +1167,41 @@ fn css_modules_composes_2() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".duplicate", false);
-    assert_composes_dependency(input, &dependencies[1], "a", Some("\"./aa.css\""));
-    assert_composes_dependency(input, &dependencies[2], "b", Some("\"./bb.css\""));
-    assert_composes_dependency(input, &dependencies[3], "c", Some("'./cc.css'"));
-    assert_composes_dependency(input, &dependencies[4], "a", Some("'./aa.css'"));
-    assert_composes_dependency(input, &dependencies[5], "c", Some("'./cc.css'"));
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "a",
+        Some("\"./aa.css\""),
+        "a from \"./aa.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "b",
+        Some("\"./bb.css\""),
+        "b from \"./bb.css\"",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "c",
+        Some("'./cc.css'"),
+        "c from './cc.css'",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[4],
+        "a",
+        Some("'./aa.css'"),
+        "a from './aa.css'",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[5],
+        "c",
+        Some("'./cc.css'"),
+        "c from './cc.css'",
+    );
     assert_replace_dependency(
         input,
         &dependencies[6],
@@ -1184,12 +1226,14 @@ fn css_modules_composes_3() {
         &dependencies[1],
         "importName importName2",
         Some("\"path/library.css\""),
+        "importName importName2 from \"path/library.css\"",
     );
     assert_composes_dependency(
         input,
         &dependencies[2],
         "importName3 importName4",
         Some("\"path/library.css\""),
+        "importName3 importName4 from \"path/library.css\"",
     );
     assert_replace_dependency(
         input,
@@ -1210,8 +1254,8 @@ fn css_modules_composes_4() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".unknown", false);
-    assert_composes_dependency(input, &dependencies[1], "foo bar", None);
-    assert_composes_dependency(input, &dependencies[2], "baz", None);
+    assert_composes_dependency(input, &dependencies[1], "foo bar", None, "foo bar");
+    assert_composes_dependency(input, &dependencies[2], "baz", None, "baz");
     assert_replace_dependency(input, &dependencies[3], "", r#"composes: foo bar, baz;"#);
     assert_eq!(dependencies.len(), 4);
 }
@@ -1226,13 +1270,14 @@ fn css_modules_composes_5() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".mixed", false);
-    assert_composes_dependency(input, &dependencies[1], "foo bar", None);
-    assert_composes_dependency(input, &dependencies[2], "baz", None);
+    assert_composes_dependency(input, &dependencies[1], "foo bar", None, "foo bar");
+    assert_composes_dependency(input, &dependencies[2], "baz", None, "baz");
     assert_composes_dependency(
         input,
         &dependencies[3],
         "importName importName2",
         Some("\"path/library.css\""),
+        "importName importName2 from \"path/library.css\"",
     );
     assert_replace_dependency(
         input,
@@ -1258,13 +1303,13 @@ fn css_modules_composes_6() {
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
     assert_local_class_dependency(input, &dependencies[2], ".c", false);
-    assert_composes_dependency(input, &dependencies[3], "foo", None);
+    assert_composes_dependency(input, &dependencies[3], "foo", None, "foo");
     assert_replace_dependency(input, &dependencies[4], "", "composes: foo");
     // a, .b, .c
     assert_warning(input, &warnings[0], "composes");
     assert_local_class_dependency(input, &dependencies[5], ".b", false);
     assert_local_class_dependency(input, &dependencies[6], ".c", false);
-    assert_composes_dependency(input, &dependencies[7], "foo", None);
+    assert_composes_dependency(input, &dependencies[7], "foo", None, "foo");
     assert_replace_dependency(input, &dependencies[8], "", "composes: foo");
     assert_eq!(dependencies.len(), 9);
 }

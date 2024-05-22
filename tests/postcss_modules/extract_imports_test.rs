@@ -101,7 +101,7 @@ impl ExtractImports {
                 Dependency::LocalClass { .. } | Dependency::LocalId { .. } => {
                     rule_index += 1;
                 }
-                Dependency::Composes { names, from } => {
+                Dependency::Composes { names, from, .. } => {
                     let mut composes_content = String::new();
                     if let Some(from) = from {
                         if from == "global" {

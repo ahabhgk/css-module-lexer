@@ -59,7 +59,7 @@ impl Scope {
                     exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
-                Dependency::Composes { names, from } => {
+                Dependency::Composes { names, from, .. } => {
                     let Some(last_local) = last_local else {
                         return;
                     };
