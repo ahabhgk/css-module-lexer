@@ -1338,6 +1338,30 @@ fn css_modules_composes_6() {
 }
 
 #[test]
+fn css_modules_composes_7() {
+    let input = indoc! {r#"
+        .foo {
+            .bar {}
+            composes: global(a)
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".foo", false);
+    assert_local_class_dependency(input, &dependencies[1], ".bar", false);
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "foo",
+        "a",
+        Some("global"),
+        "global(a)",
+    );
+    assert_replace_dependency(input, &dependencies[3], "", "composes: global(a)");
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);

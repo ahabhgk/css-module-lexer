@@ -442,14 +442,14 @@ fn error_composes_css_nesting() {
 
             ._input__a {
                 ._input__b {
-                    
+                    compose-with: otherClassName;
                 }
             }
 
             :export {
                 otherClassName: _input__otherClassName;
                 a: _input__a;
-                b: _input__b _input__otherClassName;
+                b: _input__b;
             }
         "#},
         "Composition is not allowed in nested rule",
@@ -478,7 +478,7 @@ fn error_composes_css_nesting_at_rule() {
             @media (min-width: 1024px) {
                 ._input__a {
                     ._input__b {
-                        
+                        compose-with: otherClassName;
                     }
                 }
             }
@@ -486,7 +486,7 @@ fn error_composes_css_nesting_at_rule() {
             :export {
                 otherClassName: _input__otherClassName;
                 a: _input__a;
-                b: _input__b _input__otherClassName;
+                b: _input__b;
             }
         "#},
         "Composition is not allowed in nested rule",
@@ -515,7 +515,7 @@ fn error_composes_css_nesting_with_media() {
             ._input__a {
                 @media (min-width: 1024px) {
                     ._input__b {
-                        
+                        compose-with: otherClassName;
                     }
                 }
             }
@@ -523,7 +523,7 @@ fn error_composes_css_nesting_with_media() {
             :export {
                 otherClassName: _input__otherClassName;
                 a: _input__a;
-                b: _input__b _input__otherClassName;
+                b: _input__b;
             }
         "#},
         "Composition is not allowed in nested rule",

@@ -609,9 +609,6 @@ fn nesting() {
             }
         "#},
         indoc! {r#"
-            :import("path/library.css") {
-                i__imported_importName_0: importName;
-            }
             :local(.foo) {
                 display: grid;
             
@@ -621,7 +618,7 @@ fn nesting() {
 
                         @media (min-width: 1024px) {
                             &:local(.baz) {
-                                composes: i__imported_importName_0;
+                                composes: importName from "path/library.css";
                             }
                         }
                     }

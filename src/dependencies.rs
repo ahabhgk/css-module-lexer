@@ -363,16 +363,13 @@ struct ComposesLocalClasses<'s> {
 }
 
 impl<'s> ComposesLocalClasses<'s> {
-    pub fn take_valid_local_classes(
-        &mut self,
-        lexer: &Lexer<'s>,
-    ) -> Option<SmallVec<[&'s str; 2]>> {
+    pub fn get_valid_local_classes(&mut self, lexer: &Lexer<'s>) -> Option<SmallVec<[&'s str; 2]>> {
         if let SingleLocalClass::Single(range) = &self.is_single {
             let mut local_classes = self.local_classes.clone();
             local_classes.push(lexer.slice(range.start, range.end)?);
             Some(local_classes)
         } else {
-            self.reset_is_single();
+            self.reset_to_initial();
             None
         }
     }
@@ -397,7 +394,7 @@ impl<'s> ComposesLocalClasses<'s> {
         self.is_single = SingleLocalClass::AtKeyword;
     }
 
-    pub fn reset_is_single(&mut self) {
+    pub fn reset_to_initial(&mut self) {
         self.is_single = SingleLocalClass::Initial;
     }
 
@@ -1379,6 +1376,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         &[C_RIGHT_PARENTHESIS],
                         "Expected ')' during parsing of 'composes'",
                     );
+                    end = lexer.cur_pos()?;
                     self.handle_dependency
                         .handle_dependency(Dependency::Composes {
                             local_classes: local_classes.clone(),
@@ -1629,7 +1627,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();
-            mode_data.composes_local_classes.find_at_keyword();
+            if self.block_nesting_level == 0 {
+                mode_data.composes_local_classes.find_at_keyword();
+            }
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -1755,10 +1755,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     }
 
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                    if self.is_next_rule_prelude {
-                        let mode_data = self.mode_data.as_mut().unwrap();
-                        mode_data.composes_local_classes.reset_is_single();
-                    }
                 }
             }
             _ => {}
@@ -1917,11 +1913,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                                 message: "not allowed in nested rule",
                             },
                         });
+                        return Some(());
                     }
-
                     let Some(local_classes) = mode_data
                         .composes_local_classes
-                        .take_valid_local_classes(lexer)
+                        .get_valid_local_classes(lexer)
                     else {
                         self.handle_warning.handle_warning(Warning {
                             range: Range::new(start, end),
@@ -1974,9 +1970,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
-            mode_data
-                .composes_local_classes
-                .find_local_class(start + 1, end);
+            if self.block_nesting_level == 0 {
+                mode_data
+                    .composes_local_classes
+                    .find_local_class(start + 1, end);
+            }
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -2006,7 +2004,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
-            mode_data.composes_local_classes.invalidate();
+
+            if self.block_nesting_level == 0 {
+                mode_data.composes_local_classes.invalidate();
+            }
 
             if mode_data.is_pure_mode() {
                 mode_data.pure_global = None;
@@ -2054,9 +2055,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.balanced.update_property_mode(mode_data);
             self.balanced.pop_mode_pseudo_class(mode_data);
             self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-            if self.is_next_rule_prelude {
+            if self.is_next_rule_prelude && self.block_nesting_level == 0 {
                 let mode_data = self.mode_data.as_mut().unwrap();
-                mode_data.composes_local_classes.reset_is_single();
+                mode_data.composes_local_classes.reset_to_initial();
             }
         }
         debug_assert!(
@@ -2094,10 +2095,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.scope = Scope::TopLevel;
                 if let Some(mode_data) = &mut self.mode_data {
                     self.is_next_rule_prelude = true;
-                    mode_data.composes_local_classes.reset_is_single();
+                    mode_data.composes_local_classes.reset_to_initial();
                 }
-            } else if let Some(mode_data) = &mut self.mode_data {
-                mode_data.composes_local_classes.reset_is_single();
+            } else if self.mode_data.is_some() {
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
         }
@@ -2132,7 +2132,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         content: "",
                         range: Range::new(start, lexer.cur_pos()?),
                     });
-            } else {
+            } else if self.block_nesting_level == 0 {
                 mode_data.composes_local_classes.invalidate();
             }
         }
@@ -2201,7 +2201,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         }
 
-        mode_data.composes_local_classes.invalidate();
+        if self.block_nesting_level == 0 {
+            mode_data.composes_local_classes.invalidate();
+        }
         Some(())
     }
 
@@ -2221,7 +2223,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         }
         mode_data.pure_global = Some(end);
 
-        mode_data.composes_local_classes.find_comma(lexer)?;
+        if self.block_nesting_level == 0 {
+            mode_data.composes_local_classes.find_comma(lexer)?;
+        }
 
         if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
             let resulting_global_start = mode_data.resulting_global.unwrap();
