@@ -2059,11 +2059,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let mode_data = self.mode_data.as_mut().unwrap();
                 mode_data.composes_local_classes.reset_to_initial();
             }
+
+            debug_assert!(
+                self.balanced.is_empty(),
+                "balanced should be empty when end of selector"
+            );
         }
-        debug_assert!(
-            self.balanced.is_empty(),
-            "balanced should be empty when end of selector"
-        );
         Some(())
     }
 
