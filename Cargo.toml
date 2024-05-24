@@ -1,6 +1,6 @@
 [package]
 name = "css-module-lexer"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2021"
 description = "Lexes CSS modules returning their dependencies metadata"
 license = "MIT"
