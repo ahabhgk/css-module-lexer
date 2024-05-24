@@ -733,6 +733,8 @@ fn css_modules_missing_white_space_1() {
         .a:not(.b :global) {}
         .a :global,.b :global {}
         .a :global{}
+        .a:global {}
+        .a:global ,:global .b {}
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
@@ -760,12 +762,33 @@ fn css_modules_missing_white_space_1() {
     // .a :global{}
     assert_local_class_dependency(input, &dependencies[15], ".a", false);
     assert_replace_dependency(input, &dependencies[16], "", ":global");
-    assert_eq!(dependencies.len(), 17);
+    // .a:global {}
+    assert_local_class_dependency(input, &dependencies[17], ".a", false);
+    assert_replace_dependency(input, &dependencies[18], "", ":global ");
+    // .a:global ,:global .b {}
+    assert_local_class_dependency(input, &dependencies[19], ".a", false);
+    assert_replace_dependency(input, &dependencies[20], "", ":global ");
+    assert_replace_dependency(input, &dependencies[21], "", ":global ");
+    assert_eq!(dependencies.len(), 22);
 }
 
 #[test]
 fn css_modules_missing_white_space_2() {
     let input = ".a:not(.b:not(:global .c):local .d) {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_warning(input, &warnings[0], ":local");
+    assert_eq!(warnings.len(), 1);
+    assert_local_class_dependency(input, &dependencies[0], ".a", false);
+    assert_local_class_dependency(input, &dependencies[1], ".b", false);
+    assert_replace_dependency(input, &dependencies[2], "", ":global ");
+    assert_replace_dependency(input, &dependencies[3], "", ":local ");
+    assert_local_class_dependency(input, &dependencies[4], ".d", true);
+    assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
+fn css_modules_missing_white_space_3() {
+    let input = ".b:global ,:global .c {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert_warning(input, &warnings[0], ":local");
     assert_eq!(warnings.len(), 1);

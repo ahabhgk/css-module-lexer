@@ -2160,26 +2160,23 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
             let has_after_white_space = self.has_after_white_space(lexer)?;
             let c = lexer.cur()?;
-            if should_have_after_white_space
-                && !(has_after_white_space
-                    || c == C_RIGHT_PARENTHESIS
-                    || c == C_LEFT_CURLY
-                    || c == C_COMMA)
-            {
-                self.handle_warning.handle_warning(Warning {
-                    range: Range::new(start, end),
-                    kind: WarningKind::MissingWhitespace {
-                        surrounding: "trailing",
-                    },
-                });
-            }
-            if !should_have_after_white_space && has_after_white_space {
-                self.handle_warning.handle_warning(Warning {
-                    range: Range::new(start, end),
-                    kind: WarningKind::MissingWhitespace {
-                        surrounding: "leading",
-                    },
-                });
+            if c != C_RIGHT_PARENTHESIS && c != C_LEFT_CURLY && c != C_COMMA {
+                if should_have_after_white_space && !has_after_white_space {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, end),
+                        kind: WarningKind::MissingWhitespace {
+                            surrounding: "trailing",
+                        },
+                    });
+                }
+                if !should_have_after_white_space && has_after_white_space {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, end),
+                        kind: WarningKind::MissingWhitespace {
+                            surrounding: "leading",
+                        },
+                    });
+                }
             }
 
             self.balanced
