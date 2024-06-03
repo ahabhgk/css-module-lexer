@@ -1757,7 +1757,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 }
             }
-            _ => {}
+            Scope::TopLevel => {
+                if self.mode_data.is_some() {
+                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
+                }
+            }
         }
         Some(())
     }

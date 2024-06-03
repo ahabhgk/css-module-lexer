@@ -724,6 +724,16 @@ fn css_modules_pseudo_6() {
 }
 
 #[test]
+fn css_modules_pseudo_7() {
+    let input = "@charset \"UTF-8\";.a{}.b{}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".a", false);
+    assert_local_class_dependency(input, &dependencies[1], ".b", false);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
 fn css_modules_missing_white_space_1() {
     let input = indoc! {r#"
         .a:global,:global .b {}
@@ -790,14 +800,11 @@ fn css_modules_missing_white_space_2() {
 fn css_modules_missing_white_space_3() {
     let input = ".b:global ,:global .c {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
-    assert_warning(input, &warnings[0], ":local");
-    assert_eq!(warnings.len(), 1);
-    assert_local_class_dependency(input, &dependencies[0], ".a", false);
-    assert_local_class_dependency(input, &dependencies[1], ".b", false);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".b", false);
+    assert_replace_dependency(input, &dependencies[1], "", ":global ");
     assert_replace_dependency(input, &dependencies[2], "", ":global ");
-    assert_replace_dependency(input, &dependencies[3], "", ":local ");
-    assert_local_class_dependency(input, &dependencies[4], ".d", true);
-    assert_eq!(dependencies.len(), 5);
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]
