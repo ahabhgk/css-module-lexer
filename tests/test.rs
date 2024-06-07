@@ -1392,6 +1392,33 @@ fn css_modules_composes_7() {
 }
 
 #[test]
+fn css_modules_composes_8() {
+    let input = indoc! {r#"
+        .first,
+        .second {
+            color: green;
+        }
+
+        .base {
+            background-color: red;
+        }
+
+        .third {
+            composes: base;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".first", false);
+    assert_local_class_dependency(input, &dependencies[1], ".second", false);
+    assert_local_class_dependency(input, &dependencies[2], ".base", false);
+    assert_local_class_dependency(input, &dependencies[3], ".third", false);
+    assert_composes_dependency(input, &dependencies[4], "third", "base", None, "base");
+    assert_replace_dependency(input, &dependencies[5], "", "composes: base;");
+    assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);

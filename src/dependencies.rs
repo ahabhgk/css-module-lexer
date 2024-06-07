@@ -376,7 +376,8 @@ impl<'s> ComposesLocalClasses<'s> {
 
     pub fn invalidate(&mut self) {
         if !matches!(self.is_single, SingleLocalClass::AtKeyword) {
-            self.is_single = SingleLocalClass::Invalid
+            self.is_single = SingleLocalClass::Invalid;
+            self.local_classes.clear();
         }
     }
 
@@ -385,17 +386,22 @@ impl<'s> ComposesLocalClasses<'s> {
             SingleLocalClass::Initial => {
                 self.is_single = SingleLocalClass::Single(Range::new(start, end))
             }
-            SingleLocalClass::Single(_) => self.is_single = SingleLocalClass::Invalid,
+            SingleLocalClass::Single(_) => {
+                self.is_single = SingleLocalClass::Invalid;
+                self.local_classes.clear();
+            }
             _ => {}
         };
     }
 
     pub fn find_at_keyword(&mut self) {
         self.is_single = SingleLocalClass::AtKeyword;
+        self.local_classes.clear();
     }
 
     pub fn reset_to_initial(&mut self) {
         self.is_single = SingleLocalClass::Initial;
+        self.local_classes.clear();
     }
 
     pub fn find_comma(&mut self, lexer: &Lexer<'s>) -> Option<()> {
