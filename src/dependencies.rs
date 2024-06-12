@@ -907,7 +907,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         let c = lexer.cur().unwrap();
         // start of a :global :local
-        if c == C_LEFT_PARENTHESIS || c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
+        if c == C_LEFT_PARENTHESIS
+            || c == C_COMMA
+            || c == C_SEMICOLON
+            || c == C_RIGHT_CURLY
+            || c == C_LEFT_CURLY
+        {
             return true;
         }
         has_white_space
