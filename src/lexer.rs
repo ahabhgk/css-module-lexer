@@ -957,4 +957,22 @@ mod tests {
             "#},
         );
     }
+
+    #[test]
+    fn parse_minimized_urls() {
+        assert_lexer_snapshot(
+            "body{background:url(./image.png)}",
+            indoc! {r#"
+                ident: body
+                left_curly: {
+                ident: background
+                pseudo_function: :url(
+                class: .
+                ident: image
+                class: .png
+                right_parenthesis: )
+                right_curly: }
+            "#},
+        );
+    }
 }

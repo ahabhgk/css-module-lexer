@@ -1764,14 +1764,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             self.exit_font_palette_property();
                         }
                     }
-
-                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
                 }
+                self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
             Scope::TopLevel => {
-                if self.mode_data.is_some() {
-                    self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
-                }
+                self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
         }
         Some(())
@@ -2047,6 +2044,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             _ => return Some(()),
         }
+        self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
         if let Some(mode_data) = &mut self.mode_data {
             if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
                 let pure_global_start = mode_data.pure_global.unwrap();
@@ -2069,7 +2067,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
             self.balanced.update_property_mode(mode_data);
             self.balanced.pop_mode_pseudo_class(mode_data);
-            self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             if self.is_next_rule_prelude && self.block_nesting_level == 0 {
                 let mode_data = self.mode_data.as_mut().unwrap();
                 mode_data.composes_local_classes.reset_to_initial();
@@ -2109,11 +2106,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
+                self.is_next_rule_prelude = true;
                 if let Some(mode_data) = &mut self.mode_data {
-                    self.is_next_rule_prelude = true;
                     mode_data.composes_local_classes.reset_to_initial();
                 }
-            } else if self.mode_data.is_some() {
+            } else {
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
         }
