@@ -348,7 +348,7 @@ impl<'s> Lexer<'s> {
     pub fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
         let start = self.cur_pos()?;
         self.consume();
-        loop {
+        'outer: loop {
             let c = self.cur()?;
             if c == end {
                 self.consume();
@@ -357,13 +357,16 @@ impl<'s> Lexer<'s> {
             if is_new_line(c) {
                 break;
             }
-            if c == C_REVERSE_SOLIDUS {
+            while self.cur()? == C_REVERSE_SOLIDUS {
                 self.consume();
-                let c2 = self.cur()?;
-                if is_new_line(c2) {
+                if is_new_line(self.cur()?) {
                     self.consume();
-                } else if are_valid_escape(c, c2) {
+                } else {
                     self.consume_escaped()?;
+                    if self.cur()? == end {
+                        self.consume();
+                        break 'outer;
+                    }
                 }
             }
             self.consume();
