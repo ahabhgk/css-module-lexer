@@ -353,11 +353,9 @@ impl<'s> Lexer<'s> {
             if c == end {
                 self.consume();
                 break;
-            }
-            if is_new_line(c) {
+            } else if is_new_line(c) {
                 break;
-            }
-            if c == C_REVERSE_SOLIDUS {
+            } else if c == C_REVERSE_SOLIDUS {
                 self.consume();
                 let c2 = self.cur()?;
                 if is_new_line(c2) {
@@ -365,8 +363,9 @@ impl<'s> Lexer<'s> {
                 } else if are_valid_escape(c, c2) {
                     self.consume_escaped()?;
                 }
+            } else {
+                self.consume();
             }
-            self.consume();
         }
         visitor.string(self, start, self.cur_pos()?)
     }

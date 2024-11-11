@@ -359,6 +359,34 @@ fn url_2() {
 }
 
 #[test]
+fn url_3() {
+    let input = r#"body{content: "\f101";background-image:url(./img.png)}"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_url_dependency(
+        input,
+        &dependencies[0],
+        "./img.png",
+        UrlRangeKind::Function,
+        "url(./img.png)",
+    );
+}
+
+#[test]
+fn url_4() {
+    let input = r#"body{content: "\f\"101";background-image:url(./img.png)}"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_url_dependency(
+        input,
+        &dependencies[0],
+        "./img.png",
+        UrlRangeKind::Function,
+        "url(./img.png)",
+    );
+}
+
+#[test]
 fn duplicate_url() {
     let input = indoc! {r#"
         @import url(./a.css) url(./a.css);
