@@ -220,6 +220,84 @@ fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, na
     );
 }
 
+fn assert_local_container_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalContainer {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_container_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalContainerDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_function_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFunction {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
+fn assert_local_function_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFunctionDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
+fn assert_local_grid_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalGrid {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalGridDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
 fn assert_composes_dependency(
     input: &str,
     dependency: &Dependency,
@@ -1171,6 +1249,106 @@ fn css_modules_keyframes_4() {
     assert_replace_dependency(input, &dependencies[6], "", ":local ");
     assert_local_class_dependency(input, &dependencies[7], ".class2", true);
     assert_local_keyframes_dependency(input, &dependencies[8], "bar");
+    assert_eq!(dependencies.len(), 9);
+}
+
+#[test]
+fn css_modules_container() {
+    let input = indoc! {r#"
+        .card {
+            container-name: summary;
+            container: card / inline-size;
+        }
+        @container summary (min-width: 400px) {
+            .title {
+                color: red;
+            }
+        }
+        @container (width > 400px) {
+            .content {
+                color: blue;
+            }
+        }
+        @container card style(--responsive: true) {
+            .box {
+                color: green;
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".card", false);
+    assert_local_container_decl_dependency(input, &dependencies[1], "summary");
+    assert_local_container_decl_dependency(input, &dependencies[2], "card");
+    assert_local_container_dependency(input, &dependencies[3], "summary");
+    assert_local_class_dependency(input, &dependencies[4], ".title", false);
+    assert_local_class_dependency(input, &dependencies[5], ".content", false);
+    assert_local_container_dependency(input, &dependencies[6], "card");
+    assert_local_class_dependency(input, &dependencies[7], ".box", false);
+    assert_eq!(dependencies.len(), 8);
+}
+
+#[test]
+fn css_modules_function() {
+    let input = indoc! {r#"
+        @function --transparent(--color, --alpha) {
+            result: var(--color);
+        }
+        .box {
+            --base-color: #faa6ff;
+            background-color: --transparent(var(--base-color), 0.8);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_function_decl_dependency(input, &dependencies[0], "transparent");
+    assert_local_var_dependency(input, &dependencies[1], "color", None);
+    assert_local_class_dependency(input, &dependencies[2], ".box", false);
+    assert_local_var_decl_dependency(input, &dependencies[3], "base-color");
+    assert_local_function_dependency(input, &dependencies[4], "transparent");
+    assert_local_var_dependency(input, &dependencies[5], "base-color", None);
+    assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_function_explicit_local() {
+    let input = indoc! {r#"
+        @function :local(--transparent-local)(--color, --alpha) {
+            result: var(--color);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":local(");
+    assert_local_function_decl_dependency(input, &dependencies[1], "transparent-local");
+    assert_replace_dependency(input, &dependencies[2], "", ")");
+    assert_local_var_dependency(input, &dependencies[3], "color", None);
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn css_modules_grid() {
+    let input = indoc! {r#"
+        .layout {
+            grid-template-areas:
+                "header header"
+                "sidebar main";
+            grid-area: header;
+            grid-row: sidebar;
+            grid-template: "hero hero" auto / 1fr 1fr;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".layout", false);
+    assert_local_grid_decl_dependency(input, &dependencies[1], "header");
+    assert_local_grid_decl_dependency(input, &dependencies[2], "header");
+    assert_local_grid_decl_dependency(input, &dependencies[3], "sidebar");
+    assert_local_grid_decl_dependency(input, &dependencies[4], "main");
+    assert_local_grid_dependency(input, &dependencies[5], "header");
+    assert_local_grid_dependency(input, &dependencies[6], "sidebar");
+    assert_local_grid_decl_dependency(input, &dependencies[7], "hero");
+    assert_local_grid_decl_dependency(input, &dependencies[8], "hero");
     assert_eq!(dependencies.len(), 9);
 }
 

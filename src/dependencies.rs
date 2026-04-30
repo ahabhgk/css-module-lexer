@@ -626,6 +626,99 @@ impl ReservedValues for FontPaletteReserved {
     fn reset(&mut self) {}
 }
 
+#[derive(Debug, Default)]
+struct ContainerReserved;
+
+impl ReservedValues for ContainerReserved {
+    fn check(&mut self, ident: &str) -> bool {
+        !matches!(
+            ident,
+            "normal"
+                | "size"
+                | "inline-size"
+                | "scroll-state"
+                | "none"
+                | "initial"
+                | "inherit"
+                | "unset"
+                | "revert"
+                | "revert-layer"
+        )
+    }
+
+    fn reset(&mut self) {}
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GridPropertyKind {
+    Generic,
+    TemplateLike,
+    TemplateAreas,
+}
+
+fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
+    match ident {
+        "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
+        | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
+        "grid-template" | "grid-template-columns" | "grid-template-rows" => {
+            Some(GridPropertyKind::TemplateLike)
+        }
+        "grid-template-areas" => Some(GridPropertyKind::TemplateAreas),
+        _ => None,
+    }
+}
+
+fn is_reserved_grid_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "auto"
+            | "span"
+            | "auto-flow"
+            | "dense"
+            | "row"
+            | "column"
+            | "none"
+            | "subgrid"
+            | "masonry"
+            | "max-content"
+            | "min-content"
+            | "initial"
+            | "inherit"
+            | "unset"
+            | "revert"
+            | "revert-layer"
+    )
+}
+
+fn is_reserved_container_query_ident(ident: &str) -> bool {
+    matches!(ident, "none" | "and" | "or" | "not")
+}
+
+fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range; 4]> {
+    let mut result = SmallVec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if start == i {
+            break;
+        }
+        let token = &input[start..i];
+        if !token.bytes().all(|c| c == b'.') {
+            result.push(Range::new(offset + start as Pos, offset + i as Pos));
+        }
+    }
+
+    result
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
@@ -688,6 +781,30 @@ pub enum Dependency<'s> {
         range: Range,
     },
     LocalFontPaletteDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalContainer {
+        name: &'s str,
+        range: Range,
+    },
+    LocalContainerDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalFunction {
+        name: &'s str,
+        range: Range,
+    },
+    LocalFunctionDecl {
+        name: &'s str,
+        range: Range,
+    },
+    LocalGrid {
+        name: &'s str,
+        range: Range,
+    },
+    LocalGridDecl {
         name: &'s str,
         range: Range,
     },
@@ -805,6 +922,8 @@ pub struct LexDependencies<'s, D, W> {
     in_animation_property: Option<InProperty<AnimationReserved>>,
     in_list_style_property: Option<InProperty<ListStyleReserved>>,
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
+    in_container_property: Option<InProperty<ContainerReserved>>,
+    in_grid_property: Option<GridPropertyKind>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -825,6 +944,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             in_animation_property: None,
             in_list_style_property: None,
             in_font_palette_property: None,
+            in_container_property: None,
+            in_grid_property: None,
             handle_dependency,
             handle_warning,
         }
@@ -876,6 +997,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
     fn exit_font_palette_property(&mut self) {
         self.in_font_palette_property = None;
+    }
+
+    fn enter_container_property(&mut self) {
+        self.in_container_property = Some(InProperty::new(ContainerReserved, self.balanced.len()));
+    }
+
+    fn exit_container_property(&mut self) {
+        self.in_container_property = None;
+    }
+
+    fn enter_grid_property(&mut self, kind: GridPropertyKind) {
+        self.in_grid_property = Some(kind);
+    }
+
+    fn exit_grid_property(&mut self) {
+        self.in_grid_property = None;
     }
 
     fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
@@ -1314,6 +1451,120 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
+    fn lex_local_container_at_rule(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? == C_LEFT_PARENTHESIS {
+            return Some(());
+        }
+        if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
+            return Some(());
+        }
+        let start = lexer.cur_pos()?;
+        lexer.consume_ident_sequence()?;
+        let end = lexer.cur_pos()?;
+        let ident = lexer.slice(start, end)?;
+        if is_reserved_container_query_ident(ident) {
+            return Some(());
+        }
+        if self.mode_data.as_ref().unwrap().is_current_local_mode() {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalContainer {
+                    name: ident,
+                    range: Range::new(start, end),
+                });
+        }
+        Some(())
+    }
+
+    fn lex_local_function_decl(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        let mut is_function = false;
+        if lexer.cur()? == C_COLON {
+            let start = lexer.cur_pos()?;
+            lexer.consume_potential_pseudo(self)?;
+            let end = lexer.cur_pos()?;
+            let pseudo = lexer.slice(start, end)?;
+            let mode_data = self.mode_data.as_ref().unwrap();
+            if mode_data.is_pure_mode() && pseudo.eq_ignore_ascii_case(":global(")
+                || pseudo.eq_ignore_ascii_case(":global")
+            {
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::NotPure {
+                        message: "'@function :global' is not allowed in pure mode",
+                    },
+                });
+            }
+            is_function =
+                pseudo.eq_ignore_ascii_case(":local(") || pseudo.eq_ignore_ascii_case(":global(");
+            if !is_function
+                && !pseudo.eq_ignore_ascii_case(":local")
+                && !pseudo.eq_ignore_ascii_case(":global")
+            {
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, end),
+                    kind: WarningKind::Unexpected {
+                        message:
+                            "Expected ':local', ':local()', ':global', or ':global()' during parsing of '@function' name",
+                    },
+                });
+                return Some(());
+            }
+            lexer.consume_white_space_and_comments()?;
+        }
+        let start = lexer.cur_pos()?;
+        if lexer.cur()? != C_HYPHEN_MINUS || lexer.peek()? != C_HYPHEN_MINUS {
+            self.handle_warning.handle_warning(Warning {
+                range: Range::new(start, lexer.peek2_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected starts with '--' during parsing of '@function' name",
+                },
+            });
+            return Some(());
+        }
+        lexer.consume_ident_sequence()?;
+        let end = lexer.cur_pos()?;
+        let mode_data = self.mode_data.as_mut().unwrap();
+        if mode_data.is_current_local_mode() {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalFunctionDecl {
+                    name: lexer.slice(start + 2, end)?,
+                    range: Range::new(start, end),
+                });
+        }
+        lexer.consume_white_space_and_comments()?;
+        if is_function {
+            if lexer.cur()? != C_RIGHT_PARENTHESIS {
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                    kind: WarningKind::Unexpected {
+                        message:
+                            "Expected ')' during parsing of '@function :local(' or '@function :global('",
+                    },
+                });
+                return Some(());
+            }
+            self.handle_dependency
+                .handle_dependency(Dependency::Replace {
+                    content: "",
+                    range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                });
+            mode_data.inside_mode_function -= 1;
+            self.balanced.pop_without_moda_data();
+            lexer.consume();
+            lexer.consume_white_space_and_comments()?;
+        }
+        if lexer.cur()? != C_LEFT_PARENTHESIS {
+            self.handle_warning.handle_warning(Warning {
+                range: Range::new(lexer.cur_pos()?, lexer.peek_pos()?),
+                kind: WarningKind::Unexpected {
+                    message: "Expected '(' during parsing of '@function'",
+                },
+            });
+        }
+        Some(())
+    }
+
     fn handle_local_counter_style_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let list_style = self.in_list_style_property.as_mut().unwrap();
         if let Some(range) = list_style.take_rename(self.balanced.len()) {
@@ -1554,6 +1805,26 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
             Scope::InBlock => {
+                if let Some(mode_data) = &self.mode_data {
+                    if mode_data.is_property_local_mode() {
+                        if matches!(
+                            self.in_grid_property,
+                            Some(GridPropertyKind::TemplateLike | GridPropertyKind::TemplateAreas)
+                        ) {
+                            for range in parse_grid_template_area_ranges(
+                                lexer.slice(start + 1, end - 1)?,
+                                start + 1,
+                            ) {
+                                self.handle_dependency.handle_dependency(
+                                    Dependency::LocalGridDecl {
+                                        name: lexer.slice(range.start, range.end)?,
+                                        range,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
                 let Some(last) = self.balanced.last() else {
                     return Some(());
                 };
@@ -1597,6 +1868,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 || with_vendor_prefixed_eq(name, "keyframes", true)
             {
                 self.lex_local_keyframes_decl(lexer)?;
+            } else if name.eq_ignore_ascii_case("@container") {
+                self.lex_local_container_at_rule(lexer)?;
+            } else if name.eq_ignore_ascii_case("@function") {
+                self.lex_local_function_decl(lexer)?;
             } else if name.eq_ignore_ascii_case("@property") {
                 self.lex_local_dashed_ident_decl(
                     lexer,
@@ -1763,6 +2038,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             self.handle_local_font_palette_dependency(lexer)?;
                             self.exit_font_palette_property();
                         }
+                        if self.in_container_property.is_some() {
+                            self.exit_container_property();
+                        }
+                        if self.in_grid_property.is_some() {
+                            self.exit_grid_property();
+                        }
                     }
                 }
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
@@ -1788,6 +2069,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
+        if mode_data.is_current_local_mode() && name.starts_with("--") && end > start + 1 {
+            self.handle_dependency
+                .handle_dependency(Dependency::LocalFunction {
+                    name: lexer.slice(start + 2, end - 1)?,
+                    range: Range::new(start, end - 1),
+                });
+        }
         if mode_data.is_current_local_mode() && name.eq_ignore_ascii_case("var(") {
             self.lex_local_var(lexer)?;
         }
@@ -1861,6 +2149,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 };
 
                 let ident = lexer.slice(start, end)?;
+                if mode_data.is_current_local_mode()
+                    && self
+                        .balanced
+                        .last()
+                        .map(|last| last.kind.is_mode_function())
+                        .unwrap_or(false)
+                    && ident.starts_with("--")
+                    && lexer.cur()? == C_RIGHT_PARENTHESIS
+                {
+                    self.handle_dependency
+                        .handle_dependency(Dependency::LocalFunction {
+                            name: lexer.slice(start + 2, end)?,
+                            range: Range::new(start, end),
+                        });
+                    return Some(());
+                }
                 if mode_data.is_property_local_mode() {
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
@@ -1889,6 +2193,32 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         return Some(());
                     }
 
+                    if let Some(container) = &mut self.in_container_property {
+                        if self.balanced.is_empty() {
+                            container.set_rename(ident, Range::new(start, end));
+                            if let Some(range) = container.take_rename(self.balanced.len()) {
+                                self.handle_dependency.handle_dependency(
+                                    Dependency::LocalContainerDecl {
+                                        name: lexer.slice(range.start, range.end)?,
+                                        range,
+                                    },
+                                );
+                            }
+                        }
+                        return Some(());
+                    }
+
+                    if self.in_grid_property.is_some() {
+                        if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
+                            self.handle_dependency
+                                .handle_dependency(Dependency::LocalGrid {
+                                    name: ident,
+                                    range: Range::new(start, end),
+                                });
+                        }
+                        return Some(());
+                    }
+
                     if let Some(name) = ident.strip_prefix("--") {
                         return self.lex_local_var_decl(lexer, name, start, end);
                     }
@@ -1911,6 +2241,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
                     if ident.eq_ignore_ascii_case("font-palette") {
                         self.enter_font_palette_property();
+                        return Some(());
+                    }
+
+                    if ident.eq_ignore_ascii_case("container")
+                        || ident.eq_ignore_ascii_case("container-name")
+                    {
+                        self.enter_container_property();
+                        return Some(());
+                    }
+
+                    if let Some(kind) = grid_property_kind(ident) {
+                        self.enter_grid_property(kind);
                         return Some(());
                     }
                 }
@@ -2077,6 +2419,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 "balanced should be empty when end of selector"
             );
         }
+        self.exit_container_property();
+        self.exit_grid_property();
         Some(())
     }
 
@@ -2097,6 +2441,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if self.in_font_palette_property.is_some() {
                         self.handle_local_font_palette_dependency(lexer)?;
                         self.exit_font_palette_property();
+                    }
+                    if self.in_container_property.is_some() {
+                        self.exit_container_property();
+                    }
+                    if self.in_grid_property.is_some() {
+                        self.exit_grid_property();
                     }
                 }
             }
