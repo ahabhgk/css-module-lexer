@@ -6,12 +6,14 @@ use smallvec::SmallVec;
 use crate::lexer::is_white_space;
 use crate::lexer::start_ident_sequence;
 use crate::lexer::Visitor;
+use crate::lexer::C_APOSTROPHE;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
 use crate::lexer::C_COMMA;
 use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_LEFT_PARENTHESIS;
+use crate::lexer::C_QUOTATION_MARK;
 use crate::lexer::C_RIGHT_CURLY;
 use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
@@ -1659,14 +1661,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     }
                     lexer.consume_ident_sequence()?;
                     let name_end = lexer.cur_pos()?;
-                    if lexer
-                        .slice(name_start, name_end)?
-                        .eq_ignore_ascii_case("from")
+                    let ident = lexer.slice(name_start, name_end)?;
+                    if !names.is_empty()
+                        && ident.eq_ignore_ascii_case("from")
                     {
-                        has_from = true;
-                        break;
+                        lexer.consume_white_space_and_comments()?;
+                        let next_c = lexer.cur()?;
+                        if next_c == C_QUOTATION_MARK
+                            || next_c == C_APOSTROPHE
+                            || start_ident_sequence(next_c, lexer.peek()?, lexer.peek2()?)
+                        {
+                            has_from = true;
+                            break;
+                        }
                     }
-                    names.push(lexer.slice(name_start, name_end)?);
+                    names.push(ident);
                     end = name_end;
                 }
                 lexer.consume_white_space_and_comments()?;

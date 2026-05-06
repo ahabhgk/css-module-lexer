@@ -1767,3 +1767,24 @@ fn icss_export() {
     );
     assert_eq!(dependencies.len(), 11);
 }
+
+#[test]
+fn weird_composes() {
+    let input = indoc! {r#"
+        .from { color: red; }
+        :local(.exportName31) {
+	        composes: from from;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[1], ".exportName31", true);
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "exportName31",
+        "from from",
+        None,
+        "from from",
+    );
+}
