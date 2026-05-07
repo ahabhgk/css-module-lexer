@@ -497,7 +497,7 @@ impl ReservedValues for AnimationReserved {
             "step-end" => self.check_and_update(Self::STEP_END),
             "step-start" => self.check_and_update(Self::STEP_START),
             // keywords values
-            "none" | 
+            "none" |
             // global values
             "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
             _ => true,
@@ -1662,9 +1662,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     lexer.consume_ident_sequence()?;
                     let name_end = lexer.cur_pos()?;
                     let ident = lexer.slice(name_start, name_end)?;
-                    if !names.is_empty()
-                        && ident.eq_ignore_ascii_case("from")
-                    {
+                    if !names.is_empty() && ident.eq_ignore_ascii_case("from") {
                         lexer.consume_white_space_and_comments()?;
                         let next_c = lexer.cur()?;
                         if next_c == C_QUOTATION_MARK
