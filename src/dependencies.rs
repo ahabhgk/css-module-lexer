@@ -4,8 +4,10 @@ use smallvec::smallvec;
 use smallvec::SmallVec;
 
 use crate::lexer::is_white_space;
+use crate::lexer::is_new_line;
 use crate::lexer::start_ident_sequence;
 use crate::lexer::Visitor;
+use crate::lexer::are_valid_escape;
 use crate::lexer::C_APOSTROPHE;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
@@ -14,6 +16,7 @@ use crate::lexer::C_HYPHEN_MINUS;
 use crate::lexer::C_LEFT_CURLY;
 use crate::lexer::C_LEFT_PARENTHESIS;
 use crate::lexer::C_QUOTATION_MARK;
+use crate::lexer::C_REVERSE_SOLIDUS;
 use crate::lexer::C_RIGHT_CURLY;
 use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
@@ -248,6 +251,225 @@ impl BalancedItemKind {
 
     pub fn is_mode_class(&self) -> bool {
         matches!(self, Self::LocalClass | Self::GlobalClass)
+    }
+}
+
+#[derive(Debug)]
+enum ValueAtRule<'s> {
+    Import {
+        from: &'s str,
+        items: SmallVec<[ValueAtRuleImportItem<'s>; 2]>,
+    },
+    Value {
+        local_name: &'s str,
+        value: &'s str,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValueAtRuleImportItem<'s> {
+    local_name: &'s str,
+    import_name: &'s str,
+}
+
+fn is_css_space_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
+}
+
+fn trim_slice(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && is_css_space_byte(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_css_space_byte(bytes[end - 1]) {
+        end -= 1;
+    }
+    &input[start..end]
+}
+
+fn mask_css_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            result.push(' ');
+            result.push(' ');
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                result.push(' ');
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                result.push(' ');
+                result.push(' ');
+                i += 2;
+            }
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
+    let input = trim_slice(input);
+    let masked = trim_slice(masked);
+    if input.is_empty() {
+        return None;
+    }
+
+    let bytes = masked.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && is_css_space_byte(bytes[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+
+    let token_start = if bytes[end - 1] == b'"' || bytes[end - 1] == b'\'' {
+        let quote = bytes[end - 1];
+        let mut start = end - 1;
+        while start > 0 {
+            start -= 1;
+            if bytes[start] == quote {
+                break;
+            }
+        }
+        start
+    } else {
+        let mut start = end;
+        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        start
+    };
+
+    let from = trim_slice(&input[token_start..end]);
+    let mut word_end = token_start;
+    while word_end > 0 && is_css_space_byte(bytes[word_end - 1]) {
+        word_end -= 1;
+    }
+    if word_end == 0 {
+        return None;
+    }
+    let mut word_start = word_end;
+    while word_start > 0 && !is_css_space_byte(bytes[word_start - 1]) {
+        word_start -= 1;
+    }
+    let word = &masked[word_start..word_end];
+    if !word.eq_ignore_ascii_case("from") {
+        return None;
+    }
+
+    Some((trim_slice(&input[..word_start]), from))
+}
+
+fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s str; 2]> {
+    let input = trim_slice(input);
+    let masked = trim_slice(masked);
+    let (input, masked) = if input.starts_with('(') && input.ends_with(')') && masked.len() >= 2 {
+        (&input[1..input.len() - 1], &masked[1..masked.len() - 1])
+    } else {
+        (input, masked)
+    };
+
+    let mut result = SmallVec::new();
+    let bytes = masked.as_bytes();
+    let mut start = 0usize;
+    let mut depth = 0u32;
+    let mut quote = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if let Some(current_quote) = quote {
+            if byte == current_quote {
+                quote = None;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' && depth > 0 {
+            depth -= 1;
+        } else if byte == b',' && depth == 0 {
+            let item = trim_slice(&input[start..i]);
+            if !item.is_empty() {
+                result.push(item);
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    let item = trim_slice(&input[start..]);
+    if !item.is_empty() {
+        result.push(item);
+    }
+    result
+}
+
+fn parse_value_at_rule_import_item<'s>(input: &'s str) -> ValueAtRuleImportItem<'s> {
+    let input = trim_slice(input);
+    if let Some(index) = input.find(':') {
+        return ValueAtRuleImportItem {
+            local_name: trim_slice(&input[..index]),
+            import_name: trim_slice(&input[index + 1..]),
+        };
+    }
+
+    let lower = input.to_ascii_lowercase();
+    if let Some(index) = lower.find(" as ") {
+        return ValueAtRuleImportItem {
+            local_name: trim_slice(&input[index + 4..]),
+            import_name: trim_slice(&input[..index]),
+        };
+    }
+
+    ValueAtRuleImportItem {
+        local_name: input,
+        import_name: input,
+    }
+}
+
+fn parse_value_at_rule<'s>(input: &'s str) -> ValueAtRule<'s> {
+    let masked = mask_css_comments(input);
+    if let Some((before_from, from)) = split_value_at_rule_from(input, &masked) {
+        let masked_before_from = &masked[..before_from.len()];
+        let items = split_value_at_rule_items(before_from, masked_before_from)
+            .into_iter()
+            .map(parse_value_at_rule_import_item)
+            .collect();
+        return ValueAtRule::Import { from, items };
+    }
+
+    let input = trim_slice(input);
+    let masked = trim_slice(&masked);
+    if let Some(index) = masked.find(':') {
+        return ValueAtRule::Value {
+            local_name: trim_slice(&input[..index]),
+            value: trim_slice(&input[index + 1..]),
+        };
+    }
+
+    let bytes = masked.as_bytes();
+    let mut split = bytes.len();
+    for (index, byte) in bytes.iter().enumerate() {
+        if is_css_space_byte(*byte) {
+            split = index;
+            break;
+        }
+    }
+    let mut value_start = split;
+    while value_start < bytes.len() && is_css_space_byte(bytes[value_start]) {
+        value_start += 1;
+    }
+    ValueAtRule::Value {
+        local_name: trim_slice(&input[..split]),
+        value: trim_slice(&input[value_start..]),
     }
 }
 
@@ -1086,14 +1308,40 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn lex_icss_import(&mut self, lexer: &mut Lexer<'s>) -> Option<()> {
         lexer.consume_white_space_and_comments()?;
         let start = lexer.cur_pos()?;
-        loop {
-            let c = lexer.cur()?;
-            if c == C_RIGHT_PARENTHESIS {
-                break;
+        let end = if lexer.cur()? == C_RIGHT_PARENTHESIS {
+            start
+        } else if lexer.cur()? == C_QUOTATION_MARK || lexer.cur()? == C_APOSTROPHE {
+            let quote = lexer.cur()?;
+            self.consume_raw_string(lexer, quote)?;
+            lexer.cur_pos()?
+        } else {
+            let mut end = start;
+            loop {
+                let c = lexer.cur()?;
+                if c == C_RIGHT_PARENTHESIS {
+                    break;
+                }
+                if c == C_SOLIDUS && lexer.peek()? == C_ASTERISK {
+                    lexer.consume_comments()?;
+                    continue;
+                }
+                lexer.consume();
+                if !is_white_space(c) {
+                    end = lexer.cur_pos()?;
+                }
             }
-            lexer.consume();
+            end
+        };
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_RIGHT_PARENTHESIS {
+            loop {
+                let c = lexer.cur()?;
+                if c == C_RIGHT_PARENTHESIS {
+                    break;
+                }
+                lexer.consume();
+            }
         }
-        let end = lexer.cur_pos()?;
         self.handle_dependency
             .handle_dependency(Dependency::ICSSImportFrom {
                 path: lexer.slice(start, end)?,
@@ -1166,6 +1414,109 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             lexer.consume();
         }
+        Some(())
+    }
+
+    fn consume_raw_string(&self, lexer: &mut Lexer<'s>, end: char) -> Option<()> {
+        lexer.consume();
+        loop {
+            let c = lexer.cur()?;
+            if c == end {
+                lexer.consume();
+                break;
+            } else if is_new_line(c) {
+                break;
+            } else if c == C_REVERSE_SOLIDUS {
+                lexer.consume();
+                let c2 = lexer.cur()?;
+                if is_new_line(c2) {
+                    lexer.consume();
+                } else if are_valid_escape(c, c2) {
+                    lexer.consume_escaped()?;
+                }
+            } else {
+                lexer.consume();
+            }
+        }
+        Some(())
+    }
+
+    fn consume_value_at_rule_params(&self, lexer: &mut Lexer<'s>) -> Option<(Pos, Pos)> {
+        let start = lexer.cur_pos()?;
+        loop {
+            let c = lexer.cur()?;
+            if c == C_SEMICOLON {
+                let end = lexer.cur_pos()?;
+                lexer.consume();
+                return Some((start, end));
+            }
+            if c == C_RIGHT_CURLY {
+                return Some((start, lexer.cur_pos()?));
+            }
+            if c == C_QUOTATION_MARK || c == C_APOSTROPHE {
+                self.consume_raw_string(lexer, c)?;
+                continue;
+            }
+            if c == C_SOLIDUS && lexer.peek()? == C_ASTERISK {
+                lexer.consume_comments()?;
+                continue;
+            }
+            lexer.consume();
+        }
+    }
+
+    fn lex_value_at_rule(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        let (params_start, params_end) = self.consume_value_at_rule_params(lexer)?;
+        let at_rule_end = params_end.max(lexer.cur_pos().unwrap_or(params_end));
+        let params = lexer.slice(params_start, params_end)?;
+        match parse_value_at_rule(params) {
+            ValueAtRule::Import { from, items } => {
+                if from.is_empty() || items.is_empty() {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, at_rule_end),
+                        kind: WarningKind::Unexpected {
+                            message: "Broken '@value' at-rule",
+                        },
+                    });
+                } else {
+                    self.handle_dependency
+                        .handle_dependency(Dependency::ICSSImportFrom { path: from });
+                    for item in items {
+                        self.handle_dependency
+                            .handle_dependency(Dependency::ICSSImportValue {
+                                prop: item.local_name,
+                                value: item.import_name,
+                            });
+                        self.handle_dependency
+                            .handle_dependency(Dependency::ICSSExportValue {
+                                prop: item.local_name,
+                                value: item.local_name,
+                            });
+                    }
+                }
+            }
+            ValueAtRule::Value { local_name, value } => {
+                if local_name.is_empty() {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, at_rule_end),
+                        kind: WarningKind::Unexpected {
+                            message: "Broken '@value' at-rule",
+                        },
+                    });
+                } else {
+                    self.handle_dependency
+                        .handle_dependency(Dependency::ICSSExportValue {
+                            prop: local_name,
+                            value,
+                        });
+                }
+            }
+        }
+        self.handle_dependency
+            .handle_dependency(Dependency::Replace {
+                content: "",
+                range: Range::new(start, at_rule_end),
+            });
         Some(())
     }
 
@@ -1871,7 +2222,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if self.mode_data.is_some() {
-            if name.eq_ignore_ascii_case("@keyframes")
+            if name.eq_ignore_ascii_case("@value") {
+                self.lex_value_at_rule(lexer, start)?;
+            } else if name.eq_ignore_ascii_case("@keyframes")
                 || with_vendor_prefixed_eq(name, "keyframes", true)
             {
                 self.lex_local_keyframes_decl(lexer)?;

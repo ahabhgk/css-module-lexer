@@ -1714,6 +1714,28 @@ fn icss_import() {
 }
 
 #[test]
+fn icss_import_with_comments_around_path() {
+    let input = indoc! {r#"
+        :import(   /* test */   "./export.modules.css"   /* test */   ) {
+            IMPORTED_NAME: primary-color;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(input, &dependencies[0], "\"./export.modules.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[1], "IMPORTED_NAME", "primary-color");
+    assert_replace_dependency(
+        input,
+        &dependencies[2],
+        "",
+        indoc! {r#":import(   /* test */   "./export.modules.css"   /* test */   ) {
+    IMPORTED_NAME: primary-color;
+}"#},
+    );
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
 fn icss_export() {
     let input = indoc! {r#"
         :export {
@@ -1766,6 +1788,61 @@ fn icss_export() {
         ":export { white space: a b c; }",
     );
     assert_eq!(dependencies.len(), 11);
+}
+
+#[test]
+fn value_at_rule_export() {
+    let input = indoc! {r#"
+        @value primary: red;
+        @value spacing calc(10px * 2);
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_export_value_dependency(input, &dependencies[0], "primary", "red");
+    assert_replace_dependency(input, &dependencies[1], "", "@value primary: red;");
+    assert_icss_export_value_dependency(input, &dependencies[2], "spacing", "calc(10px * 2)");
+    assert_replace_dependency(input, &dependencies[3], "", "@value spacing calc(10px * 2);");
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn value_at_rule_import() {
+    let input = indoc! {r#"
+        @value red from "./colors.css";
+        @value blue as sky, green from "./palette.css";
+        @value (black as ink, white) from "./theme.css";
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(input, &dependencies[0], "\"./colors.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[1], "red", "red");
+    assert_icss_export_value_dependency(input, &dependencies[2], "red", "red");
+    assert_replace_dependency(input, &dependencies[3], "", "@value red from \"./colors.css\";");
+
+    assert_icss_import_from_dependency(input, &dependencies[4], "\"./palette.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[5], "sky", "blue");
+    assert_icss_export_value_dependency(input, &dependencies[6], "sky", "sky");
+    assert_icss_import_value_dependency(input, &dependencies[7], "green", "green");
+    assert_icss_export_value_dependency(input, &dependencies[8], "green", "green");
+    assert_replace_dependency(
+        input,
+        &dependencies[9],
+        "",
+        "@value blue as sky, green from \"./palette.css\";",
+    );
+
+    assert_icss_import_from_dependency(input, &dependencies[10], "\"./theme.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[11], "ink", "black");
+    assert_icss_export_value_dependency(input, &dependencies[12], "ink", "ink");
+    assert_icss_import_value_dependency(input, &dependencies[13], "white", "white");
+    assert_icss_export_value_dependency(input, &dependencies[14], "white", "white");
+    assert_replace_dependency(
+        input,
+        &dependencies[15],
+        "",
+        "@value (black as ink, white) from \"./theme.css\";",
+    );
+    assert_eq!(dependencies.len(), 16);
 }
 
 #[test]
