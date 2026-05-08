@@ -1682,6 +1682,51 @@ fn css_modules_composes_8() {
 }
 
 #[test]
+fn css_modules_composes_after_value_import_from_node_modules() {
+    let input = indoc! {r#"
+        @value color-grey from "./node_modules/@localpackage/color.css";
+
+        .copyright {
+          color: color-grey;
+          composes: type-heading from "./node_modules/@localpackage/style.css";
+          margin: 0;
+          padding: 0;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(
+        input,
+        &dependencies[0],
+        "\"./node_modules/@localpackage/color.css\"",
+    );
+    assert_icss_import_value_dependency(input, &dependencies[1], "color-grey", "color-grey");
+    assert_icss_export_value_dependency(input, &dependencies[2], "color-grey", "color-grey");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        r#"@value color-grey from "./node_modules/@localpackage/color.css";"#,
+    );
+    assert_local_class_dependency(input, &dependencies[4], ".copyright", false);
+    assert_composes_dependency(
+        input,
+        &dependencies[5],
+        "copyright",
+        "type-heading",
+        Some("\"./node_modules/@localpackage/style.css\""),
+        r#"type-heading from "./node_modules/@localpackage/style.css""#,
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[6],
+        "",
+        r#"composes: type-heading from "./node_modules/@localpackage/style.css";"#,
+    );
+    assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);

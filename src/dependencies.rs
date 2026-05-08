@@ -2222,8 +2222,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if self.mode_data.is_some() {
+            let mut can_contain_rules = true;
             if name.eq_ignore_ascii_case("@value") {
                 self.lex_value_at_rule(lexer, start)?;
+                can_contain_rules = false;
             } else if name.eq_ignore_ascii_case("@keyframes")
                 || with_vendor_prefixed_eq(name, "keyframes", true)
             {
@@ -2273,7 +2275,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();
-            if self.block_nesting_level == 0 {
+            if can_contain_rules && self.block_nesting_level == 0 {
                 mode_data.composes_local_classes.find_at_keyword();
             }
 
@@ -2742,7 +2744,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
             Scope::InBlock => {
-                self.block_nesting_level += 1;
+                let is_at_rule_block = matches!(
+                    &self.mode_data,
+                    Some(mode_data)
+                        if matches!(mode_data.composes_local_classes.is_single, SingleLocalClass::AtKeyword)
+                );
+                if !is_at_rule_block {
+                    self.block_nesting_level += 1;
+                }
             }
             _ => return Some(()),
         }

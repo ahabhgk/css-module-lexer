@@ -403,6 +403,43 @@ fn css_nesting_composes() {
 }
 
 #[test]
+fn css_nesting_composes_with_nested_media() {
+    test(
+        indoc! {r#"
+            :local(.a) {
+            }
+
+            @media (orientation: landscape) {
+                @media (orientation: landscape) {
+                    :local(.b) {
+                        color: red;
+                        composes: a;
+                    }
+                }
+            }
+        "#},
+        indoc! {r#"
+            ._input__a {
+            }
+
+            @media (orientation: landscape) {
+                @media (orientation: landscape) {
+                    ._input__b {
+                        color: red;
+                        
+                    }
+                }
+            }
+
+            :export {
+                a: _input__a;
+                b: _input__b _input__a;
+            }
+        "#},
+    );
+}
+
+#[test]
 fn error_comma_in_local() {
     test(
         indoc! {r#"
