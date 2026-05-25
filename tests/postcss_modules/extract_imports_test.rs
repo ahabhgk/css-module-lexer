@@ -127,7 +127,7 @@ impl ExtractImports {
                             for i in 0..names.len() {
                                 let name = names[i];
                                 if let Some(value) = values.get(name) {
-                                    composes_content += &value;
+                                    composes_content += value.as_ref();
                                 } else {
                                     let value = format!(
                                         "i__imported_{}_{postfix}",
@@ -137,7 +137,7 @@ impl ExtractImports {
                                         )
                                     );
                                     postfix += 1;
-                                    composes_content += &value;
+                                    composes_content += value.as_ref();
                                     values.insert(name, value.into());
                                 }
                                 if i + 1 != names.len() {
@@ -202,7 +202,7 @@ impl ExtractImports {
             imported += "\") {\n";
             for (value, prop) in values {
                 imported += "    ";
-                imported += &prop;
+                imported += prop;
                 imported += ": ";
                 imported += value;
                 imported += ";\n";
@@ -214,13 +214,13 @@ impl ExtractImports {
 }
 
 fn test(input: &str, expected: &str) {
-    let (actual, warnings) = ExtractImports::default().transform(input);
+    let (actual, warnings) = ExtractImports.transform(input);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
     similar_asserts::assert_eq!(expected, actual);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
-    let (actual, warnings) = ExtractImports::default().transform(input);
+    let (actual, warnings) = ExtractImports.transform(input);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",

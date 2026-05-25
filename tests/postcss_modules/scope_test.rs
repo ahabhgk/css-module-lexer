@@ -112,13 +112,13 @@ impl Scope {
 }
 
 fn test(input: &str, expected: &str) {
-    let (actual, warnings) = Scope::default().transform(input);
+    let (actual, warnings) = Scope.transform(input);
     assert!(warnings.is_empty(), "{}", &warnings[0]);
     similar_asserts::assert_eq!(expected, actual);
 }
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
-    let (actual, warnings) = Scope::default().transform(input);
+    let (actual, warnings) = Scope.transform(input);
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",

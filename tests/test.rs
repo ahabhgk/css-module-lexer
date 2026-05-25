@@ -29,7 +29,7 @@ fn assert_url_dependency(
         kind: k,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*req, request);
     assert_eq!(*k, kind);
@@ -53,7 +53,7 @@ fn assert_import_dependency(
         media: actual_media,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_request, request);
     assert_eq!(*actual_layer, layer);
@@ -69,7 +69,7 @@ fn assert_local_class_dependency(input: &str, dependency: &Dependency, name: &st
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
@@ -83,7 +83,7 @@ fn assert_local_id_dependency(input: &str, dependency: &Dependency, name: &str, 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
@@ -102,7 +102,7 @@ fn assert_local_var_dependency(
         from: actual_from,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_from, from);
@@ -118,7 +118,7 @@ fn assert_local_var_decl_dependency(input: &str, dependency: &Dependency, name: 
         name: actual_name,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -133,7 +133,7 @@ fn assert_local_property_decl_dependency(input: &str, dependency: &Dependency, n
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -148,7 +148,7 @@ fn assert_local_keyframes_decl_dependency(input: &str, dependency: &Dependency, 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -160,7 +160,7 @@ fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name:
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -172,7 +172,7 @@ fn assert_local_counter_style_decl_dependency(input: &str, dependency: &Dependen
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -184,7 +184,7 @@ fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, n
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -196,7 +196,7 @@ fn assert_local_font_palette_decl_dependency(input: &str, dependency: &Dependenc
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -211,7 +211,7 @@ fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, na
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -226,7 +226,7 @@ fn assert_local_container_dependency(input: &str, dependency: &Dependency, name:
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -238,7 +238,7 @@ fn assert_local_container_decl_dependency(input: &str, dependency: &Dependency, 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -250,7 +250,7 @@ fn assert_local_function_dependency(input: &str, dependency: &Dependency, name: 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -265,7 +265,7 @@ fn assert_local_function_decl_dependency(input: &str, dependency: &Dependency, n
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -280,7 +280,7 @@ fn assert_local_grid_dependency(input: &str, dependency: &Dependency, name: &str
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -292,7 +292,7 @@ fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name:
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -313,7 +313,7 @@ fn assert_composes_dependency(
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(
         *actual_local_classes,
@@ -338,7 +338,7 @@ fn assert_replace_dependency(
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_content, content);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
@@ -355,7 +355,7 @@ fn assert_charset_dependency(
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_value, value);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
@@ -363,7 +363,7 @@ fn assert_charset_dependency(
 
 fn assert_icss_import_from_dependency(_input: &str, dependency: &Dependency, path: &str) {
     let Dependency::ICSSImportFrom { path: actual_path } = dependency else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_path, path);
 }
@@ -379,7 +379,7 @@ fn assert_icss_import_value_dependency(
         value: actual_value,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
     assert_eq!(*actual_value, value);
@@ -396,7 +396,7 @@ fn assert_icss_export_value_dependency(
         value: actual_value,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
     assert_eq!(*actual_value, value);
@@ -614,7 +614,7 @@ fn expect_url() {
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
-    assert_warning(&input, &warnings[0], "@import ;");
+    assert_warning(input, &warnings[0], "@import ;");
 }
 
 #[test]
@@ -1889,7 +1889,12 @@ fn value_at_rule_export() {
     assert_icss_export_value_dependency(input, &dependencies[0], "primary", "red");
     assert_replace_dependency(input, &dependencies[1], "", "@value primary: red;");
     assert_icss_export_value_dependency(input, &dependencies[2], "spacing", "calc(10px * 2)");
-    assert_replace_dependency(input, &dependencies[3], "", "@value spacing calc(10px * 2);");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        "@value spacing calc(10px * 2);",
+    );
     assert_eq!(dependencies.len(), 4);
 }
 
@@ -1905,7 +1910,12 @@ fn value_at_rule_import() {
     assert_icss_import_from_dependency(input, &dependencies[0], "\"./colors.css\"");
     assert_icss_import_value_dependency(input, &dependencies[1], "red", "red");
     assert_icss_export_value_dependency(input, &dependencies[2], "red", "red");
-    assert_replace_dependency(input, &dependencies[3], "", "@value red from \"./colors.css\";");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        "@value red from \"./colors.css\";",
+    );
 
     assert_icss_import_from_dependency(input, &dependencies[4], "\"./palette.css\"");
     assert_icss_import_value_dependency(input, &dependencies[5], "sky", "blue");

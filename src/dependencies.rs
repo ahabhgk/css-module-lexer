@@ -412,7 +412,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
     result
 }
 
-fn parse_value_at_rule_import_item<'s>(input: &'s str) -> ValueAtRuleImportItem<'s> {
+fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
     let input = trim_slice(input);
     if let Some(index) = input.find(':') {
         return ValueAtRuleImportItem {
@@ -435,7 +435,7 @@ fn parse_value_at_rule_import_item<'s>(input: &'s str) -> ValueAtRuleImportItem<
     }
 }
 
-fn parse_value_at_rule<'s>(input: &'s str) -> ValueAtRule<'s> {
+fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     let masked = mask_css_comments(input);
     if let Some((before_from, from)) = split_value_at_rule_from(input, &masked) {
         let masked_before_from = &masked[..before_from.len()];
@@ -2208,22 +2208,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             Scope::InBlock => {
                 if let Some(mode_data) = &self.mode_data {
-                    if mode_data.is_property_local_mode() {
-                        if matches!(
+                    if mode_data.is_property_local_mode()
+                        && matches!(
                             self.in_grid_property,
                             Some(GridPropertyKind::TemplateLike | GridPropertyKind::TemplateAreas)
+                        )
+                    {
+                        for range in parse_grid_template_area_ranges(
+                            lexer.slice(start + 1, end - 1)?,
+                            start + 1,
                         ) {
-                            for range in parse_grid_template_area_ranges(
-                                lexer.slice(start + 1, end - 1)?,
-                                start + 1,
-                            ) {
-                                self.handle_dependency.handle_dependency(
-                                    Dependency::LocalGridDecl {
-                                        name: lexer.slice(range.start, range.end)?,
-                                        range,
-                                    },
-                                );
-                            }
+                            self.handle_dependency
+                                .handle_dependency(Dependency::LocalGridDecl {
+                                    name: lexer.slice(range.start, range.end)?,
+                                    range,
+                                });
                         }
                     }
                 }
