@@ -3,11 +3,11 @@ use std::fmt::Display;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 
-use crate::lexer::is_white_space;
+use crate::lexer::are_valid_escape;
 use crate::lexer::is_new_line;
+use crate::lexer::is_white_space;
 use crate::lexer::start_ident_sequence;
 use crate::lexer::Visitor;
-use crate::lexer::are_valid_escape;
 use crate::lexer::C_APOSTROPHE;
 use crate::lexer::C_ASTERISK;
 use crate::lexer::C_COLON;
@@ -961,6 +961,10 @@ pub enum Dependency<'s> {
         content: &'s str,
         range: Range,
     },
+    Charset {
+        value: &'s str,
+        range: Range,
+    },
     LocalClass {
         name: &'s str,
         range: Range,
@@ -1193,6 +1197,46 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         media_lexer.consume();
         media_lexer.consume_white_space_and_comments()?;
         Some(media)
+    }
+
+    fn lex_charset_at_rule(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        let quote = lexer.cur()?;
+        if quote != C_QUOTATION_MARK && quote != C_APOSTROPHE {
+            return Some(());
+        }
+
+        let value_start = lexer.cur_pos()? + 1;
+        lexer.consume();
+        loop {
+            let c = lexer.cur()?;
+            if c == quote {
+                let value_end = lexer.cur_pos()?;
+                lexer.consume();
+                lexer.consume_white_space_and_comments()?;
+                if lexer.cur()? == C_SEMICOLON {
+                    lexer.consume();
+                    self.handle_dependency
+                        .handle_dependency(Dependency::Charset {
+                            value: lexer.slice(value_start, value_end)?,
+                            range: Range::new(start, lexer.cur_pos()?),
+                        });
+                }
+                return Some(());
+            } else if is_new_line(c) {
+                return Some(());
+            } else if c == C_REVERSE_SOLIDUS {
+                lexer.consume();
+                let c2 = lexer.cur()?;
+                if is_new_line(c2) {
+                    lexer.consume();
+                } else if are_valid_escape(c, c2) {
+                    lexer.consume_escaped()?;
+                }
+            } else {
+                lexer.consume();
+            }
+        }
     }
 
     fn enter_animation_property(&mut self) {
@@ -2221,6 +2265,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
+        } else if name.eq_ignore_ascii_case("@charset") {
+            self.lex_charset_at_rule(lexer, start)?;
         } else if self.mode_data.is_some() {
             let mut can_contain_rules = true;
             if name.eq_ignore_ascii_case("@value") {

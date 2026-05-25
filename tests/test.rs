@@ -344,6 +344,23 @@ fn assert_replace_dependency(
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
+fn assert_charset_dependency(
+    input: &str,
+    dependency: &Dependency,
+    value: &str,
+    range_content: &str,
+) {
+    let Dependency::Charset {
+        value: actual_value,
+        range,
+    } = dependency
+    else {
+        return assert!(false);
+    };
+    assert_eq!(*actual_value, value);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
 fn assert_icss_import_from_dependency(_input: &str, dependency: &Dependency, path: &str) {
     let Dependency::ICSSImportFrom { path: actual_path } = dependency else {
         return assert!(false);
@@ -848,8 +865,34 @@ fn css_modules_pseudo_7() {
     let input = "@charset \"UTF-8\";.a{}.b{}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
+    assert_charset_dependency(input, &dependencies[0], "UTF-8", "@charset \"UTF-8\";");
+    assert_local_class_dependency(input, &dependencies[1], ".a", false);
+    assert_local_class_dependency(input, &dependencies[2], ".b", false);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn css_modules_charset_in_string_and_comment() {
+    let input = ".a{content:'@charset \"UTF-8\";'}/*@charset \"UTF-8\";*/.b{}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn charset_at_rule() {
+    let input = "@charset \"UTF-8\";@charset 'iso-8859-1';";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_charset_dependency(input, &dependencies[0], "UTF-8", "@charset \"UTF-8\";");
+    assert_charset_dependency(
+        input,
+        &dependencies[1],
+        "iso-8859-1",
+        "@charset 'iso-8859-1';",
+    );
     assert_eq!(dependencies.len(), 2);
 }
 
