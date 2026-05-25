@@ -9,21 +9,21 @@ Lexes CSS modules returning their dependencies metadata.
 ## Dependencies
 
 - [x] CSS:
-  - [x] @import
-  - [x] url(), image-set()
+    - [x] @import
+    - [x] url(), image-set()
 - [x] iCSS
-  - [ ] :import
-  - [x] :export
+    - [x] :import
+    - [x] :export
 - [x] CSS Modules
-  - [x] :local, :local(), :global, :global()
-  - [x] local .class, local #id
-  - [x] local scope by default
-  - [x] composes
-  - [x] nesting
-  - [x] local @keyframe
-  - [x] local var()
-  - [x] local @property
-  - [x] local @counter-style
-  - [x] local @font-palette-values
-  - [ ] local grid
-  - [ ] @values
+    - [x] :local, :local(), :global, :global()
+    - [x] local .class, local #id
+    - [x] local scope by default
+    - [x] composes
+    - [x] nesting
+    - [x] local @keyframe
+    - [x] local var()
+    - [x] local @property
+    - [x] local @counter-style
+    - [x] local @font-palette-values
+    - [x] local grid
+    - [x] @values

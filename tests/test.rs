@@ -29,7 +29,7 @@ fn assert_url_dependency(
         kind: k,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*req, request);
     assert_eq!(*k, kind);
@@ -53,7 +53,7 @@ fn assert_import_dependency(
         media: actual_media,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_request, request);
     assert_eq!(*actual_layer, layer);
@@ -69,7 +69,7 @@ fn assert_local_class_dependency(input: &str, dependency: &Dependency, name: &st
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
@@ -83,7 +83,7 @@ fn assert_local_id_dependency(input: &str, dependency: &Dependency, name: &str, 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
@@ -102,7 +102,7 @@ fn assert_local_var_dependency(
         from: actual_from,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_from, from);
@@ -118,7 +118,7 @@ fn assert_local_var_decl_dependency(input: &str, dependency: &Dependency, name: 
         name: actual_name,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -133,7 +133,7 @@ fn assert_local_property_decl_dependency(input: &str, dependency: &Dependency, n
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -148,7 +148,7 @@ fn assert_local_keyframes_decl_dependency(input: &str, dependency: &Dependency, 
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -160,7 +160,7 @@ fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name:
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -172,7 +172,7 @@ fn assert_local_counter_style_decl_dependency(input: &str, dependency: &Dependen
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -184,7 +184,7 @@ fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, n
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
@@ -196,7 +196,7 @@ fn assert_local_font_palette_decl_dependency(input: &str, dependency: &Dependenc
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
@@ -211,13 +211,91 @@ fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, na
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
         Lexer::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
+}
+
+fn assert_local_container_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalContainer {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_container_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalContainerDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_function_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFunction {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
+fn assert_local_function_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalFunctionDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(
+        Lexer::slice_range(input, range).unwrap(),
+        format!("--{}", name)
+    );
+}
+
+fn assert_local_grid_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalGrid {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+}
+
+fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
+    let Dependency::LocalGridDecl {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_composes_dependency(
@@ -235,7 +313,7 @@ fn assert_composes_dependency(
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(
         *actual_local_classes,
@@ -260,15 +338,32 @@ fn assert_replace_dependency(
         range,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_content, content);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
+fn assert_charset_dependency(
+    input: &str,
+    dependency: &Dependency,
+    value: &str,
+    range_content: &str,
+) {
+    let Dependency::Charset {
+        value: actual_value,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_value, value);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
 fn assert_icss_import_from_dependency(_input: &str, dependency: &Dependency, path: &str) {
     let Dependency::ICSSImportFrom { path: actual_path } = dependency else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_path, path);
 }
@@ -284,7 +379,7 @@ fn assert_icss_import_value_dependency(
         value: actual_value,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
     assert_eq!(*actual_value, value);
@@ -301,7 +396,7 @@ fn assert_icss_export_value_dependency(
         value: actual_value,
     } = dependency
     else {
-        return assert!(false);
+        panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
     assert_eq!(*actual_value, value);
@@ -519,7 +614,7 @@ fn expect_url() {
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(dependencies.is_empty());
-    assert_warning(&input, &warnings[0], "@import ;");
+    assert_warning(input, &warnings[0], "@import ;");
 }
 
 #[test]
@@ -770,8 +865,34 @@ fn css_modules_pseudo_7() {
     let input = "@charset \"UTF-8\";.a{}.b{}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
+    assert_charset_dependency(input, &dependencies[0], "UTF-8", "@charset \"UTF-8\";");
+    assert_local_class_dependency(input, &dependencies[1], ".a", false);
+    assert_local_class_dependency(input, &dependencies[2], ".b", false);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn css_modules_charset_in_string_and_comment() {
+    let input = ".a{content:'@charset \"UTF-8\";'}/*@charset \"UTF-8\";*/.b{}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn charset_at_rule() {
+    let input = "@charset \"UTF-8\";@charset 'iso-8859-1';";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_charset_dependency(input, &dependencies[0], "UTF-8", "@charset \"UTF-8\";");
+    assert_charset_dependency(
+        input,
+        &dependencies[1],
+        "iso-8859-1",
+        "@charset 'iso-8859-1';",
+    );
     assert_eq!(dependencies.len(), 2);
 }
 
@@ -1175,6 +1296,106 @@ fn css_modules_keyframes_4() {
 }
 
 #[test]
+fn css_modules_container() {
+    let input = indoc! {r#"
+        .card {
+            container-name: summary;
+            container: card / inline-size;
+        }
+        @container summary (min-width: 400px) {
+            .title {
+                color: red;
+            }
+        }
+        @container (width > 400px) {
+            .content {
+                color: blue;
+            }
+        }
+        @container card style(--responsive: true) {
+            .box {
+                color: green;
+            }
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".card", false);
+    assert_local_container_decl_dependency(input, &dependencies[1], "summary");
+    assert_local_container_decl_dependency(input, &dependencies[2], "card");
+    assert_local_container_dependency(input, &dependencies[3], "summary");
+    assert_local_class_dependency(input, &dependencies[4], ".title", false);
+    assert_local_class_dependency(input, &dependencies[5], ".content", false);
+    assert_local_container_dependency(input, &dependencies[6], "card");
+    assert_local_class_dependency(input, &dependencies[7], ".box", false);
+    assert_eq!(dependencies.len(), 8);
+}
+
+#[test]
+fn css_modules_function() {
+    let input = indoc! {r#"
+        @function --transparent(--color, --alpha) {
+            result: var(--color);
+        }
+        .box {
+            --base-color: #faa6ff;
+            background-color: --transparent(var(--base-color), 0.8);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_function_decl_dependency(input, &dependencies[0], "transparent");
+    assert_local_var_dependency(input, &dependencies[1], "color", None);
+    assert_local_class_dependency(input, &dependencies[2], ".box", false);
+    assert_local_var_decl_dependency(input, &dependencies[3], "base-color");
+    assert_local_function_dependency(input, &dependencies[4], "transparent");
+    assert_local_var_dependency(input, &dependencies[5], "base-color", None);
+    assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_function_explicit_local() {
+    let input = indoc! {r#"
+        @function :local(--transparent-local)(--color, --alpha) {
+            result: var(--color);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":local(");
+    assert_local_function_decl_dependency(input, &dependencies[1], "transparent-local");
+    assert_replace_dependency(input, &dependencies[2], "", ")");
+    assert_local_var_dependency(input, &dependencies[3], "color", None);
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn css_modules_grid() {
+    let input = indoc! {r#"
+        .layout {
+            grid-template-areas:
+                "header header"
+                "sidebar main";
+            grid-area: header;
+            grid-row: sidebar;
+            grid-template: "hero hero" auto / 1fr 1fr;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".layout", false);
+    assert_local_grid_decl_dependency(input, &dependencies[1], "header");
+    assert_local_grid_decl_dependency(input, &dependencies[2], "header");
+    assert_local_grid_decl_dependency(input, &dependencies[3], "sidebar");
+    assert_local_grid_decl_dependency(input, &dependencies[4], "main");
+    assert_local_grid_dependency(input, &dependencies[5], "header");
+    assert_local_grid_dependency(input, &dependencies[6], "sidebar");
+    assert_local_grid_decl_dependency(input, &dependencies[7], "hero");
+    assert_local_grid_decl_dependency(input, &dependencies[8], "hero");
+    assert_eq!(dependencies.len(), 9);
+}
+
+#[test]
 fn css_modules_at_rule_1() {
     let input = indoc! {r#"
         @layer framework.container {
@@ -1504,6 +1725,51 @@ fn css_modules_composes_8() {
 }
 
 #[test]
+fn css_modules_composes_after_value_import_from_node_modules() {
+    let input = indoc! {r#"
+        @value color-grey from "./node_modules/@localpackage/color.css";
+
+        .copyright {
+          color: color-grey;
+          composes: type-heading from "./node_modules/@localpackage/style.css";
+          margin: 0;
+          padding: 0;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(
+        input,
+        &dependencies[0],
+        "\"./node_modules/@localpackage/color.css\"",
+    );
+    assert_icss_import_value_dependency(input, &dependencies[1], "color-grey", "color-grey");
+    assert_icss_export_value_dependency(input, &dependencies[2], "color-grey", "color-grey");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        r#"@value color-grey from "./node_modules/@localpackage/color.css";"#,
+    );
+    assert_local_class_dependency(input, &dependencies[4], ".copyright", false);
+    assert_composes_dependency(
+        input,
+        &dependencies[5],
+        "copyright",
+        "type-heading",
+        Some("\"./node_modules/@localpackage/style.css\""),
+        r#"type-heading from "./node_modules/@localpackage/style.css""#,
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[6],
+        "",
+        r#"composes: type-heading from "./node_modules/@localpackage/style.css";"#,
+    );
+    assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
 fn icss_export_unexpected() {
     let input = ":export {\n/sl/ash;";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
@@ -1533,6 +1799,28 @@ fn icss_import() {
         ":import(\"./colors.css\") { i__blue: blue; i__red: red; }",
     );
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn icss_import_with_comments_around_path() {
+    let input = indoc! {r#"
+        :import(   /* test */   "./export.modules.css"   /* test */   ) {
+            IMPORTED_NAME: primary-color;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(input, &dependencies[0], "\"./export.modules.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[1], "IMPORTED_NAME", "primary-color");
+    assert_replace_dependency(
+        input,
+        &dependencies[2],
+        "",
+        indoc! {r#":import(   /* test */   "./export.modules.css"   /* test */   ) {
+    IMPORTED_NAME: primary-color;
+}"#},
+    );
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]
@@ -1588,4 +1876,90 @@ fn icss_export() {
         ":export { white space: a b c; }",
     );
     assert_eq!(dependencies.len(), 11);
+}
+
+#[test]
+fn value_at_rule_export() {
+    let input = indoc! {r#"
+        @value primary: red;
+        @value spacing calc(10px * 2);
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_export_value_dependency(input, &dependencies[0], "primary", "red");
+    assert_replace_dependency(input, &dependencies[1], "", "@value primary: red;");
+    assert_icss_export_value_dependency(input, &dependencies[2], "spacing", "calc(10px * 2)");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        "@value spacing calc(10px * 2);",
+    );
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn value_at_rule_import() {
+    let input = indoc! {r#"
+        @value red from "./colors.css";
+        @value blue as sky, green from "./palette.css";
+        @value (black as ink, white) from "./theme.css";
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(input, &dependencies[0], "\"./colors.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[1], "red", "red");
+    assert_icss_export_value_dependency(input, &dependencies[2], "red", "red");
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        "@value red from \"./colors.css\";",
+    );
+
+    assert_icss_import_from_dependency(input, &dependencies[4], "\"./palette.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[5], "sky", "blue");
+    assert_icss_export_value_dependency(input, &dependencies[6], "sky", "sky");
+    assert_icss_import_value_dependency(input, &dependencies[7], "green", "green");
+    assert_icss_export_value_dependency(input, &dependencies[8], "green", "green");
+    assert_replace_dependency(
+        input,
+        &dependencies[9],
+        "",
+        "@value blue as sky, green from \"./palette.css\";",
+    );
+
+    assert_icss_import_from_dependency(input, &dependencies[10], "\"./theme.css\"");
+    assert_icss_import_value_dependency(input, &dependencies[11], "ink", "black");
+    assert_icss_export_value_dependency(input, &dependencies[12], "ink", "ink");
+    assert_icss_import_value_dependency(input, &dependencies[13], "white", "white");
+    assert_icss_export_value_dependency(input, &dependencies[14], "white", "white");
+    assert_replace_dependency(
+        input,
+        &dependencies[15],
+        "",
+        "@value (black as ink, white) from \"./theme.css\";",
+    );
+    assert_eq!(dependencies.len(), 16);
+}
+
+#[test]
+fn weird_composes() {
+    let input = indoc! {r#"
+        .from { color: red; }
+        :local(.exportName31) {
+	        composes: from from;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[1], ".exportName31", true);
+    assert_composes_dependency(
+        input,
+        &dependencies[3],
+        "exportName31",
+        "from from",
+        None,
+        "from from",
+    );
 }

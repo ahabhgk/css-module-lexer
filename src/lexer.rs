@@ -614,6 +614,7 @@ pub fn start_number(c1: char, c2: char, c3: char) -> bool {
 mod tests {
     use super::*;
     use indoc::indoc;
+    use std::fmt::Write as _;
 
     fn assert_lexer_state<I: Iterator<Item = char>>(
         lexer: &Lexer<'_, I>,
@@ -645,8 +646,10 @@ mod tests {
         pub fn snapshot(&self) -> String {
             self.results
                 .iter()
-                .map(|(k, v)| format!("{k}: {v}\n"))
-                .collect::<String>()
+                .fold(String::new(), |mut output, (key, value)| {
+                    writeln!(output, "{key}: {value}").expect("writing to String cannot fail");
+                    output
+                })
         }
     }
 
