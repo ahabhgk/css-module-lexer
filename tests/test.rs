@@ -811,6 +811,21 @@ fn css_modules_pseudo_2() {
 }
 
 #[test]
+fn css_modules_uppercase_pseudo_does_not_leave_balanced_stack_dirty() {
+    let input = indoc! {r#"
+        :GLOBAL .globalUpperCase :LOCAL .localUpperCase {
+            color: yellow;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":GLOBAL ");
+    assert_replace_dependency(input, &dependencies[1], "", ":LOCAL ");
+    assert_local_class_dependency(input, &dependencies[2], ".localUpperCase", true);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
 fn css_modules_pseudo_3() {
     let input = ".a:not(:global .b:not(.c:not(:global .d) .e) .f).g {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
@@ -894,6 +909,94 @@ fn charset_at_rule() {
         "@charset 'iso-8859-1';",
     );
     assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn pure_mode_ignore_comment_suppresses_next_rule() {
+    let input = indoc! {r#"
+        /* cssmodules-pure-ignore */
+        :global(.ignored) {
+            color: pink;
+        }
+
+        .normal {
+            color: black;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":global(");
+    assert_replace_dependency(input, &dependencies[1], "", ")");
+    assert_local_class_dependency(input, &dependencies[2], ".normal", false);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn pure_mode_ignore_comment_does_not_affect_following_rule() {
+    let input = indoc! {r#"
+        /* cssmodules-pure-ignore */
+        :global(.ignored) {
+            color: pink;
+        }
+
+        :global(.not-ignored) {
+            color: red;
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert_eq!(warnings.len(), 1);
+    assert!(Lexer::slice_range(input, warnings[0].range())
+        .unwrap()
+        .contains(":global(.not-ignored)"));
+}
+
+#[test]
+fn pure_mode_ignore_comment_suppresses_nested_rule() {
+    let input = indoc! {r#"
+        .foo {
+            /* cssmodules-pure-ignore */
+            :global(.bar) {
+                color: blue;
+            }
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn pure_mode_nested_ignore_comment_does_not_suppress_outer_rule() {
+    let input = indoc! {r#"
+        :global(.foo) {
+            /* cssmodules-pure-ignore */
+            :global(.bar) {
+                color: blue;
+            }
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert_eq!(warnings.len(), 1);
+    assert!(Lexer::slice_range(input, warnings[0].range())
+        .unwrap()
+        .contains(":global(.foo)"));
+}
+
+#[test]
+fn pure_mode_no_check_comment_suppresses_file() {
+    let input = indoc! {r#"
+        /* file leading comment */
+        /* cssmodules-pure-no-check - needed for third party integration */
+
+        body {
+            color: red;
+        }
+
+        :global(.global-only) {
+            color: green;
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
 }
 
 #[test]

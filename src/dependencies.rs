@@ -229,10 +229,10 @@ impl BalancedItemKind {
             "layer(" => Self::Layer,
             "supports(" => Self::Supports,
             "palette-mix(" => Self::PaletteMix,
-            ":local(" => Self::LocalFn,
-            ":global(" => Self::GlobalFn,
-            ":local" => Self::LocalClass,
-            ":global" => Self::GlobalClass,
+            _ if name.eq_ignore_ascii_case(":local(") => Self::LocalFn,
+            _ if name.eq_ignore_ascii_case(":global(") => Self::GlobalFn,
+            _ if name.eq_ignore_ascii_case(":local") => Self::LocalClass,
+            _ if name.eq_ignore_ascii_case(":global") => Self::GlobalClass,
             _ => Self::Other,
         }
     }
@@ -287,6 +287,18 @@ fn trim_slice(input: &str) -> &str {
         end -= 1;
     }
     &input[start..end]
+}
+
+fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
+    let input = trim_slice(input);
+    let Some(rest) = input.strip_prefix(keyword) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| is_css_space_byte(*byte))
 }
 
 fn mask_css_comments(input: &str) -> String {
@@ -516,6 +528,9 @@ pub struct ModeData<'s> {
     property: Mode,
     resulting_global: Option<Pos>,
     pure_global: Option<Pos>,
+    pure_no_check: bool,
+    pure_ignore_pending: bool,
+    pure_ignored_block_nesting_level: Option<u32>,
     composes_local_classes: ComposesLocalClasses<'s>,
     inside_mode_function: u32,
     inside_mode_class: u32,
@@ -529,6 +544,9 @@ impl ModeData<'_> {
             property: default,
             resulting_global: None,
             pure_global: Some(0),
+            pure_no_check: false,
+            pure_ignore_pending: false,
+            pure_ignored_block_nesting_level: None,
             composes_local_classes: ComposesLocalClasses::default(),
             inside_mode_function: 0,
             inside_mode_class: 0,
@@ -537,6 +555,46 @@ impl ModeData<'_> {
 
     pub fn is_pure_mode(&self) -> bool {
         matches!(self.default, Mode::Pure)
+    }
+
+    pub fn mark_pure_ignore(&mut self) {
+        if self.is_pure_mode() {
+            self.pure_ignore_pending = true;
+        }
+    }
+
+    pub fn mark_pure_no_check(&mut self) {
+        if self.is_pure_mode() {
+            self.pure_no_check = true;
+        }
+    }
+
+    pub fn is_pure_check_disabled(&self) -> bool {
+        self.pure_no_check
+            || self.pure_ignore_pending
+            || self.pure_ignored_block_nesting_level.is_some()
+    }
+
+    pub fn enter_block(&mut self, block_nesting_level: u32) {
+        if self.pure_ignore_pending {
+            self.pure_ignore_pending = false;
+            if self.pure_ignored_block_nesting_level.is_none() {
+                self.pure_ignored_block_nesting_level = Some(block_nesting_level);
+            }
+        }
+    }
+
+    pub fn clear_pure_ignore_pending(&mut self) {
+        self.pure_ignore_pending = false;
+    }
+
+    pub fn exit_block(&mut self, block_nesting_level: u32) {
+        if self
+            .pure_ignored_block_nesting_level
+            .is_some_and(|level| block_nesting_level < level)
+        {
+            self.pure_ignored_block_nesting_level = None;
+        }
     }
 
     pub fn is_current_local_mode(&self) -> bool {
@@ -1179,8 +1237,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
     }
 
-    fn is_next_nested_syntax(&self, lexer: &mut Lexer) -> Option<bool> {
-        lexer.consume_white_space_and_comments()?;
+    fn is_next_nested_syntax(&mut self, lexer: &mut Lexer<'s>) -> Option<bool> {
+        lexer.consume_white_space_and_comments_with_visitor(self)?;
         let c = lexer.cur()?;
         if c == C_RIGHT_CURLY {
             return Some(false);
@@ -1724,8 +1782,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let end = lexer.cur_pos()?;
             let pseudo = lexer.slice(start, end)?;
             let mode_data = self.mode_data.as_ref().unwrap();
-            if mode_data.is_pure_mode() && pseudo.eq_ignore_ascii_case(":global(")
-                || pseudo.eq_ignore_ascii_case(":global")
+            if mode_data.is_pure_mode()
+                && !mode_data.is_pure_check_disabled()
+                && (pseudo.eq_ignore_ascii_case(":global(")
+                    || pseudo.eq_ignore_ascii_case(":global"))
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -1882,8 +1942,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let end = lexer.cur_pos()?;
             let pseudo = lexer.slice(start, end)?;
             let mode_data = self.mode_data.as_ref().unwrap();
-            if mode_data.is_pure_mode() && pseudo.eq_ignore_ascii_case(":global(")
-                || pseudo.eq_ignore_ascii_case(":global")
+            if mode_data.is_pure_mode()
+                && !mode_data.is_pure_check_disabled()
+                && (pseudo.eq_ignore_ascii_case(":global(")
+                    || pseudo.eq_ignore_ascii_case(":global"))
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -2136,6 +2198,26 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 }
 
 impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDependencies<'s, D, W> {
+    fn comment(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        let Some(mode_data) = &mut self.mode_data else {
+            return Some(());
+        };
+        if !mode_data.is_pure_mode() || end < start + 4 {
+            return Some(());
+        }
+
+        let content = lexer.slice(start + 2, end - 2)?;
+        if is_css_modules_magic_comment(content, "cssmodules-pure-ignore") {
+            mode_data.mark_pure_ignore();
+        } else if matches!(self.scope, Scope::TopLevel)
+            && self.block_nesting_level == 0
+            && is_css_modules_magic_comment(content, "cssmodules-pure-no-check")
+        {
+            mode_data.mark_pure_no_check();
+        }
+        Some(())
+    }
+
     fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
         Some(self.is_next_rule_prelude)
     }
@@ -2777,7 +2859,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, _: Pos) -> Option<()> {
+    fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
@@ -2800,9 +2882,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             _ => return Some(()),
         }
+        let (pure_check_disabled_for_selector, enter_pure_ignored_block) =
+            if let Some(mode_data) = &self.mode_data {
+                (
+                    mode_data.is_pure_check_disabled(),
+                    mode_data.pure_ignore_pending,
+                )
+            } else {
+                (false, false)
+            };
         self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
         if let Some(mode_data) = &mut self.mode_data {
-            if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
+            if mode_data.is_pure_mode()
+                && !pure_check_disabled_for_selector
+                && mode_data.pure_global.is_some()
+            {
                 let pure_global_start = mode_data.pure_global.unwrap();
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(pure_global_start, start),
@@ -2810,6 +2904,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         message: "Selector is not pure (pure selectors must contain at least one local class or id)",
                     }
                 });
+            }
+
+            if enter_pure_ignored_block {
+                mode_data.enter_block(self.block_nesting_level);
             }
 
             if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
@@ -2867,6 +2965,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
             if self.block_nesting_level > 0 {
                 self.block_nesting_level -= 1;
+            }
+            if let Some(mode_data) = &mut self.mode_data {
+                mode_data.clear_pure_ignore_pending();
+                mode_data.exit_block(self.block_nesting_level);
             }
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
@@ -2986,7 +3088,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             return Some(());
         };
 
-        if mode_data.is_pure_mode() && mode_data.pure_global.is_some() {
+        if mode_data.is_pure_mode()
+            && !mode_data.is_pure_check_disabled()
+            && mode_data.pure_global.is_some()
+        {
             let pure_global_start = mode_data.pure_global.unwrap();
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(pure_global_start, start),
