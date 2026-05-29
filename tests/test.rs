@@ -402,6 +402,23 @@ fn assert_icss_export_value_dependency(
     assert_eq!(*actual_value, value);
 }
 
+fn assert_icss_symbol_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    range_content: &str,
+) {
+    let Dependency::ICSSSymbol {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
 #[test]
 fn empty() {
     let (dependencies, warnings) = collect_dependencies("", Mode::Css);
@@ -1855,9 +1872,10 @@ fn css_modules_composes_after_value_import_from_node_modules() {
         r#"@value color-grey from "./node_modules/@localpackage/color.css";"#,
     );
     assert_local_class_dependency(input, &dependencies[4], ".copyright", false);
+    assert_icss_symbol_dependency(input, &dependencies[5], "color-grey", "color-grey");
     assert_composes_dependency(
         input,
-        &dependencies[5],
+        &dependencies[6],
         "copyright",
         "type-heading",
         Some("\"./node_modules/@localpackage/style.css\""),
@@ -1865,11 +1883,11 @@ fn css_modules_composes_after_value_import_from_node_modules() {
     );
     assert_replace_dependency(
         input,
-        &dependencies[6],
+        &dependencies[7],
         "",
         r#"composes: type-heading from "./node_modules/@localpackage/style.css";"#,
     );
-    assert_eq!(dependencies.len(), 7);
+    assert_eq!(dependencies.len(), 8);
 }
 
 #[test]
@@ -1986,6 +2004,10 @@ fn value_at_rule_export() {
     let input = indoc! {r#"
         @value primary: red;
         @value spacing calc(10px * 2);
+        .button {
+          color: primary;
+          margin: spacing;
+        }
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
@@ -1998,7 +2020,10 @@ fn value_at_rule_export() {
         "",
         "@value spacing calc(10px * 2);",
     );
-    assert_eq!(dependencies.len(), 4);
+    assert_local_class_dependency(input, &dependencies[4], ".button", false);
+    assert_icss_symbol_dependency(input, &dependencies[5], "primary", "primary");
+    assert_icss_symbol_dependency(input, &dependencies[6], "spacing", "spacing");
+    assert_eq!(dependencies.len(), 7);
 }
 
 #[test]
@@ -2007,6 +2032,13 @@ fn value_at_rule_import() {
         @value red from "./colors.css";
         @value blue as sky, green from "./palette.css";
         @value (black as ink, white) from "./theme.css";
+        .button {
+          color: red;
+          background: sky;
+          border-color: green;
+          outline-color: ink;
+          text-decoration-color: white;
+        }
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
@@ -2043,7 +2075,13 @@ fn value_at_rule_import() {
         "",
         "@value (black as ink, white) from \"./theme.css\";",
     );
-    assert_eq!(dependencies.len(), 16);
+    assert_local_class_dependency(input, &dependencies[16], ".button", false);
+    assert_icss_symbol_dependency(input, &dependencies[17], "red", "red");
+    assert_icss_symbol_dependency(input, &dependencies[18], "sky", "sky");
+    assert_icss_symbol_dependency(input, &dependencies[19], "green", "green");
+    assert_icss_symbol_dependency(input, &dependencies[20], "ink", "ink");
+    assert_icss_symbol_dependency(input, &dependencies[21], "white", "white");
+    assert_eq!(dependencies.len(), 22);
 }
 
 #[test]

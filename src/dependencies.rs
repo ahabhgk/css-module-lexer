@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Display;
 
 use smallvec::smallvec;
@@ -1111,6 +1112,10 @@ pub enum Dependency<'s> {
         prop: &'s str,
         value: &'s str,
     },
+    ICSSSymbol {
+        name: &'s str,
+        range: Range,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -1210,6 +1215,7 @@ pub struct LexDependencies<'s, D, W> {
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
+    icss_symbols: HashSet<&'s str>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -1232,6 +1238,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             in_font_palette_property: None,
             in_container_property: None,
             in_grid_property: None,
+            icss_symbols: Default::default(),
             handle_dependency,
             handle_warning,
         }
@@ -1488,6 +1495,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         .slice(value_start, value_end)?
                         .trim_end_matches(is_white_space),
                 });
+            self.icss_symbols.insert(
+                lexer
+                    .slice(prop_start, prop_end)?
+                    .trim_end_matches(is_white_space),
+            );
         }
         lexer.consume();
         Some(())
@@ -1589,6 +1601,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                                 prop: item.local_name,
                                 value: item.import_name,
                             });
+                        self.icss_symbols.insert(item.local_name);
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSExportValue {
                                 prop: item.local_name,
@@ -1611,6 +1624,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                             prop: local_name,
                             value,
                         });
+                    self.icss_symbols.insert(local_name);
                 }
             }
         }
@@ -1662,6 +1676,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         .slice(value_start, value_end)?
                         .trim_end_matches(is_white_space),
                 });
+            self.icss_symbols.insert(
+                lexer
+                    .slice(prop_start, prop_end)?
+                    .trim_end_matches(is_white_space),
+            );
         }
         lexer.consume();
         Some(())
@@ -2638,6 +2657,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 };
 
                 let ident = lexer.slice(start, end)?;
+                if self.icss_symbols.contains(ident) {
+                    self.handle_dependency
+                        .handle_dependency(Dependency::ICSSSymbol {
+                            name: ident,
+                            range: Range::new(start, end),
+                        });
+                    return Some(());
+                }
                 if mode_data.is_current_local_mode()
                     && self
                         .balanced
