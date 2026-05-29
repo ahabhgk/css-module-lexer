@@ -747,6 +747,7 @@ fn import_attributes() {
         @import url("style.css") print;
         @import url("style.css") layer supports() /* comments */;
         @import url("style.css") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);
+        @import URL("style.css") LAYER(DEFAULT) SUPPORTS(DISPLAY: FLEX) SCREEN AND (MIN-WIDTH: 400PX);
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
@@ -794,6 +795,15 @@ fn import_attributes() {
         Some("not (display: grid) and (display: flex)"),
         Some(" print, /* comments */ screen and (orientation: portrait)"),
         "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);",
+    );
+    assert_import_dependency(
+        input,
+        &dependencies[5],
+        "style.css",
+        Some("DEFAULT"),
+        Some("DISPLAY: FLEX"),
+        Some(" SCREEN AND (MIN-WIDTH: 400PX)"),
+        "@import URL(\"style.css\") LAYER(DEFAULT) SUPPORTS(DISPLAY: FLEX) SCREEN AND (MIN-WIDTH: 400PX);",
     );
 }
 
