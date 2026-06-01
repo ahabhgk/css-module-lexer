@@ -52,6 +52,9 @@ pub const C_GREATER_THAN_SIGN: char = '>';
 pub type Pos = u32;
 
 pub trait Visitor<'s> {
+    fn comment(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
+        Some(())
+    }
     fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn url(
@@ -172,7 +175,7 @@ impl<'s> Lexer<'s> {
     fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
         self.consume();
         while self.cur().is_some() {
-            self.consume_comments()?;
+            self.consume_comments_with_visitor(visitor)?;
             // https://drafts.csswg.org/css-syntax/#consume-token
             match self.cur()? {
                 c if is_white_space(c) => self.consume_space()?,
@@ -197,6 +200,40 @@ impl<'s> Lexer<'s> {
                 c if is_digit(c) => self.consume_numeric_token()?,
                 c if is_ident_start(c) => self.consume_ident_like(visitor)?,
                 _ => self.consume_delim(),
+            }
+        }
+        Some(())
+    }
+
+    pub fn consume_comments_with_visitor<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
+        if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
+            let start = self.cur_pos()?;
+            self.consume();
+            loop {
+                self.consume();
+                let c = self.cur()?;
+                if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
+                    self.consume();
+                    self.consume();
+                    break;
+                }
+            }
+            let end = self.cur_pos()?;
+            visitor.comment(self, start, end)?;
+        }
+        Some(())
+    }
+
+    pub fn consume_white_space_and_comments_with_visitor<T: Visitor<'s>>(
+        &mut self,
+        visitor: &mut T,
+    ) -> Option<()> {
+        loop {
+            self.consume_comments_with_visitor(visitor)?;
+            if is_white_space(self.cur()?) {
+                self.consume_space()?;
+            } else {
+                break;
             }
         }
         Some(())

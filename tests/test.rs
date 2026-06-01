@@ -402,6 +402,23 @@ fn assert_icss_export_value_dependency(
     assert_eq!(*actual_value, value);
 }
 
+fn assert_icss_symbol_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    range_content: &str,
+) {
+    let Dependency::ICSSSymbol {
+        name: actual_name,
+        range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
 #[test]
 fn empty() {
     let (dependencies, warnings) = collect_dependencies("", Mode::Css);
@@ -730,6 +747,7 @@ fn import_attributes() {
         @import url("style.css") print;
         @import url("style.css") layer supports() /* comments */;
         @import url("style.css") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);
+        @import URL("style.css") LAYER(DEFAULT) SUPPORTS(DISPLAY: FLEX) SCREEN AND (MIN-WIDTH: 400PX);
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert!(warnings.is_empty());
@@ -778,6 +796,15 @@ fn import_attributes() {
         Some(" print, /* comments */ screen and (orientation: portrait)"),
         "@import url(\"style.css\") layer(default) supports(not (display: grid) and (display: flex)) print, /* comments */ screen and (orientation: portrait);",
     );
+    assert_import_dependency(
+        input,
+        &dependencies[5],
+        "style.css",
+        Some("DEFAULT"),
+        Some("DISPLAY: FLEX"),
+        Some(" SCREEN AND (MIN-WIDTH: 400PX)"),
+        "@import URL(\"style.css\") LAYER(DEFAULT) SUPPORTS(DISPLAY: FLEX) SCREEN AND (MIN-WIDTH: 400PX);",
+    );
 }
 
 #[test]
@@ -808,6 +835,21 @@ fn css_modules_pseudo_2() {
     assert_local_class_dependency(input, &dependencies[4], ".d", false);
     assert_local_id_dependency(input, &dependencies[5], "#e", false);
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_uppercase_pseudo_does_not_leave_balanced_stack_dirty() {
+    let input = indoc! {r#"
+        :GLOBAL .globalUpperCase :LOCAL .localUpperCase {
+            color: yellow;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":GLOBAL ");
+    assert_replace_dependency(input, &dependencies[1], "", ":LOCAL ");
+    assert_local_class_dependency(input, &dependencies[2], ".localUpperCase", true);
+    assert_eq!(dependencies.len(), 3);
 }
 
 #[test]
@@ -894,6 +936,94 @@ fn charset_at_rule() {
         "@charset 'iso-8859-1';",
     );
     assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn pure_mode_ignore_comment_suppresses_next_rule() {
+    let input = indoc! {r#"
+        /* cssmodules-pure-ignore */
+        :global(.ignored) {
+            color: pink;
+        }
+
+        .normal {
+            color: black;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":global(");
+    assert_replace_dependency(input, &dependencies[1], "", ")");
+    assert_local_class_dependency(input, &dependencies[2], ".normal", false);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn pure_mode_ignore_comment_does_not_affect_following_rule() {
+    let input = indoc! {r#"
+        /* cssmodules-pure-ignore */
+        :global(.ignored) {
+            color: pink;
+        }
+
+        :global(.not-ignored) {
+            color: red;
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert_eq!(warnings.len(), 1);
+    assert!(Lexer::slice_range(input, warnings[0].range())
+        .unwrap()
+        .contains(":global(.not-ignored)"));
+}
+
+#[test]
+fn pure_mode_ignore_comment_suppresses_nested_rule() {
+    let input = indoc! {r#"
+        .foo {
+            /* cssmodules-pure-ignore */
+            :global(.bar) {
+                color: blue;
+            }
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn pure_mode_nested_ignore_comment_does_not_suppress_outer_rule() {
+    let input = indoc! {r#"
+        :global(.foo) {
+            /* cssmodules-pure-ignore */
+            :global(.bar) {
+                color: blue;
+            }
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert_eq!(warnings.len(), 1);
+    assert!(Lexer::slice_range(input, warnings[0].range())
+        .unwrap()
+        .contains(":global(.foo)"));
+}
+
+#[test]
+fn pure_mode_no_check_comment_suppresses_file() {
+    let input = indoc! {r#"
+        /* file leading comment */
+        /* cssmodules-pure-no-check - needed for third party integration */
+
+        body {
+            color: red;
+        }
+
+        :global(.global-only) {
+            color: green;
+        }
+    "#};
+    let (_, warnings) = collect_dependencies(input, Mode::Pure);
+    assert!(warnings.is_empty());
 }
 
 #[test]
@@ -1752,9 +1882,10 @@ fn css_modules_composes_after_value_import_from_node_modules() {
         r#"@value color-grey from "./node_modules/@localpackage/color.css";"#,
     );
     assert_local_class_dependency(input, &dependencies[4], ".copyright", false);
+    assert_icss_symbol_dependency(input, &dependencies[5], "color-grey", "color-grey");
     assert_composes_dependency(
         input,
-        &dependencies[5],
+        &dependencies[6],
         "copyright",
         "type-heading",
         Some("\"./node_modules/@localpackage/style.css\""),
@@ -1762,11 +1893,11 @@ fn css_modules_composes_after_value_import_from_node_modules() {
     );
     assert_replace_dependency(
         input,
-        &dependencies[6],
+        &dependencies[7],
         "",
         r#"composes: type-heading from "./node_modules/@localpackage/style.css";"#,
     );
-    assert_eq!(dependencies.len(), 7);
+    assert_eq!(dependencies.len(), 8);
 }
 
 #[test]
@@ -1883,6 +2014,10 @@ fn value_at_rule_export() {
     let input = indoc! {r#"
         @value primary: red;
         @value spacing calc(10px * 2);
+        .button {
+          color: primary;
+          margin: spacing;
+        }
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
@@ -1895,7 +2030,10 @@ fn value_at_rule_export() {
         "",
         "@value spacing calc(10px * 2);",
     );
-    assert_eq!(dependencies.len(), 4);
+    assert_local_class_dependency(input, &dependencies[4], ".button", false);
+    assert_icss_symbol_dependency(input, &dependencies[5], "primary", "primary");
+    assert_icss_symbol_dependency(input, &dependencies[6], "spacing", "spacing");
+    assert_eq!(dependencies.len(), 7);
 }
 
 #[test]
@@ -1904,6 +2042,13 @@ fn value_at_rule_import() {
         @value red from "./colors.css";
         @value blue as sky, green from "./palette.css";
         @value (black as ink, white) from "./theme.css";
+        .button {
+          color: red;
+          background: sky;
+          border-color: green;
+          outline-color: ink;
+          text-decoration-color: white;
+        }
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
@@ -1940,7 +2085,13 @@ fn value_at_rule_import() {
         "",
         "@value (black as ink, white) from \"./theme.css\";",
     );
-    assert_eq!(dependencies.len(), 16);
+    assert_local_class_dependency(input, &dependencies[16], ".button", false);
+    assert_icss_symbol_dependency(input, &dependencies[17], "red", "red");
+    assert_icss_symbol_dependency(input, &dependencies[18], "sky", "sky");
+    assert_icss_symbol_dependency(input, &dependencies[19], "green", "green");
+    assert_icss_symbol_dependency(input, &dependencies[20], "ink", "ink");
+    assert_icss_symbol_dependency(input, &dependencies[21], "white", "white");
+    assert_eq!(dependencies.len(), 22);
 }
 
 #[test]
