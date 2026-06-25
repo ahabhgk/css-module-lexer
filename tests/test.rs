@@ -62,6 +62,29 @@ fn assert_import_dependency(
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
+fn assert_icss_import_url_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    range_content: &str,
+    name_range_content: &str,
+) {
+    let Dependency::ICSSImportUrl {
+        name: actual_name,
+        range,
+        name_range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(
+        Lexer::slice_range(input, name_range).unwrap(),
+        name_range_content
+    );
+}
+
 fn assert_local_class_dependency(input: &str, dependency: &Dependency, name: &str, explicit: bool) {
     let Dependency::LocalClass {
         name: actual_name,
@@ -515,6 +538,58 @@ fn duplicate_url() {
         &warnings[3],
         "@import url(\"./a.css\") url(\"./a.css\"",
     );
+}
+
+#[test]
+fn icss_import_url_value() {
+    let input = "@import importPath;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_icss_import_url_dependency(
+        input,
+        &dependencies[0],
+        "importPath",
+        "@import importPath;",
+        "importPath",
+    );
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn invalid_icss_import_url_value() {
+    let input = "@import importPath screen;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], "@import importPath screen;");
+}
+
+#[test]
+fn invalid_icss_import_url_value_with_function() {
+    let input = "@import importPath supports(display: grid;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(
+        input,
+        &warnings[0],
+        "@import importPath supports(display: grid;",
+    );
+}
+
+#[test]
+fn import_url_function_is_not_icss_import_url_value() {
+    let input = "@import url(./style.css);";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "./style.css",
+        None,
+        None,
+        None,
+        "@import url(./style.css);",
+    );
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]

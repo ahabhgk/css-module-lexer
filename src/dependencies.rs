@@ -39,6 +39,7 @@ enum Scope<'s> {
 #[derive(Debug)]
 struct ImportData<'s> {
     start: Pos,
+    prelude: ImportPrelude<'s>,
     url: Option<&'s str>,
     url_range: Option<Range>,
     supports: ImportDataSupports<'s>,
@@ -49,6 +50,7 @@ impl ImportData<'_> {
     pub fn new(start: Pos) -> Self {
         Self {
             start,
+            prelude: ImportPrelude::default(),
             url: None,
             url_range: None,
             supports: ImportDataSupports::None,
@@ -73,6 +75,35 @@ impl ImportData<'_> {
         };
         Some(range)
     }
+}
+
+#[derive(Debug, Default)]
+struct ImportPrelude<'s>(SmallVec<[ImportPreludeNode<'s>; 2]>);
+
+impl<'s> ImportPrelude<'s> {
+    pub fn push(&mut self, node: ImportPreludeNode<'s>) {
+        self.0.push(node);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn icss_import_url(&self) -> Option<(&'s str, &Range)> {
+        let [ImportPreludeNode::IcssUrlCandidate { name, range }] = self.0.as_slice() else {
+            return None;
+        };
+        Some((name, range))
+    }
+}
+
+#[derive(Debug)]
+enum ImportPreludeNode<'s> {
+    IcssUrlCandidate { name: &'s str, range: Range },
+    Url,
+    Layer,
+    Supports,
+    Other,
 }
 
 #[derive(Debug)]
@@ -273,6 +304,96 @@ struct ValueAtRuleImportItem<'s> {
     import_name: &'s str,
 }
 
+#[derive(Debug, Default)]
+struct ValueAtRulePrelude<'s> {
+    nodes: SmallVec<[ValueAtRuleNode<'s>; 8]>,
+}
+
+impl<'s> ValueAtRulePrelude<'s> {
+    pub fn push(&mut self, node: ValueAtRuleNode<'s>) {
+        self.nodes.push(node);
+    }
+
+    pub fn parse(&self, lexer: &Lexer<'s>, range: Range) -> Option<ValueAtRule<'s>> {
+        let nodes = self.nodes.as_slice();
+        if let Some(from_index) = self.from_index() {
+            let from = nodes.get(from_index + 1)?.value;
+            let (item_nodes, item_depth) =
+                value_at_rule_strip_wrapping_parens(&nodes[..from_index], 0);
+            let items = value_at_rule_split_items(item_nodes, item_depth)
+                .into_iter()
+                .filter_map(|item| value_at_rule_import_item(lexer, item, item_depth))
+                .collect();
+            return Some(ValueAtRule::Import { from, items });
+        }
+
+        if let Some(index) = nodes
+            .iter()
+            .position(|node| node.depth == 0 && matches!(node.kind, ValueAtRuleNodeKind::Colon))
+        {
+            let value_start = nodes
+                .get(index + 1)
+                .map(|node| node.range.start)
+                .unwrap_or(range.end);
+            return Some(ValueAtRule::Value {
+                local_name: value_at_rule_slice_nodes(lexer, &nodes[..index])?,
+                value: value_at_rule_slice_range(lexer, value_start, range.end)?,
+            });
+        }
+
+        let Some(first) = nodes.first() else {
+            return Some(ValueAtRule::Value {
+                local_name: "",
+                value: "",
+            });
+        };
+        Some(ValueAtRule::Value {
+            local_name: first.value,
+            value: value_at_rule_slice_range(lexer, first.range.end, range.end)?,
+        })
+    }
+
+    fn from_index(&self) -> Option<usize> {
+        let nodes = self.nodes.as_slice();
+        let from_index = nodes.iter().rposition(|node| {
+            node.depth == 0
+                && matches!(node.kind, ValueAtRuleNodeKind::Word)
+                && node.value.eq_ignore_ascii_case("from")
+        })?;
+        (from_index + 2 == nodes.len()).then_some(from_index)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ValueAtRuleNode<'s> {
+    kind: ValueAtRuleNodeKind,
+    value: &'s str,
+    range: Range,
+    depth: u32,
+}
+
+impl<'s> ValueAtRuleNode<'s> {
+    pub fn new(kind: ValueAtRuleNodeKind, value: &'s str, range: Range, depth: u32) -> Self {
+        Self {
+            kind,
+            value,
+            range,
+            depth,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ValueAtRuleNodeKind {
+    Word,
+    String,
+    Colon,
+    Comma,
+    LeftParen,
+    RightParen,
+    Other,
+}
+
 fn is_css_space_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
 }
@@ -302,188 +423,106 @@ fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
             .is_some_and(|byte| is_css_space_byte(*byte))
 }
 
-fn mask_css_comments(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut result = String::with_capacity(input.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            result.push(' ');
-            result.push(' ');
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                result.push(' ');
-                i += 1;
-            }
-            if i + 1 < bytes.len() {
-                result.push(' ');
-                result.push(' ');
-                i += 2;
-            }
-            continue;
-        }
-        result.push(bytes[i] as char);
-        i += 1;
+fn value_at_rule_strip_wrapping_parens<'a, 's>(
+    nodes: &'a [ValueAtRuleNode<'s>],
+    depth: u32,
+) -> (&'a [ValueAtRuleNode<'s>], u32) {
+    if matches!(
+        nodes.first().map(|node| node.kind),
+        Some(ValueAtRuleNodeKind::LeftParen)
+    ) && matches!(
+        nodes.last().map(|node| node.kind),
+        Some(ValueAtRuleNodeKind::RightParen)
+    ) && nodes.first().is_some_and(|node| node.depth == depth)
+        && nodes.last().is_some_and(|node| node.depth == depth)
+    {
+        (&nodes[1..nodes.len() - 1], depth + 1)
+    } else {
+        (nodes, depth)
     }
-    result
 }
 
-fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
-    if input.is_empty() {
-        return None;
-    }
-
-    let bytes = masked.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-
-    let token_start = if bytes[end - 1] == b'"' || bytes[end - 1] == b'\'' {
-        let quote = bytes[end - 1];
-        let mut start = end - 1;
-        while start > 0 {
-            start -= 1;
-            if bytes[start] == quote {
-                break;
-            }
-        }
-        start
-    } else {
-        let mut start = end;
-        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        start
-    };
-
-    let from = trim_slice(&input[token_start..end]);
-    let mut word_end = token_start;
-    while word_end > 0 && is_css_space_byte(bytes[word_end - 1]) {
-        word_end -= 1;
-    }
-    if word_end == 0 {
-        return None;
-    }
-    let mut word_start = word_end;
-    while word_start > 0 && !is_css_space_byte(bytes[word_start - 1]) {
-        word_start -= 1;
-    }
-    let word = &masked[word_start..word_end];
-    if !word.eq_ignore_ascii_case("from") {
-        return None;
-    }
-
-    Some((trim_slice(&input[..word_start]), from))
-}
-
-fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s str; 2]> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
-    let (input, masked) = if input.starts_with('(') && input.ends_with(')') && masked.len() >= 2 {
-        (&input[1..input.len() - 1], &masked[1..masked.len() - 1])
-    } else {
-        (input, masked)
-    };
-
+fn value_at_rule_split_items<'a, 's>(
+    nodes: &'a [ValueAtRuleNode<'s>],
+    depth: u32,
+) -> SmallVec<[&'a [ValueAtRuleNode<'s>]; 2]> {
     let mut result = SmallVec::new();
-    let bytes = masked.as_bytes();
     let mut start = 0usize;
-    let mut depth = 0u32;
-    let mut quote = None;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if let Some(current_quote) = quote {
-            if byte == current_quote {
-                quote = None;
+    for (index, node) in nodes.iter().enumerate() {
+        if node.depth == depth && matches!(node.kind, ValueAtRuleNodeKind::Comma) {
+            if start < index {
+                result.push(&nodes[start..index]);
             }
-        } else if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
-        } else if byte == b'(' {
-            depth += 1;
-        } else if byte == b')' && depth > 0 {
-            depth -= 1;
-        } else if byte == b',' && depth == 0 {
-            let item = trim_slice(&input[start..i]);
-            if !item.is_empty() {
-                result.push(item);
-            }
-            start = i + 1;
+            start = index + 1;
         }
-        i += 1;
     }
-    let item = trim_slice(&input[start..]);
-    if !item.is_empty() {
-        result.push(item);
+    if start < nodes.len() {
+        result.push(&nodes[start..]);
     }
     result
 }
 
-fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
-    let input = trim_slice(input);
-    if let Some(index) = input.find(':') {
-        return ValueAtRuleImportItem {
-            local_name: trim_slice(&input[..index]),
-            import_name: trim_slice(&input[index + 1..]),
-        };
+fn value_at_rule_import_item<'s>(
+    lexer: &Lexer<'s>,
+    nodes: &[ValueAtRuleNode<'s>],
+    depth: u32,
+) -> Option<ValueAtRuleImportItem<'s>> {
+    if nodes.is_empty() {
+        return None;
     }
-
-    let lower = input.to_ascii_lowercase();
-    if let Some(index) = lower.find(" as ") {
-        return ValueAtRuleImportItem {
-            local_name: trim_slice(&input[index + 4..]),
-            import_name: trim_slice(&input[..index]),
-        };
+    if let Some(index) = nodes
+        .iter()
+        .position(|node| node.depth == depth && matches!(node.kind, ValueAtRuleNodeKind::Colon))
+    {
+        return Some(ValueAtRuleImportItem {
+            local_name: value_at_rule_slice_nodes(lexer, &nodes[..index])?,
+            import_name: value_at_rule_slice_nodes(lexer, &nodes[index + 1..])?,
+        });
     }
-
-    ValueAtRuleImportItem {
-        local_name: input,
-        import_name: input,
+    if let Some(index) = nodes.iter().position(|node| {
+        node.depth == depth
+            && matches!(node.kind, ValueAtRuleNodeKind::Word)
+            && node.value.eq_ignore_ascii_case("as")
+    }) {
+        return Some(ValueAtRuleImportItem {
+            local_name: value_at_rule_slice_nodes(lexer, &nodes[index + 1..])?,
+            import_name: value_at_rule_slice_nodes(lexer, &nodes[..index])?,
+        });
     }
+    let value = value_at_rule_slice_nodes(lexer, nodes)?;
+    Some(ValueAtRuleImportItem {
+        local_name: value,
+        import_name: value,
+    })
 }
 
-fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
-    let masked = mask_css_comments(input);
-    if let Some((before_from, from)) = split_value_at_rule_from(input, &masked) {
-        let masked_before_from = &masked[..before_from.len()];
-        let items = split_value_at_rule_items(before_from, masked_before_from)
-            .into_iter()
-            .map(parse_value_at_rule_import_item)
-            .collect();
-        return ValueAtRule::Import { from, items };
-    }
+fn value_at_rule_slice_nodes<'s>(
+    lexer: &Lexer<'s>,
+    nodes: &[ValueAtRuleNode<'s>],
+) -> Option<&'s str> {
+    let start = nodes.first()?.range.start;
+    let end = nodes.last()?.range.end;
+    value_at_rule_slice_range(lexer, start, end)
+}
 
-    let input = trim_slice(input);
-    let masked = trim_slice(&masked);
-    if let Some(index) = masked.find(':') {
-        return ValueAtRule::Value {
-            local_name: trim_slice(&input[..index]),
-            value: trim_slice(&input[index + 1..]),
-        };
-    }
-
-    let bytes = masked.as_bytes();
-    let mut split = bytes.len();
-    for (index, byte) in bytes.iter().enumerate() {
-        if is_css_space_byte(*byte) {
-            split = index;
+fn value_at_rule_slice_range<'s>(lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
+    let mut start = start;
+    let mut end = end;
+    let input = lexer.slice(start, end)?;
+    for c in input.chars() {
+        if !is_white_space(c) {
             break;
         }
+        start += c.len_utf8() as Pos;
     }
-    let mut value_start = split;
-    while value_start < bytes.len() && is_css_space_byte(bytes[value_start]) {
-        value_start += 1;
+    let input = lexer.slice(start, end)?;
+    for c in input.chars().rev() {
+        if !is_white_space(c) {
+            break;
+        }
+        end -= c.len_utf8() as Pos;
     }
-    ValueAtRule::Value {
-        local_name: trim_slice(&input[..split]),
-        value: trim_slice(&input[value_start..]),
-    }
+    lexer.slice(start, end)
 }
 
 fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
@@ -1015,6 +1054,11 @@ pub enum Dependency<'s> {
         layer: Option<&'s str>,
         supports: Option<&'s str>,
         media: Option<&'s str>,
+    },
+    ICSSImportUrl {
+        name: &'s str,
+        range: Range,
+        name_range: Range,
     },
     Replace {
         content: &'s str,
@@ -1555,35 +1599,111 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
-    fn consume_value_at_rule_params(&self, lexer: &mut Lexer<'s>) -> Option<(Pos, Pos)> {
+    fn collect_value_at_rule_prelude(
+        &self,
+        lexer: &mut Lexer<'s>,
+    ) -> Option<(ValueAtRulePrelude<'s>, Range, Pos)> {
         let start = lexer.cur_pos()?;
+        let mut prelude = ValueAtRulePrelude::default();
+        let mut depth = 0u32;
         loop {
             let c = lexer.cur()?;
             if c == C_SEMICOLON {
                 let end = lexer.cur_pos()?;
                 lexer.consume();
-                return Some((start, end));
+                return Some((prelude, Range::new(start, end), lexer.cur_pos()?));
             }
             if c == C_RIGHT_CURLY {
-                return Some((start, lexer.cur_pos()?));
+                let end = lexer.cur_pos()?;
+                return Some((prelude, Range::new(start, end), end));
+            }
+            if is_white_space(c) {
+                lexer.consume_space()?;
+                continue;
             }
             if c == C_QUOTATION_MARK || c == C_APOSTROPHE {
+                let node_start = lexer.cur_pos()?;
                 self.consume_raw_string(lexer, c)?;
+                let node_end = lexer.cur_pos()?;
+                prelude.push(ValueAtRuleNode::new(
+                    ValueAtRuleNodeKind::String,
+                    lexer.slice(node_start, node_end)?,
+                    Range::new(node_start, node_end),
+                    depth,
+                ));
                 continue;
             }
             if c == C_SOLIDUS && lexer.peek()? == C_ASTERISK {
                 lexer.consume_comments()?;
                 continue;
             }
-            lexer.consume();
+            let node_start = lexer.cur_pos()?;
+            let kind = match c {
+                C_COLON => {
+                    lexer.consume();
+                    ValueAtRuleNodeKind::Colon
+                }
+                C_COMMA => {
+                    lexer.consume();
+                    ValueAtRuleNodeKind::Comma
+                }
+                C_LEFT_PARENTHESIS => {
+                    lexer.consume();
+                    prelude.push(ValueAtRuleNode::new(
+                        ValueAtRuleNodeKind::LeftParen,
+                        lexer.slice(node_start, lexer.cur_pos()?)?,
+                        Range::new(node_start, lexer.cur_pos()?),
+                        depth,
+                    ));
+                    depth += 1;
+                    continue;
+                }
+                C_RIGHT_PARENTHESIS => {
+                    depth = depth.saturating_sub(1);
+                    lexer.consume();
+                    ValueAtRuleNodeKind::RightParen
+                }
+                _ if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) => {
+                    lexer.consume_ident_sequence()?;
+                    ValueAtRuleNodeKind::Word
+                }
+                _ => {
+                    lexer.consume();
+                    loop {
+                        let Some(c) = lexer.cur() else {
+                            break;
+                        };
+                        if is_white_space(c)
+                            || c == C_SEMICOLON
+                            || c == C_RIGHT_CURLY
+                            || c == C_COLON
+                            || c == C_COMMA
+                            || c == C_LEFT_PARENTHESIS
+                            || c == C_RIGHT_PARENTHESIS
+                            || c == C_QUOTATION_MARK
+                            || c == C_APOSTROPHE
+                            || (c == C_SOLIDUS && matches!(lexer.peek(), Some(C_ASTERISK)))
+                        {
+                            break;
+                        }
+                        lexer.consume();
+                    }
+                    ValueAtRuleNodeKind::Other
+                }
+            };
+            let node_end = lexer.cur_pos()?;
+            prelude.push(ValueAtRuleNode::new(
+                kind,
+                lexer.slice(node_start, node_end)?,
+                Range::new(node_start, node_end),
+                depth,
+            ));
         }
     }
 
     fn lex_value_at_rule(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
-        let (params_start, params_end) = self.consume_value_at_rule_params(lexer)?;
-        let at_rule_end = params_end.max(lexer.cur_pos().unwrap_or(params_end));
-        let params = lexer.slice(params_start, params_end)?;
-        match parse_value_at_rule(params) {
+        let (prelude, range, at_rule_end) = self.collect_value_at_rule_prelude(lexer)?;
+        match prelude.parse(lexer, range.clone())? {
             ValueAtRule::Import { from, items } => {
                 if from.is_empty() || items.is_empty() {
                     self.handle_warning.handle_warning(Warning {
@@ -2264,6 +2384,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
                     return Some(());
                 }
+                import_data.prelude.push(ImportPreludeNode::Url);
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
             }
@@ -2304,6 +2425,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 import_data.url = Some(value);
                 // For url("inside_url") url_range will determined in right_parenthesis
                 if !inside_url {
+                    import_data.prelude.push(ImportPreludeNode::Url);
                     import_data.url_range = Some(Range::new(start, end));
                 }
             }
@@ -2436,6 +2558,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
+                    if let Some((name, name_range)) = import_data.prelude.icss_import_url() {
+                        self.handle_dependency
+                            .handle_dependency(Dependency::ICSSImportUrl {
+                                name,
+                                range: Range::new(import_data.start, end),
+                                name_range: name_range.clone(),
+                            });
+                        self.scope = Scope::TopLevel;
+                        return Some(());
+                    }
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(import_data.start, end),
                         kind: WarningKind::ExpectedUrl {
@@ -2565,11 +2697,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
+        let at_import_top_level =
+            matches!(self.scope, Scope::InAtImport(_)) && self.balanced.is_empty();
         self.balanced
             .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if name.eq_ignore_ascii_case("supports(") {
+            if at_import_top_level && name.eq_ignore_ascii_case("url(") {
+                import_data.prelude.push(ImportPreludeNode::Url);
+            } else if at_import_top_level && name.eq_ignore_ascii_case("layer(") {
+                import_data.prelude.push(ImportPreludeNode::Layer);
+            } else if at_import_top_level && name.eq_ignore_ascii_case("supports(") {
+                import_data.prelude.push(ImportPreludeNode::Supports);
+                import_data.supports = ImportDataSupports::InSupports;
+            } else if at_import_top_level {
+                import_data.prelude.push(ImportPreludeNode::Other);
+            } else if name.eq_ignore_ascii_case("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
@@ -2801,11 +2944,26 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
             Scope::InAtImport(ref mut import_data) => {
-                if lexer.slice(start, end)?.eq_ignore_ascii_case("layer") {
+                if !self.balanced.is_empty() || import_data.in_supports() {
+                    return Some(());
+                }
+
+                let ident = lexer.slice(start, end)?;
+                if ident.eq_ignore_ascii_case("layer") {
+                    import_data.prelude.push(ImportPreludeNode::Layer);
                     import_data.layer = ImportDataLayer::EndLayer {
                         value: "",
                         range: Range::new(start, end),
                     }
+                } else if import_data.url.is_none() && import_data.prelude.is_empty() {
+                    import_data
+                        .prelude
+                        .push(ImportPreludeNode::IcssUrlCandidate {
+                            name: ident,
+                            range: Range::new(start, end),
+                        });
+                } else if import_data.url.is_none() {
+                    import_data.prelude.push(ImportPreludeNode::Other);
                 }
             }
             Scope::TopLevel => {
