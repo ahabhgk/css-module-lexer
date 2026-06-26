@@ -576,6 +576,14 @@ fn invalid_icss_import_url_value_with_function() {
 }
 
 #[test]
+fn invalid_icss_import_url_value_before_string_url() {
+    let input = r#"@import importPath "style.css";"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], r#""style.css""#);
+}
+
+#[test]
 fn import_url_function_is_not_icss_import_url_value() {
     let input = "@import url(./style.css);";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
@@ -1559,6 +1567,26 @@ fn css_modules_function() {
 }
 
 #[test]
+fn css_modules_function_with_braced_argument() {
+    let input = indoc! {r#"
+        @function --max-plus-x(--list, --x) {
+            result: calc(max(var(--list)) + var(--x));
+        }
+        .box {
+            width: --max-plus-x({1px, 7px, 2px}, 3px);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_function_decl_dependency(input, &dependencies[0], "max-plus-x");
+    assert_local_var_dependency(input, &dependencies[1], "list", None);
+    assert_local_var_dependency(input, &dependencies[2], "x", None);
+    assert_local_class_dependency(input, &dependencies[3], ".box", false);
+    assert_local_function_dependency(input, &dependencies[4], "max-plus-x");
+    assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
 fn css_modules_function_explicit_local() {
     let input = indoc! {r#"
         @function :local(--transparent-local)(--color, --alpha) {
@@ -1876,6 +1904,41 @@ fn css_modules_composes_6() {
     assert_local_class_dependency(input, &dependencies[5], ".b", false);
     assert_local_class_dependency(input, &dependencies[6], ".c", false);
     assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
+fn css_modules_composes_from_does_not_leak_between_items() {
+    let input = indoc! {r#"
+        .exportName {
+            composes: imported from "path/library.css", localName;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "exportName",
+        "imported",
+        Some(r#""path/library.css""#),
+        r#"imported from "path/library.css""#,
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "exportName",
+        "localName",
+        None,
+        "localName",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        r#"composes: imported from "path/library.css", localName;"#,
+    );
+    assert_eq!(dependencies.len(), 4);
 }
 
 #[test]

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::Display;
 
-use smallvec::smallvec;
 use smallvec::SmallVec;
 
 use crate::lexer::are_valid_escape;
@@ -95,15 +94,38 @@ impl<'s> ImportPrelude<'s> {
         };
         Some((name, range))
     }
+
+    pub fn first_non_url_before(&self, url_range: &Range) -> Option<&Range> {
+        self.0.iter().find_map(|node| {
+            let range = node.range();
+            if range.start >= url_range.start || matches!(node, ImportPreludeNode::Url { .. }) {
+                None
+            } else {
+                Some(range)
+            }
+        })
+    }
 }
 
 #[derive(Debug)]
 enum ImportPreludeNode<'s> {
     IcssUrlCandidate { name: &'s str, range: Range },
-    Url,
-    Layer,
-    Supports,
-    Other,
+    Url { range: Range },
+    Layer { range: Range },
+    Supports { range: Range },
+    Other { range: Range },
+}
+
+impl ImportPreludeNode<'_> {
+    fn range(&self) -> &Range {
+        match self {
+            Self::IcssUrlCandidate { range, .. }
+            | Self::Url { range }
+            | Self::Layer { range }
+            | Self::Supports { range }
+            | Self::Other { range } => range,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -194,6 +216,15 @@ impl BalancedStack {
         mode_data.set_property_mode(self.topmost_mode(mode_data));
     }
 
+    pub fn mark_mode_function_content(&mut self, end: Pos) {
+        for item in self.0.iter_mut().rev() {
+            if item.kind.is_mode_function() {
+                item.content_end = Some(end);
+                break;
+            }
+        }
+    }
+
     fn topmost_mode(&self, mode_data: &ModeData) -> Mode {
         let mut iter = self.0.iter();
         loop {
@@ -220,6 +251,7 @@ impl BalancedStack {
 struct BalancedItem {
     kind: BalancedItemKind,
     range: Range,
+    content_end: Option<Pos>,
 }
 
 impl BalancedItem {
@@ -227,6 +259,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
+            content_end: None,
         }
     }
 
@@ -234,6 +267,15 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Other,
             range: Range::new(start, end),
+            content_end: None,
+        }
+    }
+
+    pub fn new_curly(start: Pos, end: Pos) -> Self {
+        Self {
+            kind: BalancedItemKind::Curly,
+            range: Range::new(start, end),
+            content_end: None,
         }
     }
 }
@@ -249,6 +291,7 @@ enum BalancedItemKind {
     GlobalFn,
     LocalClass,
     GlobalClass,
+    Curly,
     Other,
 }
 
@@ -394,6 +437,124 @@ enum ValueAtRuleNodeKind {
     Other,
 }
 
+#[derive(Debug, Default)]
+struct ComposesPrelude<'s> {
+    items: SmallVec<[ComposesPreludeItem<'s>; 2]>,
+}
+
+impl<'s> ComposesPrelude<'s> {
+    pub fn push(&mut self, item: ComposesPreludeItem<'s>) {
+        self.items.push(item);
+    }
+
+    pub fn parse(&self) -> Result<SmallVec<[ComposesDependency<'s>; 2]>, ComposesParseError> {
+        let mut result = SmallVec::new();
+        for item in &self.items {
+            let mut names = SmallVec::new();
+            let mut index = 0usize;
+            while index < item.nodes.len() {
+                let node = &item.nodes[index];
+                match node.kind {
+                    ComposesPreludeNodeKind::Global => {
+                        result.push(ComposesDependency {
+                            names: smallvec_from_one(node.value),
+                            from: Some("global"),
+                            range: node.range.clone(),
+                        });
+                    }
+                    ComposesPreludeNodeKind::String => {
+                        return Err(ComposesParseError {
+                            range: node.range.clone(),
+                            message: "Expected ident during parsing of 'composes'",
+                        });
+                    }
+                    ComposesPreludeNodeKind::Word => {
+                        if !names.is_empty() && node.value.eq_ignore_ascii_case("from") {
+                            if let Some(path) = item.nodes.get(index + 1) {
+                                if matches!(
+                                    path.kind,
+                                    ComposesPreludeNodeKind::String | ComposesPreludeNodeKind::Word
+                                ) {
+                                    result.push(ComposesDependency {
+                                        names: std::mem::take(&mut names),
+                                        from: Some(path.value),
+                                        range: Range::new(item.range.start, path.range.end),
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                        names.push(node.value);
+                    }
+                }
+                index += 1;
+            }
+            if !names.is_empty() {
+                result.push(ComposesDependency {
+                    names,
+                    from: None,
+                    range: item.range.clone(),
+                });
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Debug)]
+struct ComposesPreludeItem<'s> {
+    nodes: SmallVec<[ComposesPreludeNode<'s>; 4]>,
+    range: Range,
+}
+
+#[derive(Debug)]
+struct ComposesPreludeNode<'s> {
+    kind: ComposesPreludeNodeKind,
+    value: &'s str,
+    range: Range,
+}
+
+impl<'s> ComposesPreludeNode<'s> {
+    fn new(kind: ComposesPreludeNodeKind, value: &'s str, range: Range) -> Self {
+        Self { kind, value, range }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ComposesPreludeNodeKind {
+    Word,
+    String,
+    Global,
+}
+
+#[derive(Debug)]
+struct ComposesDependency<'s> {
+    names: SmallVec<[&'s str; 2]>,
+    from: Option<&'s str>,
+    range: Range,
+}
+
+#[derive(Debug)]
+struct ComposesParseError {
+    range: Range,
+    message: &'static str,
+}
+
+#[derive(Debug)]
+enum ComposesPreludeResult<'s> {
+    Done {
+        prelude: ComposesPrelude<'s>,
+        end: Pos,
+    },
+    Invalid,
+}
+
+fn smallvec_from_one<T>(value: T) -> SmallVec<[T; 2]> {
+    let mut values = SmallVec::new();
+    values.push(value);
+    values
+}
+
 fn is_css_space_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
 }
@@ -506,23 +667,17 @@ fn value_at_rule_slice_nodes<'s>(
 }
 
 fn value_at_rule_slice_range<'s>(lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
-    let mut start = start;
-    let mut end = end;
     let input = lexer.slice(start, end)?;
-    for c in input.chars() {
-        if !is_white_space(c) {
-            break;
-        }
-        start += c.len_utf8() as Pos;
+    let bytes = input.as_bytes();
+    let mut leading = 0usize;
+    let mut trailing = bytes.len();
+    while leading < trailing && is_css_space_byte(bytes[leading]) {
+        leading += 1;
     }
-    let input = lexer.slice(start, end)?;
-    for c in input.chars().rev() {
-        if !is_white_space(c) {
-            break;
-        }
-        end -= c.len_utf8() as Pos;
+    while trailing > leading && is_css_space_byte(bytes[trailing - 1]) {
+        trailing -= 1;
     }
-    lexer.slice(start, end)
+    lexer.slice(start + leading as Pos, start + trailing as Pos)
 }
 
 fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
@@ -551,6 +706,18 @@ impl Range {
     pub fn new(start: Pos, end: Pos) -> Self {
         Self { start, end }
     }
+}
+
+#[derive(Debug, Default)]
+struct TokenSpacing {
+    previous: Option<SignificantToken>,
+    boundary_end: Pos,
+    has_space_since_previous: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SignificantToken {
+    last_byte: u8,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -1260,6 +1427,7 @@ pub struct LexDependencies<'s, D, W> {
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
     icss_symbols: HashSet<&'s str>,
+    token_spacing: TokenSpacing,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -1283,6 +1451,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             in_container_property: None,
             in_grid_property: None,
             icss_symbols: Default::default(),
+            token_spacing: Default::default(),
             handle_dependency,
             handle_warning,
         }
@@ -1392,40 +1561,56 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         self.in_grid_property = None;
     }
 
-    fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
-        let mut lexer = lexer.clone().turn_back(end);
-        lexer.consume();
-        lexer.consume_white_space_and_comments()?;
-        lexer.cur_pos()
+    fn has_css_space_between(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> bool {
+        lexer
+            .slice(start, end)
+            .is_some_and(|input| input.as_bytes().iter().any(|byte| is_css_space_byte(*byte)))
     }
 
-    fn should_have_after_white_space(&self, lexer: &Lexer<'s>, end: Pos) -> bool {
-        let mut lexer = lexer.clone().turn_back(end);
-        let mut has_white_space = false;
-        lexer.consume();
-        loop {
-            if lexer.consume_comments().is_none() {
-                return true;
-            }
-            let Some(c) = lexer.cur() else {
-                return true;
-            };
-            if is_white_space(c) {
-                has_white_space = true;
-                if lexer.consume_space().is_none() {
-                    return true;
-                }
-            } else {
-                break;
-            }
+    fn note_comment_spacing(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
+        if self.token_spacing.previous.is_some()
+            && self.has_css_space_between(lexer, self.token_spacing.boundary_end, start)
+        {
+            self.token_spacing.has_space_since_previous = true;
         }
-        let c = lexer.cur().unwrap();
+        self.token_spacing.boundary_end = end;
+    }
+
+    fn note_significant_token(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
+        let Some(last_byte) = lexer
+            .slice(start, end)
+            .and_then(|input| input.as_bytes().last())
+        else {
+            return;
+        };
+        self.token_spacing.previous = Some(SignificantToken {
+            last_byte: *last_byte,
+        });
+        self.token_spacing.boundary_end = end;
+        self.token_spacing.has_space_since_previous = false;
+    }
+
+    fn mark_mode_function_content(&mut self, end: Pos) {
+        self.balanced.mark_mode_function_content(end);
+    }
+
+    fn note_content_token(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
+        self.mark_mode_function_content(end);
+        self.note_significant_token(lexer, start, end);
+    }
+
+    fn should_have_after_white_space(&self, lexer: &Lexer<'s>, start: Pos) -> bool {
+        let Some(previous) = self.token_spacing.previous else {
+            return true;
+        };
+        let has_white_space = self.token_spacing.has_space_since_previous
+            || self.has_css_space_between(lexer, self.token_spacing.boundary_end, start);
         // start of a :global :local
-        if c == C_LEFT_PARENTHESIS
-            || c == C_COMMA
-            || c == C_SEMICOLON
-            || c == C_RIGHT_CURLY
-            || c == C_LEFT_CURLY
+        if previous.last_byte == b'('
+            || previous.last_byte == b','
+            || previous.last_byte == b';'
+            || previous.last_byte == b'}'
+            || previous.last_byte == b'{'
         {
             return true;
         }
@@ -1512,8 +1697,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         while lexer.cur()? != C_RIGHT_CURLY {
             lexer.consume_white_space_and_comments()?;
             let prop_start = lexer.cur_pos()?;
-            self.consume_icss_export_prop(lexer)?;
-            let prop_end = lexer.cur_pos()?;
+            let prop_end = self.consume_icss_export_prop(lexer)?;
             lexer.consume_white_space_and_comments()?;
             if !self.eat(
                 lexer,
@@ -1524,32 +1708,25 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             lexer.consume_white_space_and_comments()?;
             let value_start = lexer.cur_pos()?;
-            self.consume_icss_export_value(lexer)?;
-            let value_end = lexer.cur_pos()?;
+            let value_end = self.consume_icss_export_value(lexer)?;
             if lexer.cur()? == C_SEMICOLON {
                 lexer.consume();
                 lexer.consume_white_space_and_comments()?;
             }
+            let prop = lexer.slice(prop_start, prop_end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::ICSSImportValue {
-                    prop: lexer
-                        .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_white_space),
-                    value: lexer
-                        .slice(value_start, value_end)?
-                        .trim_end_matches(is_white_space),
+                    prop,
+                    value: lexer.slice(value_start, value_end)?,
                 });
-            self.icss_symbols.insert(
-                lexer
-                    .slice(prop_start, prop_end)?
-                    .trim_end_matches(is_white_space),
-            );
+            self.icss_symbols.insert(prop);
         }
         lexer.consume();
         Some(())
     }
 
-    fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<()> {
+    fn consume_icss_export_prop(&self, lexer: &mut Lexer<'s>) -> Option<Pos> {
+        let mut end = lexer.cur_pos()?;
         loop {
             let c = lexer.cur()?;
             if c == C_COLON
@@ -1560,19 +1737,26 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 break;
             }
             lexer.consume();
+            if !is_white_space(c) {
+                end = lexer.cur_pos()?;
+            }
         }
-        Some(())
+        Some(end)
     }
 
-    fn consume_icss_export_value(&self, lexer: &mut Lexer<'s>) -> Option<()> {
+    fn consume_icss_export_value(&self, lexer: &mut Lexer<'s>) -> Option<Pos> {
+        let mut end = lexer.cur_pos()?;
         loop {
             let c = lexer.cur()?;
             if c == C_RIGHT_CURLY || c == C_SEMICOLON {
                 break;
             }
             lexer.consume();
+            if !is_white_space(c) {
+                end = lexer.cur_pos()?;
+            }
         }
-        Some(())
+        Some(end)
     }
 
     fn consume_raw_string(&self, lexer: &mut Lexer<'s>, end: char) -> Option<()> {
@@ -1769,8 +1953,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         while lexer.cur()? != C_RIGHT_CURLY {
             lexer.consume_white_space_and_comments()?;
             let prop_start = lexer.cur_pos()?;
-            self.consume_icss_export_prop(lexer)?;
-            let prop_end = lexer.cur_pos()?;
+            let prop_end = self.consume_icss_export_prop(lexer)?;
             lexer.consume_white_space_and_comments()?;
             if !self.eat(
                 lexer,
@@ -1781,26 +1964,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             lexer.consume_white_space_and_comments()?;
             let value_start = lexer.cur_pos()?;
-            self.consume_icss_export_value(lexer)?;
-            let value_end = lexer.cur_pos()?;
+            let value_end = self.consume_icss_export_value(lexer)?;
             if lexer.cur()? == C_SEMICOLON {
                 lexer.consume();
                 lexer.consume_white_space_and_comments()?;
             }
+            let prop = lexer.slice(prop_start, prop_end)?;
             self.handle_dependency
                 .handle_dependency(Dependency::ICSSExportValue {
-                    prop: lexer
-                        .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_white_space),
-                    value: lexer
-                        .slice(value_start, value_end)?
-                        .trim_end_matches(is_white_space),
+                    prop,
+                    value: lexer.slice(value_start, value_end)?,
                 });
-            self.icss_symbols.insert(
-                lexer
-                    .slice(prop_start, prop_end)?
-                    .trim_end_matches(is_white_space),
-            );
+            self.icss_symbols.insert(prop);
         }
         lexer.consume();
         Some(())
@@ -2187,34 +2362,24 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
-    fn lex_composes(
+    fn collect_composes_prelude(
         &mut self,
         lexer: &mut Lexer<'s>,
-        local_classes: SmallVec<[&'s str; 2]>,
-        start: Pos,
-    ) -> Option<()> {
-        lexer.consume_white_space_and_comments()?;
-        if lexer.cur()? != C_COLON {
-            return Some(());
-        }
-        lexer.consume();
-        let mut names: SmallVec<[&'s str; 2]> = SmallVec::new();
-        let mut end;
-        let mut has_from = false;
+    ) -> Option<ComposesPreludeResult<'s>> {
+        let mut prelude = ComposesPrelude::default();
+        let mut end = lexer.cur_pos()?;
         loop {
             lexer.consume_white_space_and_comments()?;
-            let start = lexer.cur_pos()?;
-            end = start;
+            let item_start = lexer.cur_pos()?;
+            let mut nodes = SmallVec::new();
             loop {
+                lexer.consume_white_space_and_comments()?;
                 let c = lexer.cur()?;
                 if c == C_COMMA || c == C_SEMICOLON || c == C_RIGHT_CURLY {
                     break;
                 }
-                let maybe_global_start = lexer.cur_pos()?;
-                if matches!(
-                    lexer.slice(maybe_global_start, maybe_global_start + 7),
-                    Some("global(")
-                ) {
+                let token_start = lexer.cur_pos()?;
+                if matches!(lexer.slice(token_start, token_start + 7), Some("global(")) {
                     for _ in 0..7 {
                         lexer.consume();
                     }
@@ -2226,106 +2391,117 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                                 message: "Expected ident during parsing of 'composes'",
                             },
                         });
-                        return Some(());
+                        return Some(ComposesPreludeResult::Invalid);
                     }
                     lexer.consume_ident_sequence()?;
                     let name_end = lexer.cur_pos()?;
                     lexer.consume_white_space_and_comments()?;
-                    self.eat(
+                    if !self.eat(
                         lexer,
                         &[C_RIGHT_PARENTHESIS],
                         "Expected ')' during parsing of 'composes'",
-                    );
+                    )? {
+                        return Some(ComposesPreludeResult::Invalid);
+                    }
                     end = lexer.cur_pos()?;
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: local_classes.clone(),
-                            names: smallvec![lexer.slice(name_start, name_end)?],
-                            from: Some("global"),
-                            range: Range::new(maybe_global_start, lexer.cur_pos()?),
-                        });
-                } else {
-                    let name_start = lexer.cur_pos()?;
-                    if !start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
-                        self.handle_warning.handle_warning(Warning {
-                            range: Range::new(name_start, lexer.peek2_pos()?),
-                            kind: WarningKind::Unexpected {
-                                message: "Expected ident during parsing of 'composes'",
-                            },
-                        });
-                        return Some(());
-                    }
-                    lexer.consume_ident_sequence()?;
-                    let name_end = lexer.cur_pos()?;
-                    let ident = lexer.slice(name_start, name_end)?;
-                    if !names.is_empty() && ident.eq_ignore_ascii_case("from") {
-                        lexer.consume_white_space_and_comments()?;
-                        let next_c = lexer.cur()?;
-                        if next_c == C_QUOTATION_MARK
-                            || next_c == C_APOSTROPHE
-                            || start_ident_sequence(next_c, lexer.peek()?, lexer.peek2()?)
-                        {
-                            has_from = true;
-                            break;
-                        }
-                    }
-                    names.push(ident);
-                    end = name_end;
-                }
-                lexer.consume_white_space_and_comments()?;
-            }
-            lexer.consume_white_space_and_comments()?;
-            let c = lexer.cur()?;
-            if !has_from {
-                if !names.is_empty() {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: local_classes.clone(),
-                            names: std::mem::take(&mut names),
-                            from: None,
-                            range: Range::new(start, end),
-                        });
-                }
-                if c == C_COMMA {
-                    lexer.consume();
+                    nodes.push(ComposesPreludeNode::new(
+                        ComposesPreludeNodeKind::Global,
+                        lexer.slice(name_start, name_end)?,
+                        Range::new(token_start, end),
+                    ));
                     continue;
                 }
-                break;
-            }
-            let path_start = lexer.cur_pos()?;
-            if c == '\'' || c == '"' {
-                lexer.consume();
-                lexer.consume_string(self, c)?;
-            } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
+
+                if c == C_QUOTATION_MARK || c == C_APOSTROPHE {
+                    lexer.consume();
+                    lexer.consume_string(self, c)?;
+                    end = lexer.cur_pos()?;
+                    nodes.push(ComposesPreludeNode::new(
+                        ComposesPreludeNodeKind::String,
+                        lexer.slice(token_start, end)?,
+                        Range::new(token_start, end),
+                    ));
+                    continue;
+                }
+
+                if !start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(token_start, lexer.peek2_pos()?),
+                        kind: WarningKind::Unexpected {
+                            message: "Expected ident during parsing of 'composes'",
+                        },
+                    });
+                    return Some(ComposesPreludeResult::Invalid);
+                }
                 lexer.consume_ident_sequence()?;
-            } else {
+                end = lexer.cur_pos()?;
+                nodes.push(ComposesPreludeNode::new(
+                    ComposesPreludeNodeKind::Word,
+                    lexer.slice(token_start, end)?,
+                    Range::new(token_start, end),
+                ));
+            }
+
+            if !nodes.is_empty() {
+                prelude.push(ComposesPreludeItem {
+                    range: Range::new(item_start, end),
+                    nodes,
+                });
+            }
+
+            lexer.consume_white_space_and_comments()?;
+            match lexer.cur()? {
+                C_COMMA => {
+                    lexer.consume();
+                    end = lexer.cur_pos()?;
+                }
+                C_SEMICOLON => {
+                    lexer.consume();
+                    end = lexer.cur_pos()?;
+                    break;
+                }
+                C_RIGHT_CURLY => break,
+                _ => break,
+            }
+        }
+        Some(ComposesPreludeResult::Done { prelude, end })
+    }
+
+    fn lex_composes(
+        &mut self,
+        lexer: &mut Lexer<'s>,
+        local_classes: SmallVec<[&'s str; 2]>,
+        start: Pos,
+    ) -> Option<()> {
+        lexer.consume_white_space_and_comments()?;
+        if lexer.cur()? != C_COLON {
+            return Some(());
+        }
+        lexer.consume();
+        let ComposesPreludeResult::Done { prelude, end } = self.collect_composes_prelude(lexer)?
+        else {
+            return Some(());
+        };
+        let dependencies = match prelude.parse() {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
                 self.handle_warning.handle_warning(Warning {
-                    range: Range::new(path_start, lexer.peek_pos()?),
+                    range: error.range,
                     kind: WarningKind::Unexpected {
-                        message: "Expected string or ident during parsing of 'composes'",
+                        message: error.message,
                     },
                 });
                 return Some(());
             }
-            let path_end = lexer.cur_pos()?;
-            end = path_end;
-            let from = Some(lexer.slice(path_start, path_end)?);
+        };
+        for dependency in dependencies {
             self.handle_dependency
                 .handle_dependency(Dependency::Composes {
                     local_classes: local_classes.clone(),
-                    names: std::mem::take(&mut names),
-                    from,
-                    range: Range::new(start, end),
+                    names: dependency.names,
+                    from: dependency.from,
+                    range: dependency.range,
                 });
-            lexer.consume_white_space_and_comments()?;
-            if lexer.cur()? != C_COMMA {
-                break;
-            }
-            lexer.consume();
-        }
-        if lexer.cur()? == C_SEMICOLON {
-            lexer.consume();
-            end = lexer.cur_pos()?;
         }
         self.handle_dependency
             .handle_dependency(Dependency::Replace {
@@ -2338,6 +2514,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
 impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDependencies<'s, D, W> {
     fn comment(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_comment_spacing(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -2384,7 +2561,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     });
                     return Some(());
                 }
-                import_data.prelude.push(ImportPreludeNode::Url);
+                import_data.prelude.push(ImportPreludeNode::Url {
+                    range: Range::new(start, end),
+                });
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
             }
@@ -2395,6 +2574,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }),
             _ => {}
         }
+        self.note_content_token(lexer, start, end);
         Some(())
     }
 
@@ -2425,7 +2605,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 import_data.url = Some(value);
                 // For url("inside_url") url_range will determined in right_parenthesis
                 if !inside_url {
-                    import_data.prelude.push(ImportPreludeNode::Url);
+                    import_data.prelude.push(ImportPreludeNode::Url {
+                        range: Range::new(start, end),
+                    });
                     import_data.url_range = Some(Range::new(start, end));
                 }
             }
@@ -2466,10 +2648,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             _ => {}
         }
+        self.note_content_token(lexer, start, end);
         Some(())
     }
 
     fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         let name = lexer.slice(start, end)?;
         if name.eq_ignore_ascii_case("@namespace") {
             self.scope = Scope::AtNamespaceInvalid;
@@ -2555,6 +2739,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_significant_token(lexer, start, end);
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
@@ -2587,6 +2772,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     self.scope = Scope::TopLevel;
                     return Some(());
                 };
+                if let Some(range) = import_data.prelude.first_non_url_before(url_range) {
+                    self.handle_warning.handle_warning(Warning {
+                        range: url_range.clone(),
+                        kind: WarningKind::ExpectedUrlBefore {
+                            when: lexer.slice(range.start, url_range.end)?,
+                        },
+                    });
+                    self.scope = Scope::TopLevel;
+                    return Some(());
+                }
                 let layer = match &import_data.layer {
                     ImportDataLayer::None => None,
                     ImportDataLayer::EndLayer { value, range } => {
@@ -2697,21 +2892,34 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
+        let item = BalancedItem::new(name, start, end);
+        if !item.kind.is_mode_function() {
+            self.note_content_token(lexer, start, end);
+        } else {
+            self.note_significant_token(lexer, start, end);
+        }
         let at_import_top_level =
             matches!(self.scope, Scope::InAtImport(_)) && self.balanced.is_empty();
-        self.balanced
-            .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+        self.balanced.push(item, self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
             if at_import_top_level && name.eq_ignore_ascii_case("url(") {
-                import_data.prelude.push(ImportPreludeNode::Url);
+                import_data.prelude.push(ImportPreludeNode::Url {
+                    range: Range::new(start, end),
+                });
             } else if at_import_top_level && name.eq_ignore_ascii_case("layer(") {
-                import_data.prelude.push(ImportPreludeNode::Layer);
+                import_data.prelude.push(ImportPreludeNode::Layer {
+                    range: Range::new(start, end),
+                });
             } else if at_import_top_level && name.eq_ignore_ascii_case("supports(") {
-                import_data.prelude.push(ImportPreludeNode::Supports);
+                import_data.prelude.push(ImportPreludeNode::Supports {
+                    range: Range::new(start, end),
+                });
                 import_data.supports = ImportDataSupports::InSupports;
             } else if at_import_top_level {
-                import_data.prelude.push(ImportPreludeNode::Other);
+                import_data.prelude.push(ImportPreludeNode::Other {
+                    range: Range::new(start, end),
+                });
             } else if name.eq_ignore_ascii_case("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
@@ -2733,7 +2941,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn left_parenthesis(&mut self, _: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.mark_mode_function_content(end);
+        self.note_significant_token(lexer, start, end);
         self.balanced
             .push(BalancedItem::new_other(start, end), self.mode_data.as_mut());
         Some(())
@@ -2741,10 +2951,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(last) = self.balanced.pop(self.mode_data.as_mut()) else {
+            self.note_significant_token(lexer, start, end);
             return Some(());
         };
+        let closes_mode_function = last.kind.is_mode_function();
+        let mut mode_function_replace: Option<(Pos, Option<Pos>)> =
+            closes_mode_function.then_some((last.range.end, last.content_end));
         if let Some(mode_data) = &mut self.mode_data {
-            let mut is_function = last.kind.is_mode_function();
             if last.kind.is_mode_class() {
                 self.balanced.pop_mode_pseudo_class(mode_data);
                 let popped = self.balanced.pop_without_moda_data().unwrap();
@@ -2752,15 +2965,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     popped.kind,
                     BalancedItemKind::GlobalClass | BalancedItemKind::LocalClass
                 ));
-                is_function = popped.kind.is_mode_function();
+                if popped.kind.is_mode_function() {
+                    mode_function_replace = Some((popped.range.end, popped.content_end));
+                }
             }
-            if is_function {
-                let distance = self.back_white_space_and_comments_distance(lexer, start)?;
-                let start = start - distance;
-                let maybe_left_parenthesis_start = start - 1;
-                if lexer.slice(start - 1, start)? == "(" {
+            if let Some((inner_start, content_end)) = mode_function_replace {
+                let replace_start = content_end.unwrap_or(inner_start);
+                if content_end.is_none() {
                     self.handle_warning.handle_warning(Warning {
-                        range: Range::new(maybe_left_parenthesis_start, end),
+                        range: Range::new(inner_start - 1, end),
                         kind: WarningKind::Unexpected {
                             message: "':global()' or ':local()' can't be empty",
                         },
@@ -2769,7 +2982,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
                         content: "",
-                        range: Range::new(start, end),
+                        range: Range::new(replace_start, end),
                     });
             }
         }
@@ -2789,10 +3002,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
         }
+        self.mark_mode_function_content(end);
+        self.note_significant_token(lexer, start, end);
         Some(())
     }
 
     fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         match self.scope {
             Scope::InBlock => {
                 let Some(mode_data) = &mut self.mode_data else {
@@ -2950,7 +3166,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
                 let ident = lexer.slice(start, end)?;
                 if ident.eq_ignore_ascii_case("layer") {
-                    import_data.prelude.push(ImportPreludeNode::Layer);
+                    import_data.prelude.push(ImportPreludeNode::Layer {
+                        range: Range::new(start, end),
+                    });
                     import_data.layer = ImportDataLayer::EndLayer {
                         value: "",
                         range: Range::new(start, end),
@@ -2963,7 +3181,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             range: Range::new(start, end),
                         });
                 } else if import_data.url.is_none() {
-                    import_data.prelude.push(ImportPreludeNode::Other);
+                    import_data.prelude.push(ImportPreludeNode::Other {
+                        range: Range::new(start, end),
+                    });
                 }
             }
             Scope::TopLevel => {
@@ -2978,6 +3198,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3012,6 +3233,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3045,6 +3267,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, start + 1);
+        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
+            self.balanced.push(
+                BalancedItem::new_curly(start, start + 1),
+                self.mode_data.as_mut(),
+            );
+            return Some(());
+        }
+
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
@@ -3122,7 +3353,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, end - 1, end);
         if matches!(self.scope, Scope::InBlock) {
+            if matches!(
+                self.balanced.last(),
+                Some(last) if matches!(last.kind, BalancedItemKind::Curly)
+            ) {
+                self.balanced.pop(self.mode_data.as_mut());
+                return Some(());
+            }
+
             if let Some(mode_data) = &mut self.mode_data {
                 mode_data.pure_global = Some(end);
 
@@ -3170,6 +3410,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
+        let item = BalancedItem::new(name, start, end);
+        if item.kind.is_mode_function() {
+            self.note_significant_token(lexer, start, end);
+        } else {
+            self.note_content_token(lexer, start, end);
+        }
         if let Some(mode_data) = &mut self.mode_data {
             if name.eq_ignore_ascii_case(":import(") {
                 self.lex_icss_import(lexer);
@@ -3200,17 +3446,27 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 mode_data.composes_local_classes.invalidate();
             }
         }
-        self.balanced
-            .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+        self.balanced.push(item, self.mode_data.as_mut());
         Some(())
     }
 
     fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        let name = lexer.slice(start, end)?;
+        let is_mode_pseudo =
+            name.eq_ignore_ascii_case(":global") || name.eq_ignore_ascii_case(":local");
+        let should_have_after_white_space = if is_mode_pseudo {
+            Some(self.should_have_after_white_space(lexer, start))
+        } else {
+            self.note_content_token(lexer, start, end);
+            None
+        };
+        if is_mode_pseudo {
+            self.note_significant_token(lexer, start, end);
+        }
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
-        let name = lexer.slice(start, end)?;
-        if name.eq_ignore_ascii_case(":global") || name.eq_ignore_ascii_case(":local") {
+        if is_mode_pseudo {
             if mode_data.is_inside_mode_function() {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -3220,11 +3476,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 });
             }
 
-            let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
             let has_after_white_space = self.has_after_white_space(lexer)?;
             let c = lexer.cur()?;
             if c != C_RIGHT_PARENTHESIS && c != C_LEFT_CURLY && c != C_COMMA {
-                if should_have_after_white_space && !has_after_white_space {
+                if should_have_after_white_space.unwrap_or(true) && !has_after_white_space {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, end),
                         kind: WarningKind::MissingWhitespace {
@@ -3232,7 +3487,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         },
                     });
                 }
-                if !should_have_after_white_space && has_after_white_space {
+                if !should_have_after_white_space.unwrap_or(true) && has_after_white_space {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, end),
                         kind: WarningKind::MissingWhitespace {
@@ -3269,6 +3524,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3318,6 +3574,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.handle_local_keyframes_dependency(lexer)?;
         }
 
+        Some(())
+    }
+
+    fn delim(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+        self.note_content_token(lexer, start, end);
         Some(())
     }
 }
