@@ -216,15 +216,6 @@ impl BalancedStack {
         mode_data.set_property_mode(self.topmost_mode(mode_data));
     }
 
-    pub fn mark_mode_function_content(&mut self, end: Pos) {
-        for item in self.0.iter_mut().rev() {
-            if item.kind.is_mode_function() {
-                item.content_end = Some(end);
-                break;
-            }
-        }
-    }
-
     fn topmost_mode(&self, mode_data: &ModeData) -> Mode {
         let mut iter = self.0.iter();
         loop {
@@ -251,7 +242,6 @@ impl BalancedStack {
 struct BalancedItem {
     kind: BalancedItemKind,
     range: Range,
-    content_end: Option<Pos>,
 }
 
 impl BalancedItem {
@@ -259,7 +249,6 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
-            content_end: None,
         }
     }
 
@@ -267,7 +256,6 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Other,
             range: Range::new(start, end),
-            content_end: None,
         }
     }
 
@@ -275,7 +263,6 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Curly,
             range: Range::new(start, end),
-            content_end: None,
         }
     }
 }
@@ -706,18 +693,6 @@ impl Range {
     pub fn new(start: Pos, end: Pos) -> Self {
         Self { start, end }
     }
-}
-
-#[derive(Debug, Default)]
-struct TokenSpacing {
-    previous: Option<SignificantToken>,
-    boundary_end: Pos,
-    has_space_since_previous: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SignificantToken {
-    last_byte: u8,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -1427,7 +1402,6 @@ pub struct LexDependencies<'s, D, W> {
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
     icss_symbols: HashSet<&'s str>,
-    token_spacing: TokenSpacing,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -1451,7 +1425,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             in_container_property: None,
             in_grid_property: None,
             icss_symbols: Default::default(),
-            token_spacing: Default::default(),
             handle_dependency,
             handle_warning,
         }
@@ -1561,56 +1534,40 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         self.in_grid_property = None;
     }
 
-    fn has_css_space_between(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> bool {
-        lexer
-            .slice(start, end)
-            .is_some_and(|input| input.as_bytes().iter().any(|byte| is_css_space_byte(*byte)))
+    fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
+        let mut lexer = lexer.clone().turn_back(end);
+        lexer.consume();
+        lexer.consume_white_space_and_comments()?;
+        lexer.cur_pos()
     }
 
-    fn note_comment_spacing(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
-        if self.token_spacing.previous.is_some()
-            && self.has_css_space_between(lexer, self.token_spacing.boundary_end, start)
-        {
-            self.token_spacing.has_space_since_previous = true;
+    fn should_have_after_white_space(&self, lexer: &Lexer<'s>, end: Pos) -> bool {
+        let mut lexer = lexer.clone().turn_back(end);
+        let mut has_white_space = false;
+        lexer.consume();
+        loop {
+            if lexer.consume_comments().is_none() {
+                return true;
+            }
+            let Some(c) = lexer.cur() else {
+                return true;
+            };
+            if is_white_space(c) {
+                has_white_space = true;
+                if lexer.consume_space().is_none() {
+                    return true;
+                }
+            } else {
+                break;
+            }
         }
-        self.token_spacing.boundary_end = end;
-    }
-
-    fn note_significant_token(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
-        let Some(last_byte) = lexer
-            .slice(start, end)
-            .and_then(|input| input.as_bytes().last())
-        else {
-            return;
-        };
-        self.token_spacing.previous = Some(SignificantToken {
-            last_byte: *last_byte,
-        });
-        self.token_spacing.boundary_end = end;
-        self.token_spacing.has_space_since_previous = false;
-    }
-
-    fn mark_mode_function_content(&mut self, end: Pos) {
-        self.balanced.mark_mode_function_content(end);
-    }
-
-    fn note_content_token(&mut self, lexer: &Lexer<'s>, start: Pos, end: Pos) {
-        self.mark_mode_function_content(end);
-        self.note_significant_token(lexer, start, end);
-    }
-
-    fn should_have_after_white_space(&self, lexer: &Lexer<'s>, start: Pos) -> bool {
-        let Some(previous) = self.token_spacing.previous else {
-            return true;
-        };
-        let has_white_space = self.token_spacing.has_space_since_previous
-            || self.has_css_space_between(lexer, self.token_spacing.boundary_end, start);
+        let c = lexer.cur().unwrap();
         // start of a :global :local
-        if previous.last_byte == b'('
-            || previous.last_byte == b','
-            || previous.last_byte == b';'
-            || previous.last_byte == b'}'
-            || previous.last_byte == b'{'
+        if c == C_LEFT_PARENTHESIS
+            || c == C_COMMA
+            || c == C_SEMICOLON
+            || c == C_RIGHT_CURLY
+            || c == C_LEFT_CURLY
         {
             return true;
         }
@@ -2514,7 +2471,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
 impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDependencies<'s, D, W> {
     fn comment(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_comment_spacing(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -2574,7 +2530,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }),
             _ => {}
         }
-        self.note_content_token(lexer, start, end);
         Some(())
     }
 
@@ -2648,12 +2603,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
             _ => {}
         }
-        self.note_content_token(lexer, start, end);
         Some(())
     }
 
     fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         let name = lexer.slice(start, end)?;
         if name.eq_ignore_ascii_case("@namespace") {
             self.scope = Scope::AtNamespaceInvalid;
@@ -2739,7 +2692,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_significant_token(lexer, start, end);
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
@@ -2893,11 +2845,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
         let item = BalancedItem::new(name, start, end);
-        if !item.kind.is_mode_function() {
-            self.note_content_token(lexer, start, end);
-        } else {
-            self.note_significant_token(lexer, start, end);
-        }
         let at_import_top_level =
             matches!(self.scope, Scope::InAtImport(_)) && self.balanced.is_empty();
         self.balanced.push(item, self.mode_data.as_mut());
@@ -2941,9 +2888,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.mark_mode_function_content(end);
-        self.note_significant_token(lexer, start, end);
+    fn left_parenthesis(&mut self, _: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         self.balanced
             .push(BalancedItem::new_other(start, end), self.mode_data.as_mut());
         Some(())
@@ -2951,13 +2896,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
     fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(last) = self.balanced.pop(self.mode_data.as_mut()) else {
-            self.note_significant_token(lexer, start, end);
             return Some(());
         };
-        let closes_mode_function = last.kind.is_mode_function();
-        let mut mode_function_replace: Option<(Pos, Option<Pos>)> =
-            closes_mode_function.then_some((last.range.end, last.content_end));
         if let Some(mode_data) = &mut self.mode_data {
+            let mut is_function = last.kind.is_mode_function();
             if last.kind.is_mode_class() {
                 self.balanced.pop_mode_pseudo_class(mode_data);
                 let popped = self.balanced.pop_without_moda_data().unwrap();
@@ -2965,15 +2907,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     popped.kind,
                     BalancedItemKind::GlobalClass | BalancedItemKind::LocalClass
                 ));
-                if popped.kind.is_mode_function() {
-                    mode_function_replace = Some((popped.range.end, popped.content_end));
-                }
+                is_function = popped.kind.is_mode_function();
             }
-            if let Some((inner_start, content_end)) = mode_function_replace {
-                let replace_start = content_end.unwrap_or(inner_start);
-                if content_end.is_none() {
+            if is_function {
+                let distance = self.back_white_space_and_comments_distance(lexer, start)?;
+                let start = start - distance;
+                let maybe_left_parenthesis_start = start - 1;
+                if lexer.slice(start - 1, start)? == "(" {
                     self.handle_warning.handle_warning(Warning {
-                        range: Range::new(inner_start - 1, end),
+                        range: Range::new(maybe_left_parenthesis_start, end),
                         kind: WarningKind::Unexpected {
                             message: "':global()' or ':local()' can't be empty",
                         },
@@ -2982,7 +2924,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
                         content: "",
-                        range: Range::new(replace_start, end),
+                        range: Range::new(start, end),
                     });
             }
         }
@@ -3002,13 +2944,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
         }
-        self.mark_mode_function_content(end);
-        self.note_significant_token(lexer, start, end);
         Some(())
     }
 
     fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         match self.scope {
             Scope::InBlock => {
                 let Some(mode_data) = &mut self.mode_data else {
@@ -3198,7 +3137,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3233,7 +3171,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3267,7 +3204,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, start + 1);
         if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
@@ -3353,7 +3289,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, _: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, end - 1, end);
         if matches!(self.scope, Scope::InBlock) {
             if matches!(
                 self.balanced.last(),
@@ -3411,11 +3346,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
         let item = BalancedItem::new(name, start, end);
-        if item.kind.is_mode_function() {
-            self.note_significant_token(lexer, start, end);
-        } else {
-            self.note_content_token(lexer, start, end);
-        }
         if let Some(mode_data) = &mut self.mode_data {
             if name.eq_ignore_ascii_case(":import(") {
                 self.lex_icss_import(lexer);
@@ -3457,12 +3387,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         let should_have_after_white_space = if is_mode_pseudo {
             Some(self.should_have_after_white_space(lexer, start))
         } else {
-            self.note_content_token(lexer, start, end);
             None
         };
-        if is_mode_pseudo {
-            self.note_significant_token(lexer, start, end);
-        }
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3524,7 +3450,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -3574,11 +3499,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             self.handle_local_keyframes_dependency(lexer)?;
         }
 
-        Some(())
-    }
-
-    fn delim(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
-        self.note_content_token(lexer, start, end);
         Some(())
     }
 }
