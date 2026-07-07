@@ -837,6 +837,15 @@ mod tests {
     }
 
     #[test]
+    fn lexer_state_3() {
+        let l = Lexer::new("");
+        let mut l = l.turn_back(0);
+        assert_lexer_state(&l, None, None, None, Some(0), None, None);
+        l.consume();
+        assert_lexer_state(&l, None, Some(0), None, None, None, None);
+    }
+
+    #[test]
     fn parse_urls() {
         assert_lexer_snapshot(
             indoc! {r#"

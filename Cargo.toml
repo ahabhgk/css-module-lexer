@@ -14,7 +14,6 @@ codspeed-criterion-compat = "2"
 criterion = "0.5"
 indoc = "2"
 linked-hash-map = "0.5"
-mimalloc = "0.1"
 similar-asserts = "1"
 
 [[bench]]
