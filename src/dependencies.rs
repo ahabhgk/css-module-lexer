@@ -27,6 +27,27 @@ use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
 
+macro_rules! match_ignore_ascii_case {
+    (
+        $value:expr, {
+            $(
+                $($pattern:literal)|+ => $result:expr,
+            )*
+            _ => $fallback:expr $(,)?
+        }
+    ) => {{
+        let value = $value;
+        $(
+            if $(value.eq_ignore_ascii_case($pattern))||+ {
+                $result
+            } else
+        )*
+        {
+            $fallback
+        }
+    }};
+}
+
 #[derive(Debug)]
 enum Scope<'s> {
     TopLevel,
@@ -821,7 +842,7 @@ struct AnimationReserved {
 
 impl ReservedValues for AnimationReserved {
     fn check(&mut self, ident: &str) -> bool {
-        match ident {
+        match_ignore_ascii_case!(ident, {
             "normal" => self.check_and_update(Self::NORMAL),
             "reverse" => self.check_and_update(Self::REVERSE),
             "alternate" => self.check_and_update(Self::ALTERNATE),
@@ -844,7 +865,7 @@ impl ReservedValues for AnimationReserved {
             // global values
             "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
             _ => true,
-        }
+        })
     }
 
     fn reset(&mut self) {
@@ -885,7 +906,7 @@ struct ListStyleReserved;
 
 impl ReservedValues for ListStyleReserved {
     fn check(&mut self, ident: &str) -> bool {
-        match ident {
+        match_ignore_ascii_case!(ident, {
             // https://www.w3.org/TR/css-counter-styles-3/#simple-numeric
             "decimal"
             | "decimal-leading-zero"
@@ -954,7 +975,7 @@ impl ReservedValues for ListStyleReserved {
             | "revert"
             | "revert-layer" => false,
             _ => true,
-        }
+        })
     }
 
     fn reset(&mut self) {}
@@ -976,8 +997,7 @@ struct ContainerReserved;
 
 impl ReservedValues for ContainerReserved {
     fn check(&mut self, ident: &str) -> bool {
-        !matches!(
-            ident,
+        match_ignore_ascii_case!(ident, {
             "normal"
                 | "size"
                 | "inline-size"
@@ -987,8 +1007,9 @@ impl ReservedValues for ContainerReserved {
                 | "inherit"
                 | "unset"
                 | "revert"
-                | "revert-layer"
-        )
+                | "revert-layer" => false,
+            _ => true,
+        })
     }
 
     fn reset(&mut self) {}
@@ -1002,20 +1023,19 @@ enum GridPropertyKind {
 }
 
 fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
-    match ident {
+    match_ignore_ascii_case!(ident, {
         "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
         | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
         "grid-template" | "grid-template-columns" | "grid-template-rows" => {
             Some(GridPropertyKind::TemplateLike)
-        }
+        },
         "grid-template-areas" => Some(GridPropertyKind::TemplateAreas),
         _ => None,
-    }
+    })
 }
 
 fn is_reserved_grid_ident(ident: &str) -> bool {
-    matches!(
-        ident,
+    match_ignore_ascii_case!(ident, {
         "auto"
             | "span"
             | "auto-flow"
@@ -1031,12 +1051,16 @@ fn is_reserved_grid_ident(ident: &str) -> bool {
             | "inherit"
             | "unset"
             | "revert"
-            | "revert-layer"
-    )
+            | "revert-layer" => true,
+        _ => false,
+    })
 }
 
 fn is_reserved_container_query_ident(ident: &str) -> bool {
-    matches!(ident, "none" | "and" | "or" | "not")
+    match_ignore_ascii_case!(ident, {
+        "none" | "and" | "or" | "not" => true,
+        _ => false,
+    })
 }
 
 fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range; 4]> {

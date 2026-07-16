@@ -616,7 +616,7 @@ pub fn is_ident_start(c: char) -> bool {
     c == C_LOW_LINE
         || (c >= C_LOWER_A && c <= C_LOWER_Z)
         || (c >= C_UPPER_A && c <= C_UPPER_Z)
-        || c > '\u{80}'
+        || c >= '\u{80}'
 }
 
 pub fn is_ident(c: char) -> bool {

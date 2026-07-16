@@ -1375,6 +1375,22 @@ fn css_modules_counter_style() {
 }
 
 #[test]
+fn css_modules_reserved_values_are_ascii_case_insensitive() {
+    let input = indoc! {r#"
+        .case-insensitive {
+            animation: LiNeAr 1s;
+            list-style: NoNe;
+            container: NoRmAl;
+            GrId-CoLuMn: SpAn 1;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".case-insensitive", false);
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
 fn css_modules_font_palette() {
     let input = indoc! {r#"
         @font-palette-values --Cooler {
@@ -1626,6 +1642,15 @@ fn css_modules_grid() {
     assert_local_grid_decl_dependency(input, &dependencies[7], "hero");
     assert_local_grid_decl_dependency(input, &dependencies[8], "hero");
     assert_eq!(dependencies.len(), 9);
+}
+
+#[test]
+fn css_modules_ident_start_includes_u0080() {
+    let input = ".\u{80} {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".\u{80}", false);
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
