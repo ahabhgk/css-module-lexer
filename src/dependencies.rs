@@ -373,6 +373,19 @@ fn trim_slice(input: &str) -> &str {
     &input[start..end]
 }
 
+fn trim_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m str) {
+    let bytes = masked.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && is_css_space_byte(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_css_space_byte(bytes[end - 1]) {
+        end -= 1;
+    }
+    (&input[start..end], &masked[start..end])
+}
+
 fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
     let input = trim_slice(input);
     let Some(rest) = input.strip_prefix(keyword) else {
@@ -412,8 +425,7 @@ fn mask_css_comments(input: &str) -> String {
 }
 
 fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
+    let (input, masked) = trim_aligned_slices(input, masked);
     if input.is_empty() {
         return None;
     }
@@ -445,7 +457,7 @@ fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str
         start
     };
 
-    let from = trim_slice(&input[token_start..end]);
+    let from = &input[token_start..end];
     let mut word_end = token_start;
     while word_end > 0 && is_css_space_byte(bytes[word_end - 1]) {
         word_end -= 1;
@@ -462,12 +474,12 @@ fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str
         return None;
     }
 
-    Some((trim_slice(&input[..word_start]), from))
+    let (before_from, _) = trim_aligned_slices(&input[..word_start], &masked[..word_start]);
+    Some((before_from, from))
 }
 
 fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s str; 2]> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
+    let (input, masked) = trim_aligned_slices(input, masked);
     let (input, masked) = if input.starts_with('(') && input.ends_with(')') && masked.len() >= 2 {
         (&input[1..input.len() - 1], &masked[1..masked.len() - 1])
     } else {
@@ -493,7 +505,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
         } else if byte == b')' && depth > 0 {
             depth -= 1;
         } else if byte == b',' && depth == 0 {
-            let item = trim_slice(&input[start..i]);
+            let (item, _) = trim_aligned_slices(&input[start..i], &masked[start..i]);
             if !item.is_empty() {
                 result.push(item);
             }
@@ -501,7 +513,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
         }
         i += 1;
     }
-    let item = trim_slice(&input[start..]);
+    let (item, _) = trim_aligned_slices(&input[start..], &masked[start..]);
     if !item.is_empty() {
         result.push(item);
     }
@@ -533,7 +545,8 @@ fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
 
 fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     let masked = mask_css_comments(input);
-    if let Some((before_from, from)) = split_value_at_rule_from(input, &masked) {
+    let (input, masked) = trim_aligned_slices(input, &masked);
+    if let Some((before_from, from)) = split_value_at_rule_from(input, masked) {
         let masked_before_from = &masked[..before_from.len()];
         let items = split_value_at_rule_items(before_from, masked_before_from)
             .into_iter()
@@ -542,8 +555,6 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
         return ValueAtRule::Import { from, items };
     }
 
-    let input = trim_slice(input);
-    let masked = trim_slice(&masked);
     if let Some(index) = masked.find(':') {
         return ValueAtRule::Value {
             local_name: trim_slice(&input[..index]),
@@ -1702,14 +1713,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 }
             }
             ValueAtRule::Value { local_name, value } => {
-                if local_name.is_empty() {
+                if local_name.is_empty() || value.is_empty() {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, at_rule_end),
                         kind: WarningKind::Unexpected {
                             message: "Broken '@value' at-rule",
                         },
                     });
-                } else {
+                }
+                if !local_name.is_empty() {
                     self.handle_dependency
                         .handle_dependency(Dependency::ICSSExportValue {
                             prop: local_name,
@@ -3234,9 +3246,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
 
             let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
+            let trailing_trivia_start = lexer.cur_pos()?;
             let has_after_white_space = self.has_after_white_space(lexer)?;
+            let has_trailing_trivia = lexer.cur_pos()? != trailing_trivia_start;
             let c = lexer.cur()?;
-            if c != C_RIGHT_PARENTHESIS && c != C_LEFT_CURLY && c != C_COMMA {
+            if c != C_RIGHT_PARENTHESIS
+                && c != C_COMMA
+                && (c != C_LEFT_CURLY || (has_trailing_trivia && !has_after_white_space))
+            {
                 if should_have_after_white_space && !has_after_white_space {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, end),

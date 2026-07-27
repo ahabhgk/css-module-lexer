@@ -4,8 +4,10 @@ use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
+use css_module_lexer::Range;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
+use css_module_lexer::WarningKind;
 use indoc::indoc;
 use smallvec::SmallVec;
 
@@ -556,6 +558,15 @@ fn icss_import_url_value() {
 }
 
 #[test]
+fn icss_import_url_value_with_comments_and_spacing() {
+    let input = "@import/* before */ importPath /* after */;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_icss_import_url_dependency(input, &dependencies[0], "importPath", input, "importPath");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
 fn invalid_icss_import_url_value() {
     let input = "@import importPath screen;";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
@@ -918,6 +929,76 @@ fn css_modules_pseudo_2() {
     assert_local_class_dependency(input, &dependencies[4], ".d", false);
     assert_local_id_dependency(input, &dependencies[5], "#e", false);
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_local_class_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_local_class_dependency(input, &dependencies[1], ".class", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_local_id_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/#id {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_local_id_dependency(input, &dependencies[1], "#id", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_global_class_after_comment_reports_missing_whitespace() {
+    let input = ":global/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 7),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":global/** comment **/");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn css_modules_local_block_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/{ color: red; }";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
@@ -2197,6 +2278,38 @@ fn value_at_rule_export() {
     assert_icss_symbol_dependency(input, &dependencies[5], "primary", "primary");
     assert_icss_symbol_dependency(input, &dependencies[6], "spacing", "spacing");
     assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
+fn value_at_rule_missing_value_warns_and_keeps_dependencies() {
+    let input = "@value test;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 12),
+            WarningKind::Unexpected {
+                message: "Broken '@value' at-rule",
+            },
+        )]
+    );
+    assert_icss_export_value_dependency(input, &dependencies[0], "test", "");
+    assert_replace_dependency(input, &dependencies[1], "", input);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn value_at_rule_comment_separated_from_has_clean_request() {
+    let quoted =
+        r#"@value/* test */test-v2/* test */from/* test */"./colors.module.css"/* test */;"#;
+    let (dependencies, warnings) = collect_dependencies(quoted, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(quoted, &dependencies[0], r#""./colors.module.css""#);
+
+    let identifier = "@value/* test */red/* test */from/* test */colors/* test */;";
+    let (dependencies, warnings) = collect_dependencies(identifier, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(identifier, &dependencies[0], "colors");
 }
 
 #[test]
