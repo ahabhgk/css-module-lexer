@@ -1001,6 +1001,102 @@ fn css_modules_local_block_after_comment_reports_missing_whitespace() {
     assert_eq!(dependencies.len(), 1);
 }
 
+const RSPACK_NESTED_COMMENT_SEPARATED_MODES: &str = r#"
+.no-space {
+    :global.class-no-space {
+        color: red;
+    }
+
+    :global/** test **/.class {
+        color: red;
+    }
+
+    :local.class {
+        color: red;
+    }
+
+    :local/** test **/.class {
+        color: red;
+    }
+
+    :local/** test **/#hash {
+        color: red;
+    }
+
+    :local/** test **/{
+        color: red;
+    }
+}
+"#;
+
+#[test]
+fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
+    let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
+    let (dependencies, _) = collect_dependencies(input, Mode::Local);
+
+    let local_dependencies = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, explicit, .. }
+            | Dependency::LocalId { name, explicit, .. } => Some((*name, *explicit)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_dependencies,
+        [
+            (".no-space", false),
+            (".class", true),
+            (".class", true),
+            ("#hash", true),
+        ]
+    );
+
+    let replacements = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::Replace { range, .. } => Lexer::slice_range(input, range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replacements,
+        [
+            ":global",
+            ":global/** test **/",
+            ":local",
+            ":local/** test **/",
+            ":local/** test **/",
+            ":local/** test **/",
+        ]
+    );
+}
+
+#[test]
+fn rspack_nested_comment_separated_modes_warn_in_source_order() {
+    let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
+    let (_, warnings) = collect_dependencies(input, Mode::Local);
+
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+        ]
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .collect::<Vec<_>>(),
+        [":global", ":global", ":local", ":local", ":local", ":local"]
+    );
+}
+
 #[test]
 fn css_modules_uppercase_pseudo_does_not_leave_balanced_stack_dirty() {
     let input = indoc! {r#"
@@ -2296,6 +2392,29 @@ fn value_at_rule_missing_value_warns_and_keeps_dependencies() {
     assert_icss_export_value_dependency(input, &dependencies[0], "test", "");
     assert_replace_dependency(input, &dependencies[1], "", input);
     assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn rspack_value_at_rule_only_bare_name_is_newly_broken() {
+    let input = r#"@value v-comment-broken:;
+@value v-comment-broken-v1:/* comment */;
+@value v-empty: ;
+@value v-empty-v2:   ;
+@value v-empty-v3: /* comment */;
+@value multiline-empty: /*
+    multiline
+    comment
+*/;
+@value;
+@value test;"#;
+    let (_, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .collect::<Vec<_>>(),
+        ["@value;", "@value test;"]
+    );
 }
 
 #[test]

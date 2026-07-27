@@ -179,6 +179,10 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
+    pub fn contains_only_mode_pseudo_classes(&self) -> bool {
+        self.0.iter().all(|item| item.kind.is_mode_class())
+    }
+
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if item.kind.is_mode_local() {
@@ -347,6 +351,7 @@ enum ValueAtRule<'s> {
     Value {
         local_name: &'s str,
         value: &'s str,
+        has_colon: bool,
     },
 }
 
@@ -559,6 +564,7 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
         return ValueAtRule::Value {
             local_name: trim_slice(&input[..index]),
             value: trim_slice(&input[index + 1..]),
+            has_colon: true,
         };
     }
 
@@ -577,6 +583,7 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     ValueAtRule::Value {
         local_name: trim_slice(&input[..split]),
         value: trim_slice(&input[value_start..]),
+        has_colon: false,
     }
 }
 
@@ -1712,8 +1719,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     }
                 }
             }
-            ValueAtRule::Value { local_name, value } => {
-                if local_name.is_empty() || value.is_empty() {
+            ValueAtRule::Value {
+                local_name,
+                value,
+                has_colon,
+            } => {
+                if local_name.is_empty() || (!has_colon && value.is_empty()) {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, at_rule_end),
                         kind: WarningKind::Unexpected {
@@ -3054,7 +3065,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
+        if matches!(self.scope, Scope::InBlock)
+            && !self.balanced.is_empty()
+            && !self.balanced.contains_only_mode_pseudo_classes()
+        {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
