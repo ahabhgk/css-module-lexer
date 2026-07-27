@@ -944,7 +944,7 @@ fn css_modules_local_class_after_comment_reports_missing_whitespace() {
             },
         )]
     );
-    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_class_dependency(input, &dependencies[1], ".class", true);
     assert_eq!(dependencies.len(), 2);
 }
@@ -962,7 +962,7 @@ fn css_modules_local_id_after_comment_reports_missing_whitespace() {
             },
         )]
     );
-    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_id_dependency(input, &dependencies[1], "#id", true);
     assert_eq!(dependencies.len(), 2);
 }
@@ -980,7 +980,7 @@ fn css_modules_global_class_after_comment_reports_missing_whitespace() {
             },
         )]
     );
-    assert_replace_dependency(input, &dependencies[0], "", ":global/** comment **/");
+    assert_replace_dependency(input, &dependencies[0], "", ":global");
     assert_eq!(dependencies.len(), 1);
 }
 
@@ -997,8 +997,16 @@ fn css_modules_local_block_after_comment_reports_missing_whitespace() {
             },
         )]
     );
-    assert_replace_dependency(input, &dependencies[0], "", ":local/** comment **/");
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn css_mode_does_not_recover_comment_separated_mode_dependencies() {
+    let input = ":local/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert!(warnings.is_empty());
 }
 
 const RSPACK_NESTED_COMMENT_SEPARATED_MODES: &str = r#"
@@ -1061,14 +1069,7 @@ fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
         .collect::<Vec<_>>();
     assert_eq!(
         replacements,
-        [
-            ":global",
-            ":global/** test **/",
-            ":local",
-            ":local/** test **/",
-            ":local/** test **/",
-            ":local/** test **/",
-        ]
+        [":global", ":global", ":local", ":local", ":local", ":local",]
     );
 }
 
@@ -1095,6 +1096,43 @@ fn rspack_nested_comment_separated_modes_warn_in_source_order() {
             .collect::<Vec<_>>(),
         [":global", ":global", ":local", ":local", ":local", ":local"]
     );
+}
+
+#[test]
+fn rspack_mixed_nested_selector_does_not_gain_recovered_dependencies() {
+    let input = indoc! {r#"
+        :global .global-foo, :local .bar {
+            :local .local-in-global {
+                color: blue;
+            }
+
+            @media screen {
+                :global .my-global-class-again,
+                :local .my-global-class-again {
+                    color: red;
+                }
+            }
+        }
+    "#};
+    let (dependencies, _) = collect_dependencies(input, Mode::Local);
+    assert!(!dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalClass {
+            name: ".my-global-class-again",
+            ..
+        }
+    )));
+
+    let mixed_selector_start = input.find(":global .my-global-class-again").unwrap() as u32;
+    let mixed_selector_end = input
+        .find(":local .my-global-class-again")
+        .map(|start| start + ":local".len())
+        .unwrap() as u32;
+    assert!(!dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::Replace { range, .. }
+            if range.start >= mixed_selector_start && range.end <= mixed_selector_end
+    )));
 }
 
 #[test]

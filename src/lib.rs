@@ -47,5 +47,11 @@ pub fn collect_dependencies(input: &str, mode: Mode) -> (Vec<Dependency<'_>>, Ve
     let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
     lex_dependencies(input, mode, |v| dependencies.push(v), |v| warnings.push(v));
+    dependencies::recover_missing_whitespace_mode_dependencies(
+        input,
+        mode,
+        &mut dependencies,
+        &mut warnings,
+    );
     (dependencies, warnings)
 }

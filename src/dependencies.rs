@@ -179,10 +179,6 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
-    pub fn contains_only_mode_pseudo_classes(&self) -> bool {
-        self.0.iter().all(|item| item.kind.is_mode_class())
-    }
-
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if item.kind.is_mode_local() {
@@ -1308,6 +1304,155 @@ impl Display for Warning<'_> {
             WarningKind::NotPure { message, .. } => write!(f, "Pure globals is not allowed in pure mode, {message}"),
             WarningKind::UnexpectedComposition {  message, .. } => write!(f, "Composition is {message}"),
         }
+    }
+}
+
+fn scan_css_identifier_end(bytes: &[u8], mut offset: usize) -> usize {
+    while let Some(byte) = bytes.get(offset).copied() {
+        if byte.is_ascii_alphanumeric() || byte >= 0x80 || matches!(byte, b'-' | b'_' | b'\\') {
+            offset += 1;
+        } else {
+            break;
+        }
+    }
+    offset
+}
+
+fn add_or_normalize_mode_replace_dependency(
+    dependencies: &mut Vec<Dependency<'_>>,
+    mode_start: usize,
+    mode_end: usize,
+) {
+    for dependency in dependencies.iter_mut() {
+        if let Dependency::Replace { content: "", range } = dependency {
+            if range.start == mode_start as Pos && range.end >= mode_end as Pos {
+                range.end = mode_end as Pos;
+                return;
+            }
+        }
+    }
+
+    dependencies.push(Dependency::Replace {
+        content: "",
+        range: Range::new(mode_start as Pos, mode_end as Pos),
+    });
+}
+
+pub(crate) fn recover_missing_whitespace_mode_dependencies<'s>(
+    input: &'s str,
+    mode: Mode,
+    dependencies: &mut Vec<Dependency<'s>>,
+    warnings: &mut Vec<Warning<'s>>,
+) {
+    if mode == Mode::Css {
+        return;
+    }
+
+    let bytes = input.as_bytes();
+    let mut offset = 0;
+
+    while let Some(relative_start) = input[offset..].find(':') {
+        let mode_start = offset + relative_start;
+        let Some(explicit_mode) = input[mode_start..]
+            .strip_prefix(":local")
+            .map(|_| Mode::Local)
+            .or_else(|| {
+                input[mode_start..]
+                    .strip_prefix(":global")
+                    .map(|_| Mode::Global)
+            })
+        else {
+            offset = mode_start + 1;
+            continue;
+        };
+
+        let mode_len = match explicit_mode {
+            Mode::Local => ":local".len(),
+            Mode::Global => ":global".len(),
+            Mode::Pure | Mode::Css => unreachable!(),
+        };
+        let mode_end = mode_start + mode_len;
+        let mut selector_start = mode_end;
+        let mut has_comment = false;
+        while input[selector_start..].starts_with("/*") {
+            let Some(comment_end) = input[selector_start + 2..].find("*/") else {
+                break;
+            };
+            selector_start += 2 + comment_end + 2;
+            has_comment = true;
+        }
+
+        let Some(prefix) = bytes.get(selector_start).copied() else {
+            break;
+        };
+        let selector_end = if prefix == b'{' {
+            selector_start
+        } else if prefix == b'.' || prefix == b'#' {
+            let selector_end = scan_css_identifier_end(bytes, selector_start + 1);
+            if selector_end == selector_start + 1 {
+                offset = selector_start + 1;
+                continue;
+            }
+            selector_end
+        } else {
+            offset = mode_end;
+            continue;
+        };
+
+        if prefix == b'{' && !has_comment {
+            offset = selector_start + 1;
+            continue;
+        }
+
+        add_or_normalize_mode_replace_dependency(dependencies, mode_start, mode_end);
+
+        if explicit_mode == Mode::Local && prefix != b'{' {
+            let range = Range::new(selector_start as Pos, selector_end as Pos);
+            let name = &input[selector_start..selector_end];
+            let dependency_exists = dependencies.iter().any(|dependency| match dependency {
+                Dependency::LocalClass {
+                    range: existing_range,
+                    ..
+                } if prefix == b'.' => existing_range == &range,
+                Dependency::LocalId {
+                    range: existing_range,
+                    ..
+                } if prefix == b'#' => existing_range == &range,
+                _ => false,
+            });
+            if !dependency_exists {
+                dependencies.push(if prefix == b'.' {
+                    Dependency::LocalClass {
+                        name,
+                        range,
+                        explicit: true,
+                    }
+                } else {
+                    Dependency::LocalId {
+                        name,
+                        range,
+                        explicit: true,
+                    }
+                });
+            }
+        }
+
+        if !warnings.iter().any(|warning| {
+            warning.range.start <= mode_start as Pos && warning.range.end >= mode_end as Pos
+        }) {
+            warnings.push(Warning::new(
+                Range::new(mode_start as Pos, mode_end as Pos),
+                WarningKind::MissingWhitespace {
+                    surrounding: "trailing",
+                },
+            ));
+        }
+
+        offset = if prefix == b'{' {
+            selector_start + 1
+        } else {
+            selector_end
+        };
     }
 }
 
@@ -3065,10 +3210,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock)
-            && !self.balanced.is_empty()
-            && !self.balanced.contains_only_mode_pseudo_classes()
-        {
+        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
