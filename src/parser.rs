@@ -18,7 +18,14 @@ pub trait TokenVisitor<'s> {
     fn comment(&mut self, _: &mut CssParser<'s>, _: Pos, _: Pos) -> Option<()> {
         Some(())
     }
-    fn function(&mut self, parser: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()>;
+    fn function(
+        &mut self,
+        parser: &mut CssParser<'s>,
+        start: Pos,
+        end: Pos,
+        value_start: Pos,
+        value_end: Pos,
+    ) -> Option<()>;
     fn ident(&mut self, parser: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()>;
     fn url(
         &mut self,
@@ -134,7 +141,13 @@ impl<'s> CssParser<'s> {
                 }
                 Token::Function => {
                     self.advance();
-                    let _ = visitor.function(self, start, end);
+                    let _ = visitor.function(
+                        self,
+                        start,
+                        end,
+                        token.value_span.start,
+                        token.value_span.end,
+                    );
                 }
                 Token::AtKeyword => {
                     self.advance();
@@ -238,6 +251,10 @@ impl<'s> CssParser<'s> {
         let token = self.current()?;
         self.index += 1;
         Some(token)
+    }
+
+    pub(crate) fn consumed_tokens(&self) -> &[TokenAndSpan] {
+        &self.tokens[..self.index]
     }
 
     pub(crate) fn position(&self) -> Pos {
@@ -347,14 +364,6 @@ impl<'s> CssParser<'s> {
             first_comment_start,
             has_white_space,
         })
-    }
-
-    pub(crate) fn token_before(&self, position: Pos) -> Option<TokenAndSpan> {
-        self.tokens
-            .iter()
-            .rev()
-            .find(|token| token.span.end <= position)
-            .copied()
     }
 
     pub(crate) fn rebased_tokens(&self, start: Pos, end: Pos) -> SmallVec<[TokenAndSpan; 16]> {

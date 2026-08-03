@@ -1255,7 +1255,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         end: Pos,
     ) -> Option<Pos> {
         let mut position = end;
-        while let Some(token) = lexer.token_before(position) {
+        // The closing parenthesis has already been consumed.
+        for token in lexer.consumed_tokens().iter().rev().skip(1) {
             if !matches!(token.token, Token::WhiteSpace | Token::Comment) {
                 break;
             }
@@ -1264,20 +1265,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(end - position)
     }
 
-    fn should_have_after_white_space(&self, lexer: &CssParser<'s>, end: Pos) -> bool {
+    fn should_have_after_white_space(&self, lexer: &CssParser<'s>) -> bool {
         let mut has_white_space = false;
-        let mut position = end;
+        // The pseudo colon and name have already been consumed.
+        let mut tokens = lexer.consumed_tokens().iter().rev().skip(2);
         let previous = loop {
-            let Some(token) = lexer.token_before(position) else {
+            let Some(token) = tokens.next() else {
                 return true;
             };
             match token.token {
-                Token::Comment => position = token.span.start,
+                Token::Comment => {}
                 Token::WhiteSpace => {
                     has_white_space = true;
-                    position = token.span.start;
                 }
-                _ => break token,
+                _ => break *token,
             }
         };
         // start of a :global :local
@@ -2511,7 +2512,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
         Some(())
     }
 
-    fn function(&mut self, lexer: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()> {
+    fn function(
+        &mut self,
+        lexer: &mut CssParser<'s>,
+        start: Pos,
+        end: Pos,
+        value_start: Pos,
+        value_end: Pos,
+    ) -> Option<()> {
         let name = lexer.slice(start, end)?;
         let item = BalancedItem::new(name, start, end);
         let at_import_top_level =
@@ -2544,14 +2552,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        let token = lexer.token_before(end)?;
-        let token_name = lexer.decoded_token_name(token);
+        let raw_token_name = lexer.slice(value_start, value_end)?;
+        let token_name = escape::unescape(raw_token_name);
         if mode_data.is_current_local_mode() && token_name.starts_with("--") {
-            let prefix_len = escape::raw_prefix_len(lexer.raw_token_name(token), "--")? as Pos;
+            let prefix_len = escape::raw_prefix_len(raw_token_name, "--")? as Pos;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFunction {
-                    name: lexer.slice(token.value_span.start + prefix_len, token.value_span.end)?,
-                    range: Range::new(start, token.value_span.end),
+                    name: lexer.slice(value_start + prefix_len, value_end)?,
+                    range: Range::new(start, value_end),
                 });
         }
         if mode_data.is_current_local_mode() && function_name_eq(name, "var") {
@@ -3096,7 +3104,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 });
             }
 
-            let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
+            let should_have_after_white_space = self.should_have_after_white_space(lexer);
             let trivia = lexer.consume_trivia();
             let has_after_white_space = trivia.has_white_space;
             let has_trailing_trivia = trivia.end != end;
