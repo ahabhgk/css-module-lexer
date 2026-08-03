@@ -1,7 +1,7 @@
 use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
-use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
+use css_module_lexer::Parser;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use indoc::indoc;
@@ -19,12 +19,12 @@ impl Scope {
         let mut result = String::new();
         let mut warnings = Vec::new();
         let mut index = 0;
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Parser::new(input);
         let mut exports = LinkedHashMap::new();
         let mut visitor = LexDependencies::new(
             |dependency| match dependency {
                 Dependency::LocalClass { name, range, .. } => {
-                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    result += Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let name = &name[1..];
                     result += ".";
                     let new_name = generate_local_name(name);
@@ -33,7 +33,7 @@ impl Scope {
                     index = range.end;
                 }
                 Dependency::LocalId { name, range, .. } => {
-                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    result += Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let name = &name[1..];
                     result += "#";
                     let new_name = generate_local_name(name);
@@ -42,14 +42,14 @@ impl Scope {
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range } => {
-                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    result += Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let new_name = generate_local_name(name);
                     result += &new_name;
                     exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
                 Dependency::LocalKeyframesDecl { name, range } => {
-                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    result += Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let new_name = generate_local_name(name);
                     result += &new_name;
                     exports.insert(name.to_string(), vec![new_name]);
@@ -78,11 +78,11 @@ impl Scope {
                     }
                 }
                 Dependency::Replace { content, range } => {
-                    let original = Lexer::slice_range(input, &range).unwrap();
+                    let original = Parser::slice_range(input, &range).unwrap();
                     if original.starts_with(":export") || original.starts_with(":import(") {
                         return;
                     }
-                    result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                    result += Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                     result += content;
                     index = range.end;
                 }
@@ -91,10 +91,10 @@ impl Scope {
             |warning| warnings.push(warning),
             Mode::Global,
         );
-        lexer.lex(&mut visitor);
+        lexer.parse(&mut visitor);
         let len = input.len() as u32;
         if index != len {
-            result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
+            result += Parser::slice_range(input, &Range::new(index, len)).unwrap();
         }
         if !exports.is_empty() {
             result += "\n:export {\n";

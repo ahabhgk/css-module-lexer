@@ -193,13 +193,19 @@ pub struct TokenAndSpan {
     pub token: Token,
     /// The complete source range occupied by the token.
     pub span: Span,
+    /// The semantic value range inside the complete token range.
+    pub value_span: Span,
 }
 
 impl TokenAndSpan {
     /// Creates a token with its source span.
     #[inline]
-    pub const fn new(token: Token, span: Span) -> Self {
-        Self { token, span }
+    pub const fn new(token: Token, span: Span, value_span: Span) -> Self {
+        Self {
+            token,
+            span,
+            value_span,
+        }
     }
 }
 
@@ -235,10 +241,9 @@ impl<'a> Tokenizer<'a> {
     pub fn next(&mut self) -> Result<TokenAndSpan, ()> {
         let start = self.position();
         let token = next_token(self)?;
-        Ok(TokenAndSpan::new(
-            token,
-            Span::new(start.0 as u32, self.position as u32),
-        ))
+        let span = Span::new(start.0 as u32, self.position as u32);
+        let value_span = token_value_span(self.input, token, span);
+        Ok(TokenAndSpan::new(token, span, value_span))
     }
 
     #[inline]
@@ -504,6 +509,70 @@ pub struct SourceLocation {
     /// The column number within a line, starting at 1 for first the character of the line.
     /// Column numbers are counted in UTF-16 code units.
     pub column: u32,
+}
+
+fn token_value_span(input: &str, token: Token, span: Span) -> Span {
+    let raw = &input[span.start as usize..span.end as usize];
+    match token {
+        Token::Ident => Span::new(
+            span.start,
+            trim_css_whitespace_end(input, span.start, span.end),
+        ),
+        Token::AtKeyword | Token::IDHash => Span::new(
+            span.start + 1,
+            trim_css_whitespace_end(input, span.start + 1, span.end),
+        ),
+        Token::Hash => Span::new(span.start + 1, span.end),
+        Token::Function => Span::new(
+            span.start,
+            trim_css_whitespace_end(input, span.start, span.end - 1),
+        ),
+        Token::QuotedString | Token::BadString => {
+            let start = span.start + 1;
+            let end = if raw.len() > 1 && raw.as_bytes().last() == raw.as_bytes().first() {
+                span.end - 1
+            } else {
+                span.end
+            };
+            Span::new(start, end)
+        }
+        Token::Comment => {
+            let start = (span.start + 2).min(span.end);
+            let end = if raw.ends_with("*/") {
+                span.end - 2
+            } else {
+                span.end
+            };
+            Span::new(start, end)
+        }
+        Token::UnquotedUrl => {
+            let open = raw
+                .find('(')
+                .expect("an unquoted URL token contains an opening parenthesis");
+            let bytes = raw.as_bytes();
+            let mut start = open + 1;
+            let mut end = raw.len();
+            while start < end && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r' | 0x0c) {
+                start += 1;
+            }
+            if bytes.get(end - 1) == Some(&b')') {
+                end -= 1;
+            }
+            while end > start && matches!(bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0c) {
+                end -= 1;
+            }
+            Span::new(span.start + start as u32, span.start + end as u32)
+        }
+        _ => span,
+    }
+}
+
+fn trim_css_whitespace_end(input: &str, start: u32, end: u32) -> u32 {
+    let value = &input[start as usize..end as usize];
+    end - (value.len()
+        - value
+            .trim_end_matches([' ', '\t', '\n', '\r', '\u{c}'])
+            .len()) as u32
 }
 
 fn next_token(tokenizer: &mut Tokenizer<'_>) -> Result<Token, ()> {
@@ -923,10 +992,6 @@ fn consume_unquoted_url(tokenizer: &mut Tokenizer<'_>) -> Result<Token, ()> {
                     return consume_bad_url(tokenizer)
                 },
                 b'\\' => {
-                    if tokenizer.has_newline_at(1) {
-                        tokenizer.advance(1);
-                        return consume_bad_url(tokenizer)
-                    }
                     tokenizer.consume_escape_sequence();
                 },
                 b'\0' => {

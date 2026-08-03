@@ -3,8 +3,8 @@ mod postcss_modules;
 use css_module_lexer::collect_dependencies;
 use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
-use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
+use css_module_lexer::Parser;
 use css_module_lexer::Range;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 
 fn assert_warning(input: &str, warning: &Warning, range_content: &str) {
     assert_eq!(
-        Lexer::slice_range(input, warning.range()).unwrap(),
+        Parser::slice_range(input, warning.range()).unwrap(),
         range_content
     );
 }
@@ -36,7 +36,7 @@ fn assert_url_dependency(
     };
     assert_eq!(*req, request);
     assert_eq!(*k, kind);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_import_dependency(
@@ -62,7 +62,7 @@ fn assert_import_dependency(
     assert_eq!(*actual_layer, layer);
     assert_eq!(*actual_supports, supports);
     assert_eq!(*actual_media, media);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_icss_import_url_dependency(
@@ -81,9 +81,9 @@ fn assert_icss_import_url_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
     assert_eq!(
-        Lexer::slice_range(input, name_range).unwrap(),
+        Parser::slice_range(input, name_range).unwrap(),
         name_range_content
     );
 }
@@ -99,7 +99,7 @@ fn assert_local_class_dependency(input: &str, dependency: &Dependency, name: &st
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_id_dependency(input: &str, dependency: &Dependency, name: &str, explicit: bool) {
@@ -113,7 +113,7 @@ fn assert_local_id_dependency(input: &str, dependency: &Dependency, name: &str, 
     };
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_explicit, explicit);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_var_dependency(
@@ -133,7 +133,7 @@ fn assert_local_var_dependency(
     assert_eq!(*actual_name, name);
     assert_eq!(*actual_from, from);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -148,7 +148,7 @@ fn assert_local_var_decl_dependency(input: &str, dependency: &Dependency, name: 
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -163,7 +163,7 @@ fn assert_local_property_decl_dependency(input: &str, dependency: &Dependency, n
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -177,7 +177,7 @@ fn assert_local_keyframes_decl_dependency(input: &str, dependency: &Dependency, 
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -189,7 +189,7 @@ fn assert_local_keyframes_dependency(input: &str, dependency: &Dependency, name:
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_counter_style_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -201,7 +201,7 @@ fn assert_local_counter_style_decl_dependency(input: &str, dependency: &Dependen
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -213,7 +213,7 @@ fn assert_local_counter_style_dependency(input: &str, dependency: &Dependency, n
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_font_palette_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -226,7 +226,7 @@ fn assert_local_font_palette_decl_dependency(input: &str, dependency: &Dependenc
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -241,7 +241,7 @@ fn assert_local_font_palette_dependency(input: &str, dependency: &Dependency, na
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -255,7 +255,7 @@ fn assert_local_container_dependency(input: &str, dependency: &Dependency, name:
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_container_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -267,7 +267,7 @@ fn assert_local_container_decl_dependency(input: &str, dependency: &Dependency, 
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_function_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -280,7 +280,7 @@ fn assert_local_function_dependency(input: &str, dependency: &Dependency, name: 
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -295,7 +295,7 @@ fn assert_local_function_decl_dependency(input: &str, dependency: &Dependency, n
     };
     assert_eq!(*actual_name, name);
     assert_eq!(
-        Lexer::slice_range(input, range).unwrap(),
+        Parser::slice_range(input, range).unwrap(),
         format!("--{}", name)
     );
 }
@@ -309,7 +309,7 @@ fn assert_local_grid_dependency(input: &str, dependency: &Dependency, name: &str
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name: &str) {
@@ -321,7 +321,7 @@ fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name:
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), name);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), name);
 }
 
 fn assert_composes_dependency(
@@ -350,7 +350,7 @@ fn assert_composes_dependency(
         SmallVec::<[&str; 2]>::from_iter(names.split(' '))
     );
     assert_eq!(*actual_from, from);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_replace_dependency(
@@ -367,7 +367,7 @@ fn assert_replace_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_content, content);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_charset_dependency(
@@ -384,7 +384,7 @@ fn assert_charset_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_value, value);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 fn assert_icss_import_from_dependency(_input: &str, dependency: &Dependency, path: &str) {
@@ -442,7 +442,7 @@ fn assert_icss_symbol_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_name, name);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(Parser::slice_range(input, range).unwrap(), range_content);
 }
 
 #[test]
@@ -1075,7 +1075,7 @@ fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
     let replacements = dependencies
         .iter()
         .filter_map(|dependency| match dependency {
-            Dependency::Replace { range, .. } => Lexer::slice_range(input, range),
+            Dependency::Replace { range, .. } => Parser::slice_range(input, range),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1104,7 +1104,7 @@ fn rspack_nested_comment_separated_modes_warn_in_source_order() {
     assert_eq!(
         warnings
             .iter()
-            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .map(|warning| Parser::slice_range(input, warning.range()).unwrap())
             .collect::<Vec<_>>(),
         [":global", ":global", ":local", ":local", ":local", ":local"]
     );
@@ -1317,7 +1317,7 @@ fn pure_mode_ignore_comment_does_not_affect_following_rule() {
     "#};
     let (_, warnings) = collect_dependencies(input, Mode::Pure);
     assert_eq!(warnings.len(), 1);
-    assert!(Lexer::slice_range(input, warnings[0].range())
+    assert!(Parser::slice_range(input, warnings[0].range())
         .unwrap()
         .contains(":global(.not-ignored)"));
 }
@@ -1348,7 +1348,7 @@ fn pure_mode_nested_ignore_comment_does_not_suppress_outer_rule() {
     "#};
     let (_, warnings) = collect_dependencies(input, Mode::Pure);
     assert_eq!(warnings.len(), 1);
-    assert!(Lexer::slice_range(input, warnings[0].range())
+    assert!(Parser::slice_range(input, warnings[0].range())
         .unwrap()
         .contains(":global(.foo)"));
 }
@@ -2430,6 +2430,14 @@ fn icss_export() {
 }
 
 #[test]
+fn icss_export_skips_comment_tokens_but_preserves_string_contents() {
+    let input = r#":export { literal: "/* value */"/* comment */tail; }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_export_value_dependency(input, &dependencies[0], "literal", r#""/* value */"tail"#);
+}
+
+#[test]
 fn value_at_rule_export() {
     let input = indoc! {r#"
         @value primary: red;
@@ -2491,7 +2499,7 @@ fn rspack_value_at_rule_only_bare_name_is_newly_broken() {
     assert_eq!(
         warnings
             .iter()
-            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .map(|warning| Parser::slice_range(input, warning.range()).unwrap())
             .collect::<Vec<_>>(),
         ["@value;", "@value test;"]
     );

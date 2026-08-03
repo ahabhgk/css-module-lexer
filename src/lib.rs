@@ -8,7 +8,6 @@ macro_rules! match_byte {
 
 mod dependencies;
 mod escape;
-mod lexer;
 mod parser;
 mod tokenizer;
 
@@ -20,8 +19,10 @@ pub use dependencies::Range;
 pub use dependencies::UrlRangeKind;
 pub use dependencies::Warning;
 pub use dependencies::WarningKind;
-pub use lexer::Lexer;
-pub use lexer::Pos;
+pub use parser::CssParser as Parser;
+use parser::CssParser;
+
+pub type Pos = u32;
 
 pub trait HandleDependency<'s> {
     fn handle_dependency(&mut self, dependency: Dependency<'s>);
@@ -49,9 +50,9 @@ pub fn lex_dependencies<'s>(
     handle_dependency: impl HandleDependency<'s>,
     handle_warning: impl HandleWarning<'s>,
 ) {
-    let mut lexer = Lexer::new(input);
+    let mut lexer = CssParser::new(input);
     let mut visitor = LexDependencies::new(handle_dependency, handle_warning, mode);
-    lexer.lex(&mut visitor);
+    lexer.parse(&mut visitor);
 }
 
 pub fn collect_dependencies(input: &str, mode: Mode) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {

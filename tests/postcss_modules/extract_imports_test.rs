@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
-use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
+use css_module_lexer::Parser;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use css_module_lexer::WarningKind;
@@ -88,7 +88,7 @@ impl ExtractImports {
         let mut result = String::new();
         let mut warnings = Vec::new();
         let mut index = 0;
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Parser::new(input);
         let mut composes_contents = Vec::new();
         let mut postfix = 0;
         let mut imports: LinkedHashMap<&str, LinkedHashMap<&str, Cow<str>>> = LinkedHashMap::new();
@@ -160,16 +160,16 @@ impl ExtractImports {
                     if !composes_contents.is_empty() {
                         let composes_contents = std::mem::take(&mut composes_contents);
                         result +=
-                            Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                            Parser::slice_range(input, &Range::new(index, range.start)).unwrap();
                         result += "composes: ";
                         result += &composes_contents.join(", ");
                         result += ";";
                         index = range.end;
                     } else {
-                        let original = Lexer::slice_range(input, &range).unwrap();
+                        let original = Parser::slice_range(input, &range).unwrap();
                         if original.starts_with(":export") || original.starts_with(":import(") {
-                            result +=
-                                Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
+                            result += Parser::slice_range(input, &Range::new(index, range.start))
+                                .unwrap();
                             result += content;
                             index = range.end;
                         }
@@ -189,10 +189,10 @@ impl ExtractImports {
             |warning| warnings.push(warning),
             Mode::Local,
         );
-        lexer.lex(&mut visitor);
+        lexer.parse(&mut visitor);
         let len = input.len() as u32;
         if index != len {
-            result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
+            result += Parser::slice_range(input, &Range::new(index, len)).unwrap();
         }
         let order = topological_sort(&graph, &mut warnings);
         for import in order {
