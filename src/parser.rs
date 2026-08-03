@@ -307,23 +307,22 @@ pub(crate) fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     }
 }
 
-pub(crate) fn remove_comments(input: &str) -> Cow<'_, str> {
-    let stream = TokenStream::new(input);
-    let comments = stream
-        .tokens
-        .iter()
-        .filter(|token| token.token == Token::Comment);
-    let mut result = None::<String>;
-    let mut copied_until = 0usize;
+pub(crate) fn parse_icss_export_value(input: &str) -> Cow<'_, str> {
+    let mut tokenizer = Tokenizer::new(input);
+    let mut value = None::<String>;
 
-    for comment in comments {
-        let output = result.get_or_insert_with(|| String::with_capacity(input.len()));
-        output.push_str(&input[copied_until..comment.span.start as usize]);
-        copied_until = comment.span.end as usize;
+    while let Ok(token) = tokenizer.next() {
+        if token.token == Token::Comment {
+            if value.is_none() {
+                value = Some(input[..token.span.start as usize].to_owned());
+            }
+        } else if let Some(value) = &mut value {
+            value.push_str(&input[token.span.start as usize..token.span.end as usize]);
+        }
     }
-    if let Some(mut result) = result {
-        result.push_str(&input[copied_until..]);
-        Cow::Owned(result)
+
+    if let Some(value) = value {
+        Cow::Owned(value)
     } else {
         Cow::Borrowed(input)
     }
@@ -361,9 +360,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn comments_inside_strings_are_not_comment_tokens() {
+    fn icss_export_value_skips_only_comment_tokens() {
         assert_eq!(
-            remove_comments(r#""/* value */"/* comment */tail"#),
+            parse_icss_export_value(r#""/* value */"/* comment */tail"#),
             r#""/* value */"tail"#
         );
     }

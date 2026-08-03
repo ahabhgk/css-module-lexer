@@ -24,8 +24,8 @@ use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
 use crate::lexer::C_SOLIDUS;
 use crate::parser::grid_template_area_ranges;
+use crate::parser::parse_icss_export_value;
 use crate::parser::parse_value_at_rule;
-use crate::parser::remove_comments;
 use crate::parser::ValueAtRule;
 use crate::HandleDependency;
 use crate::HandleWarning;
@@ -1557,7 +1557,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     prop: lexer
                         .slice(prop_start, prop_end)?
                         .trim_end_matches(is_white_space),
-                    value: remove_comments(
+                    value: parse_icss_export_value(
                         lexer
                             .slice(value_start, value_end)?
                             .trim_end_matches(is_white_space),
