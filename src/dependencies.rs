@@ -7,7 +7,6 @@ use smallvec::SmallVec;
 
 use crate::escape;
 use crate::parser::grid_template_area_ranges;
-use crate::parser::parse_value_at_rule_tokens;
 use crate::parser::CssParser;
 use crate::parser::TokenVisitor;
 use crate::parser::ValueAtRule;
@@ -54,9 +53,11 @@ struct ImportData<'s> {
     url_range: Option<Range>,
     supports: ImportDataSupports<'s>,
     layer: ImportDataLayer<'s>,
+    media_start: Option<Pos>,
+    media_end: Option<Pos>,
 }
 
-impl ImportData<'_> {
+impl<'s> ImportData<'s> {
     pub fn new(start: Pos) -> Self {
         Self {
             start,
@@ -65,7 +66,27 @@ impl ImportData<'_> {
             url_range: None,
             supports: ImportDataSupports::None,
             layer: ImportDataLayer::None,
+            media_start: None,
+            media_end: None,
         }
+    }
+
+    fn reset_media(&mut self, start: Pos) {
+        self.media_start = Some(start);
+        self.media_end = None;
+    }
+
+    fn finish_media(&mut self, last_end: Option<Pos>) {
+        if let (Some(start), Some(last_end)) = (self.media_start, last_end) {
+            if last_end > start {
+                self.media_end = Some(last_end);
+            }
+        }
+    }
+
+    fn media(&self, lexer: &CssParser<'s>, end: Pos) -> Option<&'s str> {
+        self.media_end?;
+        lexer.slice(self.media_start?, end)
     }
 
     pub fn in_supports(&self) -> bool {
@@ -1180,12 +1201,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         )
     }
 
-    fn get_media(&self, lexer: &CssParser<'s>, start: Pos, end: Pos) -> Option<&'s str> {
-        lexer
-            .has_non_trivia_between(start, end)
-            .then(|| lexer.slice(start, end))?
-    }
-
     fn lex_charset_at_rule(&mut self, lexer: &mut CssParser<'s>, start: Pos) -> Option<()> {
         lexer.skip_trivia();
         let token = lexer.current()?;
@@ -1254,32 +1269,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer: &CssParser<'s>,
         end: Pos,
     ) -> Option<Pos> {
-        let mut position = end;
-        // The closing parenthesis has already been consumed.
-        for token in lexer.consumed_tokens().iter().rev().skip(1) {
-            if !matches!(token.token, Token::WhiteSpace | Token::Comment) {
-                break;
-            }
-            position = token.span.start;
-        }
+        let position = lexer.last_consumed_trivia_start().unwrap_or(end);
         Some(end - position)
     }
 
     fn should_have_after_white_space(&self, lexer: &CssParser<'s>) -> bool {
-        let mut has_white_space = false;
-        // The pseudo colon and name have already been consumed.
-        let mut tokens = lexer.consumed_tokens().iter().rev().skip(2);
-        let previous = loop {
-            let Some(token) = tokens.next() else {
-                return true;
-            };
-            match token.token {
-                Token::Comment => {}
-                Token::WhiteSpace => {
-                    has_white_space = true;
-                }
-                _ => break *token,
-            }
+        let Some(previous) = lexer.pseudo_previous_non_trivia() else {
+            return true;
         };
         // start of a :global :local
         if matches!(
@@ -1293,7 +1289,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         ) {
             return true;
         }
-        has_white_space
+        lexer.pseudo_leading_has_white_space()
     }
 
     fn eat(
@@ -1460,28 +1456,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         })
     }
 
-    fn consume_value_at_rule_params(&self, lexer: &mut CssParser<'s>) -> Option<(Pos, Pos)> {
-        let start = lexer.position();
-        loop {
-            let token = lexer.current()?;
-            if token.token == Token::Semicolon {
-                let end = lexer.position();
-                lexer.advance();
-                return Some((start, end));
-            }
-            if token.token == Token::CloseCurlyBracket {
-                return Some((start, lexer.position()));
-            }
-            lexer.advance();
-        }
-    }
-
     fn lex_value_at_rule(&mut self, lexer: &mut CssParser<'s>, start: Pos) -> Option<()> {
-        let (params_start, params_end) = self.consume_value_at_rule_params(lexer)?;
-        let at_rule_end = params_end.max(lexer.position());
-        let params = lexer.slice(params_start, params_end)?;
-        let tokens = lexer.rebased_tokens(params_start, params_end);
-        match parse_value_at_rule_tokens(params, tokens) {
+        let (value, at_rule_end) = lexer.parse_value_at_rule()?;
+        match value {
             ValueAtRule::Import { from, items } => {
                 if from.is_empty() || items.is_empty() {
                     self.handle_warning.handle_warning(Warning {
@@ -2184,6 +2161,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 });
                 import_data.url = Some(value);
                 import_data.url_range = Some(Range::new(start, end));
+                import_data.reset_media(end);
             }
             Scope::InBlock => self.handle_dependency.handle_dependency(Dependency::Url {
                 request: value,
@@ -2233,6 +2211,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         range: Range::new(start, end),
                     });
                     import_data.url_range = Some(Range::new(start, end));
+                    import_data.reset_media(end);
                 }
             }
             Scope::InBlock => {
@@ -2361,6 +2340,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
     }
 
     fn semicolon(&mut self, lexer: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()> {
+        if let Scope::InAtImport(import_data) = &mut self.scope {
+            import_data.finish_media(lexer.last_non_trivia_end_before_semicolon());
+        }
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
@@ -2458,12 +2440,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         }
                     }
                 }
-                let last_end = import_data
-                    .supports_range()
-                    .or_else(|| import_data.layer_range())
-                    .unwrap_or(url_range)
-                    .end;
-                let media = self.get_media(lexer, last_end, start);
+                let media = import_data.media(lexer, start);
                 self.handle_dependency
                     .handle_dependency(Dependency::Import {
                         request: url,
@@ -2612,16 +2589,19 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
             let not_in_supports = !import_data.in_supports();
             if matches!(last.kind, BalancedItemKind::Url) && not_in_supports {
                 import_data.url_range = Some(Range::new(last.range.start, end));
+                import_data.reset_media(end);
             } else if matches!(last.kind, BalancedItemKind::Layer) && not_in_supports {
                 import_data.layer = ImportDataLayer::EndLayer {
                     value: lexer.slice(last.range.end, end - 1)?,
                     range: Range::new(last.range.start, end),
                 };
+                import_data.reset_media(end);
             } else if matches!(last.kind, BalancedItemKind::Supports) {
                 import_data.supports = ImportDataSupports::EndSupports {
                     value: lexer.slice(last.range.end, end - 1)?,
                     range: Range::new(last.range.start, end),
-                }
+                };
+                import_data.reset_media(end);
             }
         }
         Some(())
@@ -2797,7 +2777,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                     import_data.layer = ImportDataLayer::EndLayer {
                         value: "",
                         range: Range::new(start, end),
-                    }
+                    };
+                    import_data.reset_media(end);
                 } else if import_data.url.is_none() && import_data.prelude.is_empty() {
                     import_data
                         .prelude
