@@ -564,8 +564,8 @@ fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
     let masked = mask_css_comments(input);
     let (input, masked) = trim_aligned_slices(input, &masked);
     if let Some(index) = masked.find(':') {
-        let (import_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
-        let (local_name, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
+        let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
+        let (import_name, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
         return ValueAtRuleImportItem {
             local_name,
             import_name,

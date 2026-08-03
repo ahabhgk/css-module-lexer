@@ -2560,6 +2560,11 @@ fn rspack_comment_heavy_value_imports_are_parsed() {
             "blue-v1",
         ),
         (
+            "@value/* test */danger/* test */:/* test */error/* test */from/* test */\"./colors.module.css\"/* test */;",
+            "danger",
+            "error",
+        ),
+        (
             "@value /*
     multiline comment
 */ red-v3 /*
