@@ -7,7 +7,7 @@ const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
 #[derive(Clone, Copy)]
 pub(crate) struct Escape {
     pub end: usize,
-    value: Option<char>,
+    pub value: Option<char>,
 }
 
 /// Decodes CSS escape sequences in `input`.
@@ -82,6 +82,34 @@ pub(crate) fn eq_ignore_ascii_case(input: &str, expected: &str) -> bool {
     }
 
     expected.next().is_none()
+}
+
+/// Returns the byte length of an encoded prefix after decoding CSS escapes.
+pub(crate) fn raw_prefix_len(input: &str, expected: &str) -> Option<usize> {
+    let mut position = 0;
+
+    for expected in expected.chars() {
+        if position >= input.len() {
+            return None;
+        }
+        let (value, end) = match input.as_bytes()[position] {
+            b'\\' => {
+                let escape = parse_escape(input, position);
+                (escape.value, escape.end)
+            }
+            b'\0' => (Some(REPLACEMENT_CHARACTER), position + 1),
+            _ => {
+                let value = input[position..].chars().next().unwrap();
+                (Some(value), position + value.len_utf8())
+            }
+        };
+        position = end;
+        if value != Some(expected) {
+            return None;
+        }
+    }
+
+    Some(position)
 }
 
 pub(crate) fn parse_escape(input: &str, start: usize) -> Escape {

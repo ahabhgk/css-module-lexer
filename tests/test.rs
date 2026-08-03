@@ -472,14 +472,8 @@ fn url() {
         UrlRangeKind::String,
         "\"./logo.png\"",
     );
-    assert_url_dependency(
-        input,
-        &dependencies[1],
-        "https://example\\2f4a8f.com\\\n/image.png",
-        UrlRangeKind::Function,
-        "url(\n        https://example\\2f4a8f.com\\\n/image.png\n    )",
-    );
-    assert_eq!(dependencies.len(), 2);
+    // A backslash followed by a newline is not a valid escape in an unquoted URL.
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
@@ -493,6 +487,27 @@ fn url_2() {
         "./img.png",
         UrlRangeKind::Function,
         "url(./img.png)",
+    );
+}
+
+#[test]
+fn escaped_url_function_name_is_decoded_for_dispatch() {
+    let input = r#"body { a: u\72 l("./quoted.png"); b: u\72 l(./unquoted.png); }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_url_dependency(
+        input,
+        &dependencies[0],
+        "./quoted.png",
+        UrlRangeKind::String,
+        r#""./quoted.png""#,
+    );
+    assert_url_dependency(
+        input,
+        &dependencies[1],
+        "./unquoted.png",
+        UrlRangeKind::Function,
+        r#"u\72 l(./unquoted.png)"#,
     );
 }
 
@@ -740,7 +755,12 @@ fn import() {
         /style.css') /* */;
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
-    assert!(warnings.is_empty());
+    assert_eq!(warnings.len(), 1);
+    assert_warning(
+        input,
+        &warnings[0],
+        "@import url(https://example\\2f4a8f.com\\\n/style.css);",
+    );
     assert_import_dependency(
         input,
         &dependencies[0],
@@ -753,15 +773,6 @@ fn import() {
     assert_import_dependency(
         input,
         &dependencies[1],
-        "https://example\\2f4a8f.com\\\n/style.css",
-        None,
-        None,
-        None,
-        "@import url(https://example\\2f4a8f.com\\\n/style.css);",
-    );
-    assert_import_dependency(
-        input,
-        &dependencies[2],
         "https://example\\2f4a8f.com\\\n/style.css",
         None,
         None,
@@ -1907,6 +1918,17 @@ fn css_modules_grid() {
 }
 
 #[test]
+fn css_modules_grid_decodes_escapes_when_splitting_template_areas() {
+    let input = r#".layout { grid-template-areas: "he\61 d\20 main \2e\2e "; }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".layout", false);
+    assert_local_grid_decl_dependency(input, &dependencies[1], r"he\61 d");
+    assert_local_grid_decl_dependency(input, &dependencies[2], "main");
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
 fn css_modules_ident_start_includes_u0080() {
     let input = ".\u{80} {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
@@ -2435,6 +2457,114 @@ fn icss_export_skips_comment_tokens_but_preserves_string_contents() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_icss_export_value_dependency(input, &dependencies[0], "literal", r#""/* value */"tail"#);
+}
+
+#[test]
+fn escaped_at_rule_names_are_decoded_for_dispatch() {
+    let input = r#"@\69 mport "./theme.css";"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "./theme.css",
+        None,
+        None,
+        None,
+        input,
+    );
+
+    let input = r#"@\76 alue primary: red; .foo { color: primary; }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::ICSSExportValue { prop: "primary", value } if value == "red"
+    )));
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::ICSSSymbol {
+            name: "primary",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn escaped_function_and_pseudo_names_are_decoded_for_dispatch() {
+    let input = r#"
+        :\67 lobal(.global) {}
+        :\6c ocal(.local) { color: v\61 r(--theme); }
+    "#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert!(!dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalClass {
+            name: ".global",
+            ..
+        }
+    )));
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalClass {
+            name: ".local",
+            explicit: true,
+            ..
+        }
+    )));
+    assert!(dependencies
+        .iter()
+        .any(|dependency| matches!(dependency, Dependency::LocalVar { name: "theme", .. })));
+}
+
+#[test]
+fn escaped_property_and_reserved_names_are_decoded_for_dispatch() {
+    let input = r#".foo { anima\74 ion-name: spin; animation-name: n\6f ne; }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    let keyframes = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalKeyframes { name, .. } => Some(*name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keyframes, ["spin"]);
+}
+
+#[test]
+fn escaped_dashed_ident_prefix_preserves_the_raw_dependency_name() {
+    let input = r#"
+        @property \2d-\66 oo { syntax: "*"; inherits: false; }
+        .foo { color: var(\2d-\66 oo); }
+    "#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalPropertyDecl {
+            name: "\\66 oo",
+            ..
+        }
+    )));
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalVar {
+            name: "\\66 oo",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn escaped_icss_symbol_names_match_their_decoded_references() {
+    let input = r#":export { f\6f o: red; } .foo { color: foo; }"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert!(dependencies
+        .iter()
+        .any(|dependency| matches!(dependency, Dependency::ICSSSymbol { name: "foo", .. })));
 }
 
 #[test]

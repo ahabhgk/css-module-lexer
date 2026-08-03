@@ -193,7 +193,9 @@ pub struct TokenAndSpan {
     pub token: Token,
     /// The complete source range occupied by the token.
     pub span: Span,
-    /// The semantic value range inside the complete token range.
+    /// The raw source range containing the token value.
+    ///
+    /// CSS escapes inside this range are not decoded.
     pub value_span: Span,
 }
 
@@ -992,6 +994,10 @@ fn consume_unquoted_url(tokenizer: &mut Tokenizer<'_>) -> Result<Token, ()> {
                     return consume_bad_url(tokenizer)
                 },
                 b'\\' => {
+                    if tokenizer.has_newline_at(1) {
+                        tokenizer.advance(1);
+                        return consume_bad_url(tokenizer)
+                    }
                     tokenizer.consume_escape_sequence();
                 },
                 b'\0' => {

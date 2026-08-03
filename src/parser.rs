@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -264,7 +265,7 @@ impl<'s> CssParser<'s> {
         matches!(
             token.token,
             Token::Ident | Token::AtKeyword | Token::Function
-        ) && escape::eq_ignore_ascii_case(self.token_name(token), keyword)
+        ) && escape::eq_ignore_ascii_case(self.raw_token_name(token), keyword)
     }
 
     pub(crate) fn current_is_keyword(&self, keyword: &str) -> bool {
@@ -272,8 +273,12 @@ impl<'s> CssParser<'s> {
             .is_some_and(|token| self.token_is_keyword(token, keyword))
     }
 
-    pub(crate) fn token_name(&self, token: TokenAndSpan) -> &'s str {
+    pub(crate) fn raw_token_name(&self, token: TokenAndSpan) -> &'s str {
         &self.input[token.value_span.start as usize..token.value_span.end as usize]
+    }
+
+    pub(crate) fn decoded_token_name(&self, token: TokenAndSpan) -> Cow<'s, str> {
+        escape::unescape(self.raw_token_name(token))
     }
 
     pub(crate) fn event_end(&self, token: TokenAndSpan) -> Pos {
@@ -405,6 +410,7 @@ struct TokenStream<'s> {
 }
 
 impl<'s> TokenStream<'s> {
+    #[cfg(test)]
     fn new(input: &'s str) -> Self {
         let mut tokenizer = Tokenizer::new(input);
         let mut tokens = SmallVec::new();
@@ -694,30 +700,55 @@ fn parse_value_at_rule_stream<'s>(stream: &TokenStream<'s>) -> ValueAtRule<'s> {
 }
 
 pub(crate) fn grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range; 4]> {
-    let stream = TokenStream::new(input);
     let mut result = SmallVec::new();
-    let mut start = 0usize;
+    let mut position = 0;
 
-    for index in 0..=stream.tokens.len() {
-        let is_boundary =
-            index == stream.tokens.len() || stream.tokens[index].token == Token::WhiteSpace;
-        if !is_boundary {
-            continue;
-        }
-        if let Some((first, last)) = trimmed_token_bounds(&stream.tokens[start..index]) {
-            let is_dots = stream.tokens[start..index]
-                .iter()
-                .all(|token| token.token == Token::Delim && stream.raw(token) == ".");
-            if !is_dots {
-                result.push(Range::new(
-                    offset + first.span.start as Pos,
-                    offset + last.span.end as Pos,
-                ));
+    while position < input.len() {
+        while position < input.len() {
+            let (value, end) = decoded_char(input, position);
+            if value.is_some_and(is_css_whitespace) {
+                position = end;
+            } else {
+                break;
             }
         }
-        start = index + 1;
+        if position == input.len() {
+            break;
+        }
+
+        let start = position;
+        let mut is_dots = true;
+        while position < input.len() {
+            let (value, end) = decoded_char(input, position);
+            if value.is_some_and(is_css_whitespace) {
+                break;
+            }
+            if value.is_some_and(|value| value != '.') {
+                is_dots = false;
+            }
+            position = end;
+        }
+        if !is_dots {
+            result.push(Range::new(offset + start as Pos, offset + position as Pos));
+        }
     }
     result
+}
+
+fn decoded_char(input: &str, position: usize) -> (Option<char>, usize) {
+    if input.as_bytes()[position] == b'\\' {
+        let escape = escape::parse_escape(input, position);
+        (escape.value, escape.end)
+    } else if input.as_bytes()[position] == b'\0' {
+        (Some('\u{FFFD}'), position + 1)
+    } else {
+        let value = input[position..].chars().next().unwrap();
+        (Some(value), position + value.len_utf8())
+    }
+}
+
+fn is_css_whitespace(value: char) -> bool {
+    matches!(value, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
 #[cfg(test)]

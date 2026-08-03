@@ -5,6 +5,7 @@ use std::fmt::Display;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 
+use crate::escape;
 use crate::parser::grid_template_area_ranges;
 use crate::parser::parse_value_at_rule_tokens;
 use crate::parser::CssParser;
@@ -26,7 +27,7 @@ macro_rules! match_ignore_ascii_case {
     ) => {{
         let value = $value;
         $(
-            if $(value.eq_ignore_ascii_case($pattern))||+ {
+            if $(escape::eq_ignore_ascii_case(value, $pattern))||+ {
                 $result
             } else
         )*
@@ -294,18 +295,29 @@ enum BalancedItemKind {
 
 impl BalancedItemKind {
     pub fn new(name: &str) -> Self {
-        match name {
-            "url(" => Self::Url,
-            "image-set(" => Self::ImageSet,
-            _ if with_vendor_prefixed_eq(name, "image-set(", false) => Self::ImageSet,
-            _ if name.eq_ignore_ascii_case("layer(") => Self::Layer,
-            _ if name.eq_ignore_ascii_case("supports(") => Self::Supports,
-            "palette-mix(" => Self::PaletteMix,
-            _ if name.eq_ignore_ascii_case(":local(") => Self::LocalFn,
-            _ if name.eq_ignore_ascii_case(":global(") => Self::GlobalFn,
-            _ if name.eq_ignore_ascii_case(":local") => Self::LocalClass,
-            _ if name.eq_ignore_ascii_case(":global") => Self::GlobalClass,
-            _ => Self::Other,
+        if function_name_eq(name, "url") {
+            Self::Url
+        } else if function_name_eq(name, "image-set")
+            || function_name(name)
+                .is_some_and(|name| with_vendor_prefixed_eq(name, "image-set", false))
+        {
+            Self::ImageSet
+        } else if function_name_eq(name, "layer") {
+            Self::Layer
+        } else if function_name_eq(name, "supports") {
+            Self::Supports
+        } else if function_name_eq(name, "palette-mix") {
+            Self::PaletteMix
+        } else if pseudo_name_eq(name, "local", true) {
+            Self::LocalFn
+        } else if pseudo_name_eq(name, "global", true) {
+            Self::GlobalFn
+        } else if pseudo_name_eq(name, "local", false) {
+            Self::LocalClass
+        } else if pseudo_name_eq(name, "global", false) {
+            Self::GlobalClass
+        } else {
+            Self::Other
         }
     }
 
@@ -355,7 +367,38 @@ fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
             .is_some_and(|byte| is_css_space_byte(*byte))
 }
 
+fn function_name(input: &str) -> Option<&str> {
+    input.strip_suffix('(')
+}
+
+fn function_name_eq(input: &str, expected: &str) -> bool {
+    function_name(input).is_some_and(|name| escape::eq_ignore_ascii_case(name, expected))
+}
+
+fn pseudo_name(input: &str, is_function: bool) -> Option<&str> {
+    let input = input.strip_prefix(':')?;
+    if is_function {
+        input.strip_suffix('(')
+    } else {
+        Some(input)
+    }
+}
+
+fn pseudo_name_eq(input: &str, expected: &str, is_function: bool) -> bool {
+    pseudo_name(input, is_function).is_some_and(|name| escape::eq_ignore_ascii_case(name, expected))
+}
+
+fn at_keyword_name(input: &str) -> Option<&str> {
+    input.strip_prefix('@')
+}
+
+fn at_keyword_name_eq(input: &str, expected: &str) -> bool {
+    at_keyword_name(input).is_some_and(|name| escape::eq_ignore_ascii_case(name, expected))
+}
+
 fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
+    let left = escape::unescape(left);
+    let left = left.as_ref();
     let left = if at_rule {
         if let Some(left) = left.strip_prefix('@') {
             left
@@ -775,7 +818,7 @@ struct FontPaletteReserved;
 
 impl ReservedValues for FontPaletteReserved {
     fn check(&mut self, ident: &str) -> bool {
-        ident.starts_with("--")
+        escape::unescape(ident).starts_with("--")
     }
 
     fn reset(&mut self) {}
@@ -1070,7 +1113,7 @@ pub struct LexDependencies<'s, D, W> {
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
-    icss_symbols: HashSet<&'s str>,
+    icss_symbols: HashSet<String>,
     non_selector_mode: Option<Mode>,
     handle_dependency: D,
     handle_warning: W,
@@ -1329,7 +1372,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     prop: lexer.slice(prop_start, prop_end)?,
                     value: lexer.slice(value_start, value_end)?,
                 });
-            self.icss_symbols.insert(lexer.slice(prop_start, prop_end)?);
+            self.icss_symbols
+                .insert(escape::unescape(lexer.slice(prop_start, prop_end)?).into_owned());
         }
         lexer.advance();
         Some(())
@@ -1454,7 +1498,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                                 prop: item.local_name,
                                 value: item.import_name,
                             });
-                        self.icss_symbols.insert(item.local_name);
+                        self.icss_symbols
+                            .insert(escape::unescape(item.local_name).into_owned());
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSExportValue {
                                 prop: item.local_name,
@@ -1482,7 +1527,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                             prop: local_name,
                             value: Cow::Borrowed(value),
                         });
-                    self.icss_symbols.insert(local_name);
+                    self.icss_symbols
+                        .insert(escape::unescape(local_name).into_owned());
                 }
             }
         }
@@ -1527,7 +1573,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     prop: lexer.slice(prop_start, prop_end)?,
                     value,
                 });
-            self.icss_symbols.insert(lexer.slice(prop_start, prop_end)?);
+            self.icss_symbols
+                .insert(escape::unescape(lexer.slice(prop_start, prop_end)?).into_owned());
         }
         lexer.advance();
         Some(())
@@ -1537,7 +1584,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.skip_trivia();
         let token = lexer.current()?;
         let start = token.span.start;
-        if token.token != Token::Ident || !lexer.token_name(token).starts_with("--") {
+        if token.token != Token::Ident || !lexer.decoded_token_name(token).starts_with("--") {
             self.handle_warning.handle_warning(Warning {
                 kind: WarningKind::Unexpected {
                     message: "Expected starts with '--' during parsing of 'var()'",
@@ -1547,8 +1594,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         lexer.advance();
-        let name_start = start + 2;
-        let end = token.span.end;
+        let prefix_len = escape::raw_prefix_len(lexer.raw_token_name(token), "--")? as Pos;
+        let name_start = token.value_span.start + prefix_len;
+        let end = token.value_span.end;
         lexer.skip_trivia();
         let from = if lexer.current_is_keyword("from") {
             lexer.advance();
@@ -1608,7 +1656,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.skip_trivia();
         let token = lexer.current()?;
         let start = token.span.start;
-        if token.token != Token::Ident || !lexer.token_name(token).starts_with("--") {
+        if token.token != Token::Ident || !lexer.decoded_token_name(token).starts_with("--") {
             self.handle_warning
                 .handle_warning(dashed_warning(Range::new(
                     start,
@@ -1617,8 +1665,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         lexer.advance();
-        let name_start = start + 2;
-        let end = token.span.end;
+        let prefix_len = escape::raw_prefix_len(lexer.raw_token_name(token), "--")? as Pos;
+        let name_start = token.value_span.start + prefix_len;
+        let end = token.value_span.end;
         self.handle_dependency
             .handle_dependency(local_decl_dependency(
                 lexer.slice(name_start, end)?,
@@ -1648,8 +1697,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let mode_data = self.mode_data.as_ref().unwrap();
             if mode_data.is_pure_mode()
                 && !mode_data.is_pure_check_disabled()
-                && (pseudo.eq_ignore_ascii_case(":global(")
-                    || pseudo.eq_ignore_ascii_case(":global"))
+                && (pseudo_name_eq(pseudo, "global", true)
+                    || pseudo_name_eq(pseudo, "global", false))
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -1659,10 +1708,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 });
             }
             is_function =
-                pseudo.eq_ignore_ascii_case(":local(") || pseudo.eq_ignore_ascii_case(":global(");
+                pseudo_name_eq(pseudo, "local", true) || pseudo_name_eq(pseudo, "global", true);
             if !is_function
-                && !pseudo.eq_ignore_ascii_case(":local")
-                && !pseudo.eq_ignore_ascii_case(":global")
+                && !pseudo_name_eq(pseudo, "local", false)
+                && !pseudo_name_eq(pseudo, "global", false)
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -1813,8 +1862,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let mode_data = self.mode_data.as_ref().unwrap();
             if mode_data.is_pure_mode()
                 && !mode_data.is_pure_check_disabled()
-                && (pseudo.eq_ignore_ascii_case(":global(")
-                    || pseudo.eq_ignore_ascii_case(":global"))
+                && (pseudo_name_eq(pseudo, "global", true)
+                    || pseudo_name_eq(pseudo, "global", false))
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -1824,10 +1873,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 });
             }
             is_function =
-                pseudo.eq_ignore_ascii_case(":local(") || pseudo.eq_ignore_ascii_case(":global(");
+                pseudo_name_eq(pseudo, "local", true) || pseudo_name_eq(pseudo, "global", true);
             if !is_function
-                && !pseudo.eq_ignore_ascii_case(":local")
-                && !pseudo.eq_ignore_ascii_case(":global")
+                && !pseudo_name_eq(pseudo, "local", false)
+                && !pseudo_name_eq(pseudo, "global", false)
             {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(start, end),
@@ -1844,7 +1893,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let token = lexer.current()?;
         let name_is_function = token.token == Token::Function;
         if !matches!(token.token, Token::Ident | Token::Function)
-            || !lexer.token_name(token).starts_with("--")
+            || !lexer.decoded_token_name(token).starts_with("--")
         {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, lexer.position_after_chars(2)),
@@ -1855,12 +1904,14 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         lexer.advance();
-        let end = token.span.end - Pos::from(name_is_function);
+        let prefix_len = escape::raw_prefix_len(lexer.raw_token_name(token), "--")? as Pos;
+        let name_start = token.value_span.start + prefix_len;
+        let end = token.value_span.end;
         let mode_data = self.mode_data.as_mut().unwrap();
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFunctionDecl {
-                    name: lexer.slice(start + 2, end)?,
+                    name: lexer.slice(name_start, end)?,
                     range: Range::new(start, end),
                 });
         }
@@ -2225,13 +2276,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
 
     fn at_keyword(&mut self, lexer: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
-        if name.eq_ignore_ascii_case("@namespace") {
+        if at_keyword_name_eq(name, "namespace") {
             self.scope = Scope::AtNamespaceInvalid;
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, end),
                 kind: WarningKind::NamespaceNotSupportedInBundledCss,
             });
-        } else if name.eq_ignore_ascii_case("@import") {
+        } else if at_keyword_name_eq(name, "import") {
             if !self.allow_import_at_rule {
                 self.scope = Scope::AtImportInvalid;
                 self.handle_warning.handle_warning(Warning {
@@ -2241,22 +2292,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
-        } else if name.eq_ignore_ascii_case("@charset") {
+        } else if at_keyword_name_eq(name, "charset") {
             self.lex_charset_at_rule(lexer, start)?;
         } else if self.mode_data.is_some() {
             let mut can_contain_rules = true;
-            if name.eq_ignore_ascii_case("@value") {
+            if at_keyword_name_eq(name, "value") {
                 self.lex_value_at_rule(lexer, start)?;
                 can_contain_rules = false;
-            } else if name.eq_ignore_ascii_case("@keyframes")
+            } else if at_keyword_name_eq(name, "keyframes")
                 || with_vendor_prefixed_eq(name, "keyframes", true)
             {
                 self.lex_local_keyframes_decl(lexer)?;
-            } else if name.eq_ignore_ascii_case("@container") {
+            } else if at_keyword_name_eq(name, "container") {
                 self.lex_local_container_at_rule(lexer)?;
-            } else if name.eq_ignore_ascii_case("@function") {
+            } else if at_keyword_name_eq(name, "function") {
                 self.lex_local_function_decl(lexer)?;
-            } else if name.eq_ignore_ascii_case("@property") {
+            } else if at_keyword_name_eq(name, "property") {
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalPropertyDecl { name, range },
@@ -2273,9 +2324,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         },
                     },
                 )?;
-            } else if name.eq_ignore_ascii_case("@counter-style") {
+            } else if at_keyword_name_eq(name, "counter-style") {
                 self.lex_local_counter_style_decl(lexer)?;
-            } else if name.eq_ignore_ascii_case("@font-palette-values") {
+            } else if at_keyword_name_eq(name, "font-palette-values") {
                 self.lex_local_dashed_ident_decl(
                     lexer,
                     |name, range| Dependency::LocalFontPaletteDecl { name, range },
@@ -2293,7 +2344,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                     },
                 )?;
             } else {
-                self.is_next_rule_prelude = name.eq_ignore_ascii_case("@scope");
+                self.is_next_rule_prelude = at_keyword_name_eq(name, "scope");
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();
@@ -2468,15 +2519,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
         self.balanced.push(item, self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if at_import_top_level && name.eq_ignore_ascii_case("url(") {
+            if at_import_top_level && function_name_eq(name, "url") {
                 import_data.prelude.push(ImportPreludeNode::Url {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("layer(") {
+            } else if at_import_top_level && function_name_eq(name, "layer") {
                 import_data.prelude.push(ImportPreludeNode::Layer {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("supports(") {
+            } else if at_import_top_level && function_name_eq(name, "supports") {
                 import_data.prelude.push(ImportPreludeNode::Supports {
                     range: Range::new(start, end),
                 });
@@ -2485,7 +2536,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 import_data.prelude.push(ImportPreludeNode::Other {
                     range: Range::new(start, end),
                 });
-            } else if name.eq_ignore_ascii_case("supports(") {
+            } else if function_name_eq(name, "supports") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
@@ -2493,14 +2544,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
         let Some(mode_data) = &self.mode_data else {
             return Some(());
         };
-        if mode_data.is_current_local_mode() && name.starts_with("--") && end > start + 1 {
+        let token = lexer.token_before(end)?;
+        let token_name = lexer.decoded_token_name(token);
+        if mode_data.is_current_local_mode() && token_name.starts_with("--") {
+            let prefix_len = escape::raw_prefix_len(lexer.raw_token_name(token), "--")? as Pos;
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFunction {
-                    name: lexer.slice(start + 2, end - 1)?,
-                    range: Range::new(start, end - 1),
+                    name: lexer.slice(token.value_span.start + prefix_len, token.value_span.end)?,
+                    range: Range::new(start, token.value_span.end),
                 });
         }
-        if mode_data.is_current_local_mode() && name.eq_ignore_ascii_case("var(") {
+        if mode_data.is_current_local_mode() && function_name_eq(name, "var") {
             self.lex_local_var(lexer)?;
         }
         Some(())
@@ -2573,7 +2627,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 };
 
                 let ident = lexer.slice(start, end)?;
-                if self.icss_symbols.contains(ident) {
+                if self.icss_symbols.contains(escape::unescape(ident).as_ref()) {
                     self.handle_dependency
                         .handle_dependency(Dependency::ICSSSymbol {
                             name: ident,
@@ -2587,12 +2641,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         .last()
                         .map(|last| last.kind.is_mode_function())
                         .unwrap_or(false)
-                    && ident.starts_with("--")
+                    && escape::unescape(ident).starts_with("--")
                     && lexer.current_is(Token::CloseParenthesis)
                 {
+                    let prefix_len = escape::raw_prefix_len(ident, "--")? as Pos;
                     self.handle_dependency
                         .handle_dependency(Dependency::LocalFunction {
-                            name: lexer.slice(start + 2, end)?,
+                            name: lexer.slice(start + prefix_len, end)?,
                             range: Range::new(start, end),
                         });
                     return Some(());
@@ -2651,12 +2706,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         return Some(());
                     }
 
-                    if let Some(name) = ident.strip_prefix("--") {
-                        return self.lex_local_var_decl(lexer, name, start, end);
+                    if let Some(prefix_len) = escape::raw_prefix_len(ident, "--") {
+                        return self.lex_local_var_decl(
+                            lexer,
+                            lexer.slice(start + prefix_len as Pos, end)?,
+                            start,
+                            end,
+                        );
                     }
 
-                    if ident.eq_ignore_ascii_case("animation")
-                        || ident.eq_ignore_ascii_case("animation-name")
+                    if escape::eq_ignore_ascii_case(ident, "animation")
+                        || escape::eq_ignore_ascii_case(ident, "animation-name")
                         || with_vendor_prefixed_eq(ident, "animation", false)
                         || with_vendor_prefixed_eq(ident, "animation-name", false)
                     {
@@ -2664,20 +2724,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                         return Some(());
                     }
 
-                    if ident.eq_ignore_ascii_case("list-style")
-                        || ident.eq_ignore_ascii_case("list-style-type")
+                    if escape::eq_ignore_ascii_case(ident, "list-style")
+                        || escape::eq_ignore_ascii_case(ident, "list-style-type")
                     {
                         self.enter_list_style_property();
                         return Some(());
                     }
 
-                    if ident.eq_ignore_ascii_case("font-palette") {
+                    if escape::eq_ignore_ascii_case(ident, "font-palette") {
                         self.enter_font_palette_property();
                         return Some(());
                     }
 
-                    if ident.eq_ignore_ascii_case("container")
-                        || ident.eq_ignore_ascii_case("container-name")
+                    if escape::eq_ignore_ascii_case(ident, "container")
+                        || escape::eq_ignore_ascii_case(ident, "container-name")
                     {
                         self.enter_container_property();
                         return Some(());
@@ -2689,8 +2749,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                     }
                 }
 
-                if ident.eq_ignore_ascii_case("composes")
-                    || ident.eq_ignore_ascii_case("compose-with")
+                if escape::eq_ignore_ascii_case(ident, "composes")
+                    || escape::eq_ignore_ascii_case(ident, "compose-with")
                 {
                     if self.block_nesting_level != 1 {
                         self.handle_warning.handle_warning(Warning {
@@ -2722,7 +2782,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 }
 
                 let ident = lexer.slice(start, end)?;
-                if ident.eq_ignore_ascii_case("layer") {
+                if escape::eq_ignore_ascii_case(ident, "layer") {
                     import_data.prelude.push(ImportPreludeNode::Layer {
                         range: Range::new(start, end),
                     });
@@ -2986,7 +3046,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
     fn pseudo_function(&mut self, lexer: &mut CssParser<'s>, start: Pos, end: Pos) -> Option<()> {
         let name = lexer.slice(start, end)?;
         if let Some(mode_data) = &mut self.mode_data {
-            if name.eq_ignore_ascii_case(":import(") {
+            if pseudo_name_eq(name, "import", true) {
                 self.lex_icss_import(lexer);
                 self.handle_dependency
                     .handle_dependency(Dependency::Replace {
@@ -2995,7 +3055,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                     });
                 return Some(());
             }
-            if name.eq_ignore_ascii_case(":global(") || name.eq_ignore_ascii_case(":local(") {
+            if pseudo_name_eq(name, "global", true) || pseudo_name_eq(name, "local", true) {
                 if mode_data.is_inside_mode_function() {
                     self.handle_warning.handle_warning(Warning {
                         range: Range::new(start, end),
@@ -3025,7 +3085,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
             return Some(());
         };
         let name = lexer.slice(start, end)?;
-        if name.eq_ignore_ascii_case(":global") || name.eq_ignore_ascii_case(":local") {
+        if pseudo_name_eq(name, "global", false) || pseudo_name_eq(name, "local", false) {
             let is_non_selector_mode = self.non_selector_mode.is_some();
             if !is_non_selector_mode && mode_data.is_inside_mode_function() {
                 self.handle_warning.handle_warning(Warning {
@@ -3075,7 +3135,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> TokenVisitor<'s>
                 });
             return Some(());
         }
-        if matches!(self.scope, Scope::TopLevel) && name.eq_ignore_ascii_case(":export") {
+        if matches!(self.scope, Scope::TopLevel) && pseudo_name_eq(name, "export", false) {
             self.lex_icss_export(lexer)?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
