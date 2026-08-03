@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Display;
 
@@ -410,28 +411,58 @@ fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
 
 fn mask_css_comments(input: &str) -> String {
     let bytes = input.as_bytes();
-    let mut result = String::with_capacity(input.len());
+    let mut result = bytes.to_vec();
     let mut i = 0usize;
     while i < bytes.len() {
         if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            result.push(' ');
-            result.push(' ');
+            let start = i;
             i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                result.push(' ');
+            let mut end = bytes.len();
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    end = i + 2;
+                    break;
+                }
                 i += 1;
             }
-            if i + 1 < bytes.len() {
-                result.push(' ');
-                result.push(' ');
-                i += 2;
-            }
+            i = end;
+            result[start..i].fill(b' ');
             continue;
         }
-        result.push(bytes[i] as char);
         i += 1;
     }
-    result
+    String::from_utf8(result).expect("replacing CSS comments with spaces preserves UTF-8")
+}
+
+fn strip_css_comments(input: &str) -> Cow<'_, str> {
+    let bytes = input.as_bytes();
+    let mut result = None::<String>;
+    let mut copied_until = 0usize;
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'/' || bytes[i + 1] != b'*' {
+            i += 1;
+            continue;
+        }
+        let comment_start = i;
+        i += 2;
+        while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+            i += 1;
+        }
+        if i + 1 == bytes.len() {
+            break;
+        }
+        i += 2;
+        let output = result.get_or_insert_with(|| String::with_capacity(input.len()));
+        output.push_str(&input[copied_until..comment_start]);
+        copied_until = i;
+    }
+    if let Some(mut result) = result {
+        result.push_str(&input[copied_until..]);
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(input)
+    }
 }
 
 fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
@@ -1262,7 +1293,7 @@ pub enum Dependency<'s> {
     },
     ICSSExportValue {
         prop: &'s str,
-        value: &'s str,
+        value: Cow<'s, str>,
     },
     ICSSSymbol {
         name: &'s str,
@@ -1818,7 +1849,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSExportValue {
                                 prop: item.local_name,
-                                value: item.local_name,
+                                value: Cow::Borrowed(item.local_name),
                             });
                     }
                 }
@@ -1840,7 +1871,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     self.handle_dependency
                         .handle_dependency(Dependency::ICSSExportValue {
                             prop: local_name,
-                            value,
+                            value: Cow::Borrowed(value),
                         });
                     self.icss_symbols.insert(local_name);
                 }
@@ -1890,9 +1921,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     prop: lexer
                         .slice(prop_start, prop_end)?
                         .trim_end_matches(is_white_space),
-                    value: lexer
-                        .slice(value_start, value_end)?
-                        .trim_end_matches(is_white_space),
+                    value: strip_css_comments(
+                        lexer
+                            .slice(value_start, value_end)?
+                            .trim_end_matches(is_white_space),
+                    ),
                 });
             self.icss_symbols.insert(
                 lexer

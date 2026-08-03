@@ -425,7 +425,7 @@ fn assert_icss_export_value_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
-    assert_eq!(*actual_value, value);
+    assert_eq!(actual_value.as_ref(), value);
 }
 
 fn assert_icss_symbol_dependency(
@@ -2387,12 +2387,7 @@ fn icss_export() {
         }"#},
     );
     assert_icss_export_value_dependency(input, &dependencies[2], "abc", "a b c");
-    assert_icss_export_value_dependency(
-        input,
-        &dependencies[3],
-        "comments",
-        "abc/****/   /* hello world *//****/   def",
-    );
+    assert_icss_export_value_dependency(input, &dependencies[3], "comments", "abc      def");
     assert_replace_dependency(
         input,
         &dependencies[4],
