@@ -2502,6 +2502,11 @@ fn value_at_rule_comment_separated_from_has_clean_request() {
 fn rspack_comment_heavy_value_declarations_are_parsed() {
     let cases = [
         (
+            "@value/* test */blue-v5/* test */:/* test */red/* test */;",
+            "blue-v5",
+            "/* test */red/* test */",
+        ),
+        (
             "@value/* test */blue-v6/* test *//* test */red/* test */;",
             "blue-v6",
             "/* test *//* test */red/* test */",
@@ -2531,6 +2536,14 @@ fn rspack_comment_heavy_value_declarations_are_parsed() {
             .expect("comment-heavy @value declaration should be parsed");
         assert_icss_export_value_dependency(input, export, target, value);
     }
+}
+
+#[test]
+fn value_at_rule_preserves_comment_only_value() {
+    let input = "@value v-empty: /* comment */;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_export_value_dependency(input, &dependencies[0], "v-empty", " /* comment */");
 }
 
 #[test]

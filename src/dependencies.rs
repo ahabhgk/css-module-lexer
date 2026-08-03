@@ -570,6 +570,22 @@ fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
     }
 }
 
+fn parse_value_at_rule_value(input: &str) -> &str {
+    if input.is_empty() {
+        return input;
+    }
+    let masked = mask_css_comments(input);
+    if masked
+        .as_bytes()
+        .iter()
+        .all(|byte| is_css_space_byte(*byte))
+    {
+        input
+    } else {
+        trim_slice(input)
+    }
+}
+
 fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     let masked = mask_css_comments(input);
     let (input, masked) = trim_start_aligned_slices(input, &masked);
@@ -586,7 +602,7 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
         let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
         return ValueAtRule::Value {
             local_name,
-            value: trim_slice(&input[index + 1..]),
+            value: parse_value_at_rule_value(&input[index + 1..]),
             has_colon: true,
         };
     }
@@ -600,9 +616,16 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
         }
     }
     let (local_name, _) = trim_aligned_slices(&input[..split], &masked[..split]);
+    let value_start = split
+        + usize::from(
+            input
+                .as_bytes()
+                .get(split)
+                .is_some_and(|byte| *byte == b' '),
+        );
     ValueAtRule::Value {
         local_name,
-        value: trim_slice(&input[split..]),
+        value: parse_value_at_rule_value(&input[value_start..]),
         has_colon: false,
     }
 }
