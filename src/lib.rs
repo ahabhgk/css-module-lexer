@@ -41,7 +41,6 @@ pub fn lex_dependencies<'s>(
     let mut lexer = Lexer::new(input);
     let mut visitor = LexDependencies::new(handle_dependency, handle_warning, mode);
     lexer.lex(&mut visitor);
-    visitor.finish();
 }
 
 pub fn collect_dependencies(input: &str, mode: Mode) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {

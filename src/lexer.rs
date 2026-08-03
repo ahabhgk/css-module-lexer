@@ -74,9 +74,6 @@ pub trait Visitor<'s> {
     ) -> Option<()>;
     fn string(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool>;
-    fn non_selector_pseudo(&mut self, _: &mut Lexer<'s>, _: Pos) -> Option<()> {
-        Some(())
-    }
     fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
     fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
@@ -506,7 +503,7 @@ impl<'s> Lexer<'s> {
             return Some(());
         }
         if !visitor.is_selector(self)? {
-            return visitor.non_selector_pseudo(self, start);
+            return Some(());
         }
         self.consume_ident_sequence()?;
         if self.cur()? == C_LEFT_PARENTHESIS {

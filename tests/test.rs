@@ -1128,6 +1128,24 @@ fn missing_whitespace_mode_dependencies_are_emitted_by_the_main_lexer() {
 }
 
 #[test]
+fn missing_whitespace_mode_dependencies_preserve_token_order() {
+    for input in [
+        ".before { custom: :local/** comment **/.value; } .after {}",
+        ".before { custom: :local/** comment **/.value } .after {}",
+    ] {
+        let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+
+        assert_eq!(warnings.len(), 1);
+        assert_warning(input, &warnings[0], ":local");
+        assert_local_class_dependency(input, &dependencies[0], ".before", false);
+        assert_replace_dependency(input, &dependencies[1], "", ":local");
+        assert_local_class_dependency(input, &dependencies[2], ".value", true);
+        assert_local_class_dependency(input, &dependencies[3], ".after", false);
+        assert_eq!(dependencies.len(), 4);
+    }
+}
+
+#[test]
 fn rspack_mixed_nested_selector_does_not_gain_recovered_dependencies() {
     let input = indoc! {r#"
         :global .global-foo, :local .bar {

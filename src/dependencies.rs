@@ -180,6 +180,12 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
+    pub fn contains_only_missing_whitespace_mode_pseudo_classes(&self) -> bool {
+        self.0
+            .iter()
+            .all(|item| item.kind.is_mode_class() && item.missing_whitespace_mode)
+    }
+
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if item.kind.is_mode_local() {
@@ -231,6 +237,20 @@ impl BalancedStack {
         self.update_current_mode(mode_data);
     }
 
+    pub fn pop_missing_whitespace_mode_pseudo_class(&mut self, mode_data: &mut ModeData) {
+        loop {
+            let Some(last) = self.0.last() else {
+                break;
+            };
+            if !last.kind.is_mode_class() || !last.missing_whitespace_mode {
+                break;
+            }
+            mode_data.inside_mode_class -= 1;
+            self.0.pop();
+        }
+        self.update_current_mode(mode_data);
+    }
+
     pub fn update_current_mode(&self, mode_data: &mut ModeData) {
         mode_data.set_current_mode(self.topmost_mode(mode_data));
     }
@@ -265,6 +285,7 @@ impl BalancedStack {
 struct BalancedItem {
     kind: BalancedItemKind,
     range: Range,
+    missing_whitespace_mode: bool,
 }
 
 impl BalancedItem {
@@ -272,6 +293,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
+            missing_whitespace_mode: false,
         }
     }
 
@@ -279,6 +301,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Other,
             range: Range::new(start, end),
+            missing_whitespace_mode: false,
         }
     }
 
@@ -286,6 +309,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Curly,
             range: Range::new(start, end),
+            missing_whitespace_mode: false,
         }
     }
 }
@@ -1399,8 +1423,6 @@ pub struct LexDependencies<'s, D, W> {
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
     icss_symbols: HashSet<&'s str>,
-    recovered_dependencies: Vec<Dependency<'s>>,
-    recovered_warnings: Vec<Warning<'s>>,
     handle_dependency: D,
     handle_warning: W,
 }
@@ -1424,8 +1446,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             in_container_property: None,
             in_grid_property: None,
             icss_symbols: Default::default(),
-            recovered_dependencies: Default::default(),
-            recovered_warnings: Default::default(),
             handle_dependency,
             handle_warning,
         }
@@ -1443,75 +1463,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(!start_ident_sequence(c, lexer.peek()?, lexer.peek2()?))
     }
 
-    fn recover_non_selector_mode_pseudo(
-        &mut self,
-        lexer: &Lexer<'s>,
-        mode_start: Pos,
-    ) -> Option<()> {
+    fn is_missing_whitespace_mode_pseudo(&self, lexer: &Lexer<'s>) -> Option<bool> {
         if self.mode_data.is_none() {
-            return Some(());
+            return Some(false);
         }
         let start = lexer.cur_pos()?;
         let mut lookahead = lexer.clone();
         lookahead.consume_ident_sequence()?;
-        let mode_end = lookahead.cur_pos()?;
-        let name = lexer.slice(start, mode_end)?;
-        let is_local = name.eq_ignore_ascii_case("local");
-        if !is_local && !name.eq_ignore_ascii_case("global") {
-            return Some(());
+        let name = lexer.slice(start, lookahead.cur_pos()?)?;
+        if !name.eq_ignore_ascii_case("local") && !name.eq_ignore_ascii_case("global") {
+            return Some(false);
         }
 
         let trivia = lookahead.consume_trivia()?;
-        let prefix = lookahead.cur()?;
-        if trivia.has_white_space || !matches!(prefix, '.' | '#' | C_LEFT_CURLY) {
-            return Some(());
-        }
-
-        self.recovered_dependencies.push(Dependency::Replace {
-            content: "",
-            range: Range::new(mode_start, mode_end),
-        });
-
-        if is_local && prefix != C_LEFT_CURLY {
-            let selector_start = lookahead.cur_pos()?;
-            lookahead.consume();
-            if !start_ident_sequence(lookahead.cur()?, lookahead.peek()?, lookahead.peek2()?) {
-                return Some(());
-            }
-            lookahead.consume_ident_sequence()?;
-            let selector_end = lookahead.cur_pos()?;
-            let name = lexer.slice(selector_start, selector_end)?;
-            self.recovered_dependencies.push(if prefix == '.' {
-                Dependency::LocalClass {
-                    name,
-                    range: Range::new(selector_start, selector_end),
-                    explicit: true,
-                }
-            } else {
-                Dependency::LocalId {
-                    name,
-                    range: Range::new(selector_start, selector_end),
-                    explicit: true,
-                }
-            });
-        }
-
-        self.recovered_warnings.push(Warning::new(
-            Range::new(mode_start, mode_end),
-            WarningKind::MissingWhitespace {
-                surrounding: "trailing",
-            },
-        ));
-        Some(())
-    }
-
-    pub fn finish(&mut self) {
-        for dependency in std::mem::take(&mut self.recovered_dependencies) {
-            self.handle_dependency.handle_dependency(dependency);
-        }
-        for warning in std::mem::take(&mut self.recovered_warnings) {
-            self.handle_warning.handle_warning(warning);
-        }
+        Some(!trivia.has_white_space && matches!(lookahead.cur()?, '.' | '#' | C_LEFT_CURLY))
     }
 
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
@@ -2488,12 +2453,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn is_selector(&mut self, _: &mut Lexer<'s>) -> Option<bool> {
-        Some(self.is_next_rule_prelude)
-    }
-
-    fn non_selector_pseudo(&mut self, lexer: &mut Lexer<'s>, start: Pos) -> Option<()> {
-        self.recover_non_selector_mode_pseudo(lexer, start)
+    fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool> {
+        if self.is_next_rule_prelude
+            || self
+                .balanced
+                .last()
+                .map(|item| item.missing_whitespace_mode)
+                .unwrap_or(false)
+        {
+            return Some(true);
+        }
+        self.is_missing_whitespace_mode_pseudo(lexer)
     }
 
     fn url(
@@ -2834,6 +2804,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             self.exit_grid_property();
                         }
                     }
+                }
+                if let Some(mode_data) = &mut self.mode_data {
+                    self.balanced
+                        .pop_missing_whitespace_mode_pseudo_class(mode_data);
                 }
                 self.is_next_rule_prelude = self.is_next_nested_syntax(lexer)?;
             }
@@ -3206,7 +3180,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
+        if matches!(self.scope, Scope::InBlock)
+            && !self.balanced.is_empty()
+            && !self
+                .balanced
+                .contains_only_missing_whitespace_mode_pseudo_classes()
+        {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
@@ -3323,6 +3302,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     }
                 }
             }
+            if let Some(mode_data) = &mut self.mode_data {
+                self.balanced
+                    .pop_missing_whitespace_mode_pseudo_class(mode_data);
+            }
 
             if self.block_nesting_level > 0 {
                 self.block_nesting_level -= 1;
@@ -3401,6 +3384,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             let has_after_white_space = trivia.has_white_space;
             let has_trailing_trivia = trivia.end != end;
             let c = lexer.cur()?;
+            let missing_trailing_white_space = should_have_after_white_space
+                && !has_after_white_space
+                && matches!(c, '.' | '#' | C_LEFT_CURLY);
             if c != C_RIGHT_PARENTHESIS
                 && c != C_COMMA
                 && (c != C_LEFT_CURLY || (has_trailing_trivia && !has_after_white_space))
@@ -3423,8 +3409,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
 
-            self.balanced
-                .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+            let mut item = BalancedItem::new(name, start, end);
+            item.missing_whitespace_mode = missing_trailing_white_space;
+            self.balanced.push(item, self.mode_data.as_mut());
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",
