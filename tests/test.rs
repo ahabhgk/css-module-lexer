@@ -2499,48 +2499,57 @@ fn value_at_rule_comment_separated_from_has_clean_request() {
 }
 
 #[test]
-fn rspack_comment_heavy_value_declarations_keep_469_dependency_semantics() {
+fn rspack_comment_heavy_value_declarations_are_parsed() {
     let cases = [
         (
             "@value/* test */blue-v6/* test *//* test */red/* test */;",
             "blue-v6",
+            "red",
         ),
         (
             "@value   /* test */   coolShadow-v4   /* test */   0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)   ;",
             "coolShadow-v4",
+            "0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
         ),
         (
             "@value/* test */coolShadow-v5/* test */0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14);",
             "coolShadow-v5",
+            "0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
         ),
     ];
 
-    for (input, target) in cases {
+    for (input, target, value) in cases {
         let (dependencies, _) = collect_dependencies(input, Mode::Local);
-        assert!(
-            !dependencies.iter().any(|dependency| matches!(
-                dependency,
-                Dependency::ICSSExportValue { prop, .. } if *prop == target
-            )),
-            "{target} unexpectedly became an effective @value declaration"
-        );
+        let export = dependencies
+            .iter()
+            .find(|dependency| {
+                matches!(
+                    dependency,
+                    Dependency::ICSSExportValue { prop, .. } if *prop == target
+                )
+            })
+            .expect("comment-heavy @value declaration should be parsed");
+        assert_icss_export_value_dependency(input, export, target, value);
     }
 }
 
 #[test]
-fn rspack_comment_heavy_value_imports_only_recover_clean_request() {
+fn rspack_comment_heavy_value_imports_are_parsed() {
     let cases = [
         (
             "@value /* test */ test-v1 /* test */ from /* test */ \"./colors.module.css\" /* test */;",
+            "test-v1",
             "test-v1",
         ),
         (
             "@value/* test */test-v2/* test */from/* test */\"./colors.module.css\"/* test */;",
             "test-v2",
+            "test-v2",
         ),
         (
             "@value/* test */(/* test */blue-v1/* test */as/* test */my-name-q/* test */)/* test */from/* test */\"./colors.module.css\"/* test */;",
             "my-name-q",
+            "blue-v1",
         ),
         (
             "@value /*
@@ -2553,21 +2562,27 @@ fn rspack_comment_heavy_value_imports_only_recover_clean_request() {
     multiline comment
 */;",
             "red-v3",
+            "red-v3",
         ),
     ];
 
-    for (input, target) in cases {
+    for (input, local_name, import_name) in cases {
         let (dependencies, _) = collect_dependencies(input, Mode::Local);
         let import_from = dependencies
             .iter()
             .find(|dependency| matches!(dependency, Dependency::ICSSImportFrom { .. }))
             .expect("comment-heavy import should retain its import-from dependency");
         assert_icss_import_from_dependency(input, import_from, r#""./colors.module.css""#);
-        assert!(!dependencies.iter().any(|dependency| matches!(
-            dependency,
-            Dependency::ICSSImportValue { prop, .. }
-                | Dependency::ICSSExportValue { prop, .. } if *prop == target
-        )));
+        let import_value = dependencies
+            .iter()
+            .find(|dependency| {
+                matches!(
+                    dependency,
+                    Dependency::ICSSImportValue { prop, .. } if *prop == local_name
+                )
+            })
+            .expect("comment-heavy @value import item should be parsed");
+        assert_icss_import_value_dependency(input, import_value, local_name, import_name);
     }
 }
 

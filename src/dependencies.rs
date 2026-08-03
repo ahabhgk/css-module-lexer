@@ -374,6 +374,19 @@ fn trim_slice(input: &str) -> &str {
     &input[start..end]
 }
 
+fn trim_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m str) {
+    let bytes = masked.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && is_css_space_byte(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_css_space_byte(bytes[end - 1]) {
+        end -= 1;
+    }
+    (&input[start..end], &masked[start..end])
+}
+
 fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
     let input = trim_slice(input);
     let Some(rest) = input.strip_prefix(keyword) else {
@@ -413,8 +426,6 @@ fn mask_css_comments(input: &str) -> String {
 }
 
 fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
     if input.is_empty() {
         return None;
     }
@@ -446,7 +457,7 @@ fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str
         start
     };
 
-    let from = trim_slice(&input[token_start..end]);
+    let from = &input[token_start..end];
     let mut word_end = token_start;
     while word_end > 0 && is_css_space_byte(bytes[word_end - 1]) {
         word_end -= 1;
@@ -463,12 +474,12 @@ fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str
         return None;
     }
 
-    Some((trim_slice(&input[..word_start]), from))
+    let (before_from, _) = trim_aligned_slices(&input[..word_start], &masked[..word_start]);
+    Some((before_from, from))
 }
 
 fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s str; 2]> {
-    let input = trim_slice(input);
-    let masked = trim_slice(masked);
+    let (input, masked) = trim_aligned_slices(input, masked);
     let (input, masked) = if input.starts_with('(') && input.ends_with(')') && masked.len() >= 2 {
         (&input[1..input.len() - 1], &masked[1..masked.len() - 1])
     } else {
@@ -494,7 +505,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
         } else if byte == b')' && depth > 0 {
             depth -= 1;
         } else if byte == b',' && depth == 0 {
-            let item = trim_slice(&input[start..i]);
+            let (item, _) = trim_aligned_slices(&input[start..i], &masked[start..i]);
             if !item.is_empty() {
                 result.push(item);
             }
@@ -502,7 +513,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
         }
         i += 1;
     }
-    let item = trim_slice(&input[start..]);
+    let (item, _) = trim_aligned_slices(&input[start..], &masked[start..]);
     if !item.is_empty() {
         result.push(item);
     }
@@ -510,20 +521,38 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
 }
 
 fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
-    let input = trim_slice(input);
-    if let Some(index) = input.find(':') {
+    let masked = mask_css_comments(input);
+    let (input, masked) = trim_aligned_slices(input, &masked);
+    if let Some(index) = masked.find(':') {
+        let (import_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
+        let (local_name, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
         return ValueAtRuleImportItem {
-            local_name: trim_slice(&input[..index]),
-            import_name: trim_slice(&input[index + 1..]),
+            local_name,
+            import_name,
         };
     }
 
-    let lower = input.to_ascii_lowercase();
-    if let Some(index) = lower.find(" as ") {
-        return ValueAtRuleImportItem {
-            local_name: trim_slice(&input[index + 4..]),
-            import_name: trim_slice(&input[..index]),
-        };
+    let bytes = masked.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 {
+        let mut start = end;
+        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        if masked[start..end].eq_ignore_ascii_case("as") {
+            let (import_name, _) = trim_aligned_slices(&input[..start], &masked[..start]);
+            let (local_name, _) = trim_aligned_slices(&input[end..], &masked[end..]);
+            if !import_name.is_empty() && !local_name.is_empty() {
+                return ValueAtRuleImportItem {
+                    local_name,
+                    import_name,
+                };
+            }
+        }
+        while start > 0 && is_css_space_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        end = start;
     }
 
     ValueAtRuleImportItem {
@@ -532,59 +561,24 @@ fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
     }
 }
 
-fn recover_value_at_rule_from<'s>(input: &'s str, masked: &str, legacy_from: &'s str) -> &'s str {
-    let bytes = masked.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    if end == 0 {
-        return legacy_from;
-    }
-
-    let start = if bytes[end - 1] == b'"' || bytes[end - 1] == b'\'' {
-        let quote = bytes[end - 1];
-        let mut start = end - 1;
-        while start > 0 {
-            start -= 1;
-            if bytes[start] == quote {
-                return &input[start..end];
-            }
-        }
-        return legacy_from;
-    } else {
-        let mut start = end;
-        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        start
-    };
-
-    if start == end {
-        legacy_from
-    } else {
-        &input[start..end]
-    }
-}
-
 fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     let masked = mask_css_comments(input);
-    if let Some((before_from, legacy_from)) = split_value_at_rule_from(input, &masked) {
+    let (input, masked) = trim_aligned_slices(input, &masked);
+    if let Some((before_from, from)) = split_value_at_rule_from(input, masked) {
         let masked_before_from = &masked[..before_from.len()];
         let items = split_value_at_rule_items(before_from, masked_before_from)
             .into_iter()
             .map(parse_value_at_rule_import_item)
             .collect();
-        let from = recover_value_at_rule_from(input, &masked, legacy_from);
         return ValueAtRule::Import { from, items };
     }
 
-    let input = trim_slice(input);
-    let masked = trim_slice(&masked);
     if let Some(index) = masked.find(':') {
+        let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
+        let (value, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
         return ValueAtRule::Value {
-            local_name: trim_slice(&input[..index]),
-            value: trim_slice(&input[index + 1..]),
+            local_name,
+            value,
             has_colon: true,
         };
     }
@@ -601,9 +595,11 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     while value_start < bytes.len() && is_css_space_byte(bytes[value_start]) {
         value_start += 1;
     }
+    let (local_name, _) = trim_aligned_slices(&input[..split], &masked[..split]);
+    let (value, _) = trim_aligned_slices(&input[value_start..], &masked[value_start..]);
     ValueAtRule::Value {
-        local_name: trim_slice(&input[..split]),
-        value: trim_slice(&input[value_start..]),
+        local_name,
+        value,
         has_colon: false,
     }
 }
