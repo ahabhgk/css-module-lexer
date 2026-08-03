@@ -1,6 +1,7 @@
 mod postcss_modules;
 
 use css_module_lexer::collect_dependencies;
+use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
@@ -950,6 +951,17 @@ fn css_modules_local_class_after_comment_reports_missing_whitespace() {
 }
 
 #[test]
+fn css_modules_mode_replace_stops_before_comment_after_white_space() {
+    let input = ":local /** first **//** second **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":local ");
+    assert_local_class_dependency(input, &dependencies[1], ".class", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
 fn css_modules_local_id_after_comment_reports_missing_whitespace() {
     let input = ":local/** comment **/#id {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
@@ -1095,6 +1107,23 @@ fn rspack_nested_comment_separated_modes_warn_in_source_order() {
             .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
             .collect::<Vec<_>>(),
         [":global", ":global", ":local", ":local", ":local", ":local"]
+    );
+}
+
+#[test]
+fn missing_whitespace_mode_dependencies_are_emitted_by_the_main_lexer() {
+    let mut dependencies = Vec::new();
+    let mut warnings = Vec::new();
+    lex_dependencies(
+        RSPACK_NESTED_COMMENT_SEPARATED_MODES,
+        Mode::Local,
+        |dependency| dependencies.push(dependency),
+        |warning| warnings.push(warning),
+    );
+
+    assert_eq!(
+        (dependencies, warnings),
+        collect_dependencies(RSPACK_NESTED_COMMENT_SEPARATED_MODES, Mode::Local)
     );
 }
 

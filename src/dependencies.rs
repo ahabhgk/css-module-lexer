@@ -179,6 +179,10 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
+    pub fn contains_only_mode_pseudo_classes(&self) -> bool {
+        self.0.iter().all(|item| item.kind.is_mode_class())
+    }
+
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if item.kind.is_mode_local() {
@@ -1332,155 +1336,6 @@ impl Display for Warning<'_> {
     }
 }
 
-fn scan_css_identifier_end(bytes: &[u8], mut offset: usize) -> usize {
-    while let Some(byte) = bytes.get(offset).copied() {
-        if byte.is_ascii_alphanumeric() || byte >= 0x80 || matches!(byte, b'-' | b'_' | b'\\') {
-            offset += 1;
-        } else {
-            break;
-        }
-    }
-    offset
-}
-
-fn add_or_normalize_mode_replace_dependency(
-    dependencies: &mut Vec<Dependency<'_>>,
-    mode_start: usize,
-    mode_end: usize,
-) {
-    for dependency in dependencies.iter_mut() {
-        if let Dependency::Replace { content: "", range } = dependency {
-            if range.start == mode_start as Pos && range.end >= mode_end as Pos {
-                range.end = mode_end as Pos;
-                return;
-            }
-        }
-    }
-
-    dependencies.push(Dependency::Replace {
-        content: "",
-        range: Range::new(mode_start as Pos, mode_end as Pos),
-    });
-}
-
-pub(crate) fn recover_missing_whitespace_mode_dependencies<'s>(
-    input: &'s str,
-    mode: Mode,
-    dependencies: &mut Vec<Dependency<'s>>,
-    warnings: &mut Vec<Warning<'s>>,
-) {
-    if mode == Mode::Css {
-        return;
-    }
-
-    let bytes = input.as_bytes();
-    let mut offset = 0;
-
-    while let Some(relative_start) = input[offset..].find(':') {
-        let mode_start = offset + relative_start;
-        let Some(explicit_mode) = input[mode_start..]
-            .strip_prefix(":local")
-            .map(|_| Mode::Local)
-            .or_else(|| {
-                input[mode_start..]
-                    .strip_prefix(":global")
-                    .map(|_| Mode::Global)
-            })
-        else {
-            offset = mode_start + 1;
-            continue;
-        };
-
-        let mode_len = match explicit_mode {
-            Mode::Local => ":local".len(),
-            Mode::Global => ":global".len(),
-            Mode::Pure | Mode::Css => unreachable!(),
-        };
-        let mode_end = mode_start + mode_len;
-        let mut selector_start = mode_end;
-        let mut has_comment = false;
-        while input[selector_start..].starts_with("/*") {
-            let Some(comment_end) = input[selector_start + 2..].find("*/") else {
-                break;
-            };
-            selector_start += 2 + comment_end + 2;
-            has_comment = true;
-        }
-
-        let Some(prefix) = bytes.get(selector_start).copied() else {
-            break;
-        };
-        let selector_end = if prefix == b'{' {
-            selector_start
-        } else if prefix == b'.' || prefix == b'#' {
-            let selector_end = scan_css_identifier_end(bytes, selector_start + 1);
-            if selector_end == selector_start + 1 {
-                offset = selector_start + 1;
-                continue;
-            }
-            selector_end
-        } else {
-            offset = mode_end;
-            continue;
-        };
-
-        if prefix == b'{' && !has_comment {
-            offset = selector_start + 1;
-            continue;
-        }
-
-        add_or_normalize_mode_replace_dependency(dependencies, mode_start, mode_end);
-
-        if explicit_mode == Mode::Local && prefix != b'{' {
-            let range = Range::new(selector_start as Pos, selector_end as Pos);
-            let name = &input[selector_start..selector_end];
-            let dependency_exists = dependencies.iter().any(|dependency| match dependency {
-                Dependency::LocalClass {
-                    range: existing_range,
-                    ..
-                } if prefix == b'.' => existing_range == &range,
-                Dependency::LocalId {
-                    range: existing_range,
-                    ..
-                } if prefix == b'#' => existing_range == &range,
-                _ => false,
-            });
-            if !dependency_exists {
-                dependencies.push(if prefix == b'.' {
-                    Dependency::LocalClass {
-                        name,
-                        range,
-                        explicit: true,
-                    }
-                } else {
-                    Dependency::LocalId {
-                        name,
-                        range,
-                        explicit: true,
-                    }
-                });
-            }
-        }
-
-        if !warnings.iter().any(|warning| {
-            warning.range.start <= mode_start as Pos && warning.range.end >= mode_end as Pos
-        }) {
-            warnings.push(Warning::new(
-                Range::new(mode_start as Pos, mode_end as Pos),
-                WarningKind::MissingWhitespace {
-                    surrounding: "trailing",
-                },
-            ));
-        }
-
-        offset = if prefix == b'{' {
-            selector_start + 1
-        } else {
-            selector_end
-        };
-    }
-}
-
 #[derive(Debug)]
 pub struct LexDependencies<'s, D, W> {
     mode_data: Option<ModeData<'s>>,
@@ -1489,6 +1344,7 @@ pub struct LexDependencies<'s, D, W> {
     allow_import_at_rule: bool,
     balanced: BalancedStack,
     is_next_rule_prelude: bool,
+    recover_missing_whitespace_mode: bool,
     in_animation_property: Option<InProperty<AnimationReserved>>,
     in_list_style_property: Option<InProperty<ListStyleReserved>>,
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
@@ -1512,6 +1368,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             allow_import_at_rule: true,
             balanced: Default::default(),
             is_next_rule_prelude: true,
+            recover_missing_whitespace_mode: false,
             in_animation_property: None,
             in_list_style_property: None,
             in_font_palette_property: None,
@@ -1665,20 +1522,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return true;
         }
         has_white_space
-    }
-
-    fn has_after_white_space(&self, lexer: &mut Lexer<'s>) -> Option<bool> {
-        let mut has_white_space = false;
-        loop {
-            lexer.consume_comments()?;
-            if is_white_space(lexer.cur()?) {
-                has_white_space = true;
-                lexer.consume_space()?;
-            } else {
-                break;
-            }
-        }
-        Some(has_white_space)
     }
 
     fn eat(&mut self, lexer: &mut Lexer<'s>, chars: &[char], message: &'s str) -> Option<bool> {
@@ -3235,13 +3078,18 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
+        if matches!(self.scope, Scope::InBlock)
+            && !self.balanced.is_empty()
+            && !(self.recover_missing_whitespace_mode
+                && self.balanced.contains_only_mode_pseudo_classes())
+        {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
             );
             return Some(());
         }
+        self.recover_missing_whitespace_mode = false;
 
         match self.scope {
             Scope::TopLevel => {
@@ -3427,10 +3275,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             }
 
             let should_have_after_white_space = self.should_have_after_white_space(lexer, start);
-            let trailing_trivia_start = lexer.cur_pos()?;
-            let has_after_white_space = self.has_after_white_space(lexer)?;
-            let has_trailing_trivia = lexer.cur_pos()? != trailing_trivia_start;
+            let trivia = lexer.consume_trivia()?;
+            let has_after_white_space = trivia.has_white_space;
+            let has_trailing_trivia = trivia.end != end;
             let c = lexer.cur()?;
+            let missing_trailing_white_space = should_have_after_white_space
+                && !has_after_white_space
+                && matches!(c, '.' | '#' | C_LEFT_CURLY);
+            if missing_trailing_white_space {
+                self.recover_missing_whitespace_mode = true;
+            }
             if c != C_RIGHT_PARENTHESIS
                 && c != C_COMMA
                 && (c != C_LEFT_CURLY || (has_trailing_trivia && !has_after_white_space))
@@ -3455,11 +3309,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
 
             self.balanced
                 .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
-            let end2 = lexer.cur_pos()?;
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",
-                    range: Range::new(start, end2),
+                    range: Range::new(start, trivia.first_comment_start.unwrap_or(trivia.end)),
                 });
             return Some(());
         }

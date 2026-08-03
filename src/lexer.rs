@@ -51,6 +51,13 @@ pub const C_GREATER_THAN_SIGN: char = '>';
 
 pub type Pos = u32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Trivia {
+    pub end: Pos,
+    pub first_comment_start: Option<Pos>,
+    pub has_white_space: bool,
+}
+
 pub trait Visitor<'s> {
     fn comment(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
         Some(())
@@ -590,6 +597,31 @@ impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
         }
         Some(())
     }
+
+    pub(crate) fn consume_trivia(&mut self) -> Option<Trivia> {
+        let mut first_comment_start = None;
+        let mut has_white_space = false;
+
+        loop {
+            if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
+                first_comment_start.get_or_insert(self.cur_pos()?);
+                self.consume_comments()?;
+                continue;
+            }
+            if is_white_space(self.cur()?) {
+                has_white_space = true;
+                self.consume_space()?;
+                continue;
+            }
+            break;
+        }
+
+        Some(Trivia {
+            end: self.cur_pos()?,
+            first_comment_start,
+            has_white_space,
+        })
+    }
 }
 
 pub fn is_new_line(c: char) -> bool {
@@ -795,6 +827,20 @@ mod tests {
         assert_lexer_state(&l, None, Some(0), None, None, None, None);
         l.consume();
         assert_eq!(l.cur(), None);
+    }
+
+    #[test]
+    fn consume_trivia_distinguishes_comments_from_white_space() {
+        let input = " /** first **//** second **/ .class";
+        let mut lexer = Lexer::new(input);
+        lexer.consume();
+
+        let trivia = lexer.consume_trivia().unwrap();
+
+        assert!(trivia.has_white_space);
+        assert_eq!(trivia.first_comment_start, Some(1));
+        assert_eq!(trivia.end, input.find(".class").unwrap() as Pos);
+        assert_eq!(lexer.cur(), Some('.'));
     }
 
     #[test]
