@@ -179,12 +179,6 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
-    pub fn contains_only_recovered_mode_pseudo_classes(&self) -> bool {
-        self.0
-            .iter()
-            .all(|item| item.kind.is_mode_class() && item.recover_missing_whitespace_mode)
-    }
-
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
         if let Some(mode_data) = mode_data {
             if item.kind.is_mode_local() {
@@ -1396,6 +1390,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(!start_ident_sequence(c, lexer.peek()?, lexer.peek2()?))
     }
 
+    fn is_missing_whitespace_mode_pseudo(&self, lexer: &Lexer<'s>) -> Option<bool> {
+        if !start_ident_sequence(lexer.cur()?, lexer.peek()?, lexer.peek2()?) {
+            return Some(false);
+        }
+        let start = lexer.cur_pos()?;
+        let mut lookahead = lexer.clone();
+        lookahead.consume_ident_sequence()?;
+        let name = lexer.slice(start, lookahead.cur_pos()?)?;
+        if !name.eq_ignore_ascii_case("local") && !name.eq_ignore_ascii_case("global") {
+            return Some(false);
+        }
+
+        let trivia = lookahead.consume_trivia()?;
+        Some(!trivia.has_white_space && matches!(lookahead.cur()?, '.' | '#' | C_LEFT_CURLY))
+    }
+
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
         let mut media_lexer = Lexer::new(media);
@@ -2368,8 +2378,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         Some(())
     }
 
-    fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
-        Some(self.is_next_rule_prelude)
+    fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool> {
+        if self.is_next_rule_prelude
+            || self
+                .balanced
+                .last()
+                .map(|item| item.recover_missing_whitespace_mode)
+                .unwrap_or(false)
+        {
+            return Some(true);
+        }
+        self.is_missing_whitespace_mode_pseudo(lexer)
     }
 
     fn url(
@@ -3082,10 +3101,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     }
 
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock)
-            && !self.balanced.is_empty()
-            && !self.balanced.contains_only_recovered_mode_pseudo_classes()
-        {
+        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
