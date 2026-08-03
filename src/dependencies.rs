@@ -23,6 +23,10 @@ use crate::lexer::C_RIGHT_CURLY;
 use crate::lexer::C_RIGHT_PARENTHESIS;
 use crate::lexer::C_SEMICOLON;
 use crate::lexer::C_SOLIDUS;
+use crate::parser::grid_template_area_ranges;
+use crate::parser::parse_value_at_rule;
+use crate::parser::remove_comments;
+use crate::parser::ValueAtRule;
 use crate::HandleDependency;
 use crate::HandleWarning;
 use crate::Lexer;
@@ -339,25 +343,6 @@ impl BalancedItemKind {
     }
 }
 
-#[derive(Debug)]
-enum ValueAtRule<'s> {
-    Import {
-        from: &'s str,
-        items: SmallVec<[ValueAtRuleImportItem<'s>; 2]>,
-    },
-    Value {
-        local_name: &'s str,
-        value: &'s str,
-        has_colon: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ValueAtRuleImportItem<'s> {
-    local_name: &'s str,
-    import_name: &'s str,
-}
-
 fn is_css_space_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
 }
@@ -375,28 +360,6 @@ fn trim_slice(input: &str) -> &str {
     &input[start..end]
 }
 
-fn trim_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m str) {
-    let bytes = masked.as_bytes();
-    let mut start = 0usize;
-    let mut end = bytes.len();
-    while start < end && is_css_space_byte(bytes[start]) {
-        start += 1;
-    }
-    while end > start && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    (&input[start..end], &masked[start..end])
-}
-
-fn trim_start_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m str) {
-    let bytes = masked.as_bytes();
-    let mut start = 0usize;
-    while start < bytes.len() && is_css_space_byte(bytes[start]) {
-        start += 1;
-    }
-    (&input[start..], &masked[start..])
-}
-
 fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
     let input = trim_slice(input);
     let Some(rest) = input.strip_prefix(keyword) else {
@@ -407,258 +370,6 @@ fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
             .as_bytes()
             .first()
             .is_some_and(|byte| is_css_space_byte(*byte))
-}
-
-fn mask_css_comments(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut result = bytes.to_vec();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            let start = i;
-            i += 2;
-            let mut end = bytes.len();
-            while i + 1 < bytes.len() {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    end = i + 2;
-                    break;
-                }
-                i += 1;
-            }
-            i = end;
-            result[start..i].fill(b' ');
-            continue;
-        }
-        i += 1;
-    }
-    String::from_utf8(result).expect("replacing CSS comments with spaces preserves UTF-8")
-}
-
-fn strip_css_comments(input: &str) -> Cow<'_, str> {
-    let bytes = input.as_bytes();
-    let mut result = None::<String>;
-    let mut copied_until = 0usize;
-    let mut i = 0usize;
-    while i + 1 < bytes.len() {
-        if bytes[i] != b'/' || bytes[i + 1] != b'*' {
-            i += 1;
-            continue;
-        }
-        let comment_start = i;
-        i += 2;
-        while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-            i += 1;
-        }
-        if i + 1 == bytes.len() {
-            break;
-        }
-        i += 2;
-        let output = result.get_or_insert_with(|| String::with_capacity(input.len()));
-        output.push_str(&input[copied_until..comment_start]);
-        copied_until = i;
-    }
-    if let Some(mut result) = result {
-        result.push_str(&input[copied_until..]);
-        Cow::Owned(result)
-    } else {
-        Cow::Borrowed(input)
-    }
-}
-
-fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str, &'s str)> {
-    if input.is_empty() {
-        return None;
-    }
-
-    let bytes = masked.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-
-    let token_start = if bytes[end - 1] == b'"' || bytes[end - 1] == b'\'' {
-        let quote = bytes[end - 1];
-        let mut start = end - 1;
-        while start > 0 {
-            start -= 1;
-            if bytes[start] == quote {
-                break;
-            }
-        }
-        start
-    } else {
-        let mut start = end;
-        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        start
-    };
-
-    let from = &input[token_start..end];
-    let mut word_end = token_start;
-    while word_end > 0 && is_css_space_byte(bytes[word_end - 1]) {
-        word_end -= 1;
-    }
-    if word_end == 0 {
-        return None;
-    }
-    let mut word_start = word_end;
-    while word_start > 0 && !is_css_space_byte(bytes[word_start - 1]) {
-        word_start -= 1;
-    }
-    let word = &masked[word_start..word_end];
-    if !word.eq_ignore_ascii_case("from") {
-        return None;
-    }
-
-    let (before_from, _) = trim_aligned_slices(&input[..word_start], &masked[..word_start]);
-    Some((before_from, from))
-}
-
-fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s str; 2]> {
-    let (input, masked) = trim_aligned_slices(input, masked);
-    let (input, masked) = if input.starts_with('(') && input.ends_with(')') && masked.len() >= 2 {
-        (&input[1..input.len() - 1], &masked[1..masked.len() - 1])
-    } else {
-        (input, masked)
-    };
-
-    let mut result = SmallVec::new();
-    let bytes = masked.as_bytes();
-    let mut start = 0usize;
-    let mut depth = 0u32;
-    let mut quote = None;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if let Some(current_quote) = quote {
-            if byte == current_quote {
-                quote = None;
-            }
-        } else if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
-        } else if byte == b'(' {
-            depth += 1;
-        } else if byte == b')' && depth > 0 {
-            depth -= 1;
-        } else if byte == b',' && depth == 0 {
-            let (item, _) = trim_aligned_slices(&input[start..i], &masked[start..i]);
-            if !item.is_empty() {
-                result.push(item);
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    let (item, _) = trim_aligned_slices(&input[start..], &masked[start..]);
-    if !item.is_empty() {
-        result.push(item);
-    }
-    result
-}
-
-fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
-    let masked = mask_css_comments(input);
-    let (input, masked) = trim_aligned_slices(input, &masked);
-    if let Some(index) = masked.find(':') {
-        let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
-        let (import_name, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
-        return ValueAtRuleImportItem {
-            local_name,
-            import_name,
-        };
-    }
-
-    let bytes = masked.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 {
-        let mut start = end;
-        while start > 0 && !is_css_space_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        if masked[start..end].eq_ignore_ascii_case("as") {
-            let (import_name, _) = trim_aligned_slices(&input[..start], &masked[..start]);
-            let (local_name, _) = trim_aligned_slices(&input[end..], &masked[end..]);
-            if !import_name.is_empty() && !local_name.is_empty() {
-                return ValueAtRuleImportItem {
-                    local_name,
-                    import_name,
-                };
-            }
-        }
-        while start > 0 && is_css_space_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        end = start;
-    }
-
-    ValueAtRuleImportItem {
-        local_name: input,
-        import_name: input,
-    }
-}
-
-fn parse_value_at_rule_value(input: &str) -> &str {
-    if input.is_empty() {
-        return input;
-    }
-    let masked = mask_css_comments(input);
-    if masked
-        .as_bytes()
-        .iter()
-        .all(|byte| is_css_space_byte(*byte))
-    {
-        input
-    } else {
-        trim_slice(input)
-    }
-}
-
-fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
-    let masked = mask_css_comments(input);
-    let (input, masked) = trim_start_aligned_slices(input, &masked);
-    if let Some((before_from, from)) = split_value_at_rule_from(input, masked) {
-        let masked_before_from = &masked[..before_from.len()];
-        let items = split_value_at_rule_items(before_from, masked_before_from)
-            .into_iter()
-            .map(parse_value_at_rule_import_item)
-            .collect();
-        return ValueAtRule::Import { from, items };
-    }
-
-    if let Some(index) = masked.find(':') {
-        let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
-        return ValueAtRule::Value {
-            local_name,
-            value: parse_value_at_rule_value(&input[index + 1..]),
-            has_colon: true,
-        };
-    }
-
-    let bytes = masked.as_bytes();
-    let mut split = bytes.len();
-    for (index, byte) in bytes.iter().enumerate() {
-        if is_css_space_byte(*byte) {
-            split = index;
-            break;
-        }
-    }
-    let (local_name, _) = trim_aligned_slices(&input[..split], &masked[..split]);
-    let value_start = split
-        + usize::from(
-            input
-                .as_bytes()
-                .get(split)
-                .is_some_and(|byte| *byte == b' '),
-        );
-    ValueAtRule::Value {
-        local_name,
-        value: parse_value_at_rule_value(&input[value_start..]),
-        has_colon: false,
-    }
 }
 
 fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
@@ -1153,31 +864,6 @@ fn is_reserved_container_query_ident(ident: &str) -> bool {
         "none" | "and" | "or" | "not" => true,
         _ => false,
     })
-}
-
-fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range; 4]> {
-    let mut result = SmallVec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let start = i;
-        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if start == i {
-            break;
-        }
-        let token = &input[start..i];
-        if !token.bytes().all(|c| c == b'.') {
-            result.push(Range::new(offset + start as Pos, offset + i as Pos));
-        }
-    }
-
-    result
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1871,7 +1557,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     prop: lexer
                         .slice(prop_start, prop_end)?
                         .trim_end_matches(is_white_space),
-                    value: strip_css_comments(
+                    value: remove_comments(
                         lexer
                             .slice(value_start, value_end)?
                             .trim_end_matches(is_white_space),
@@ -2526,10 +2212,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             Some(GridPropertyKind::TemplateLike | GridPropertyKind::TemplateAreas)
                         )
                     {
-                        for range in parse_grid_template_area_ranges(
-                            lexer.slice(start + 1, end - 1)?,
-                            start + 1,
-                        ) {
+                        for range in
+                            grid_template_area_ranges(lexer.slice(start + 1, end - 1)?, start + 1)
+                        {
                             self.handle_dependency
                                 .handle_dependency(Dependency::LocalGridDecl {
                                     name: lexer.slice(range.start, range.end)?,

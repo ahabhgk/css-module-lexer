@@ -1,5 +1,16 @@
+macro_rules! match_byte {
+    ($value:expr, $($rest:tt)*) => {
+        match $value {
+            $($rest)+
+        }
+    };
+}
+
 mod dependencies;
+mod escape;
 mod lexer;
+mod parser;
+mod tokenizer;
 
 pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;
