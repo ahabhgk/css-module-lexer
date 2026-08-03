@@ -387,6 +387,15 @@ fn trim_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m
     (&input[start..end], &masked[start..end])
 }
 
+fn trim_start_aligned_slices<'s, 'm>(input: &'s str, masked: &'m str) -> (&'s str, &'m str) {
+    let bytes = masked.as_bytes();
+    let mut start = 0usize;
+    while start < bytes.len() && is_css_space_byte(bytes[start]) {
+        start += 1;
+    }
+    (&input[start..], &masked[start..])
+}
+
 fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
     let input = trim_slice(input);
     let Some(rest) = input.strip_prefix(keyword) else {
@@ -563,7 +572,7 @@ fn parse_value_at_rule_import_item(input: &str) -> ValueAtRuleImportItem<'_> {
 
 fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
     let masked = mask_css_comments(input);
-    let (input, masked) = trim_aligned_slices(input, &masked);
+    let (input, masked) = trim_start_aligned_slices(input, &masked);
     if let Some((before_from, from)) = split_value_at_rule_from(input, masked) {
         let masked_before_from = &masked[..before_from.len()];
         let items = split_value_at_rule_items(before_from, masked_before_from)
@@ -575,10 +584,9 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
 
     if let Some(index) = masked.find(':') {
         let (local_name, _) = trim_aligned_slices(&input[..index], &masked[..index]);
-        let (value, _) = trim_aligned_slices(&input[index + 1..], &masked[index + 1..]);
         return ValueAtRule::Value {
             local_name,
-            value,
+            value: trim_slice(&input[index + 1..]),
             has_colon: true,
         };
     }
@@ -591,15 +599,10 @@ fn parse_value_at_rule(input: &str) -> ValueAtRule<'_> {
             break;
         }
     }
-    let mut value_start = split;
-    while value_start < bytes.len() && is_css_space_byte(bytes[value_start]) {
-        value_start += 1;
-    }
     let (local_name, _) = trim_aligned_slices(&input[..split], &masked[..split]);
-    let (value, _) = trim_aligned_slices(&input[value_start..], &masked[value_start..]);
     ValueAtRule::Value {
         local_name,
-        value,
+        value: trim_slice(&input[split..]),
         has_colon: false,
     }
 }

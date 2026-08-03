@@ -2504,17 +2504,17 @@ fn rspack_comment_heavy_value_declarations_are_parsed() {
         (
             "@value/* test */blue-v6/* test *//* test */red/* test */;",
             "blue-v6",
-            "red",
+            "/* test *//* test */red/* test */",
         ),
         (
             "@value   /* test */   coolShadow-v4   /* test */   0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)   ;",
             "coolShadow-v4",
-            "0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
+            "/* test */   0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
         ),
         (
             "@value/* test */coolShadow-v5/* test */0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14);",
             "coolShadow-v5",
-            "0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
+            "/* test */0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
         ),
     ];
 
