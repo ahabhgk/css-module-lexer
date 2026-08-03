@@ -179,8 +179,10 @@ impl BalancedStack {
         self.0.is_empty()
     }
 
-    pub fn contains_only_mode_pseudo_classes(&self) -> bool {
-        self.0.iter().all(|item| item.kind.is_mode_class())
+    pub fn contains_only_recovered_mode_pseudo_classes(&self) -> bool {
+        self.0
+            .iter()
+            .all(|item| item.kind.is_mode_class() && item.recover_missing_whitespace_mode)
     }
 
     pub fn push(&mut self, item: BalancedItem, mode_data: Option<&mut ModeData>) {
@@ -268,6 +270,7 @@ impl BalancedStack {
 struct BalancedItem {
     kind: BalancedItemKind,
     range: Range,
+    recover_missing_whitespace_mode: bool,
 }
 
 impl BalancedItem {
@@ -275,6 +278,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
+            recover_missing_whitespace_mode: false,
         }
     }
 
@@ -282,6 +286,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Other,
             range: Range::new(start, end),
+            recover_missing_whitespace_mode: false,
         }
     }
 
@@ -289,6 +294,7 @@ impl BalancedItem {
         Self {
             kind: BalancedItemKind::Curly,
             range: Range::new(start, end),
+            recover_missing_whitespace_mode: false,
         }
     }
 }
@@ -1344,7 +1350,6 @@ pub struct LexDependencies<'s, D, W> {
     allow_import_at_rule: bool,
     balanced: BalancedStack,
     is_next_rule_prelude: bool,
-    recover_missing_whitespace_mode: bool,
     in_animation_property: Option<InProperty<AnimationReserved>>,
     in_list_style_property: Option<InProperty<ListStyleReserved>>,
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
@@ -1368,7 +1373,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             allow_import_at_rule: true,
             balanced: Default::default(),
             is_next_rule_prelude: true,
-            recover_missing_whitespace_mode: false,
             in_animation_property: None,
             in_list_style_property: None,
             in_font_palette_property: None,
@@ -3080,8 +3084,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
     fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, _: Pos) -> Option<()> {
         if matches!(self.scope, Scope::InBlock)
             && !self.balanced.is_empty()
-            && !(self.recover_missing_whitespace_mode
-                && self.balanced.contains_only_mode_pseudo_classes())
+            && !self.balanced.contains_only_recovered_mode_pseudo_classes()
         {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
@@ -3089,8 +3092,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             );
             return Some(());
         }
-        self.recover_missing_whitespace_mode = false;
-
         match self.scope {
             Scope::TopLevel => {
                 self.allow_import_at_rule = false;
@@ -3282,9 +3283,6 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             let missing_trailing_white_space = should_have_after_white_space
                 && !has_after_white_space
                 && matches!(c, '.' | '#' | C_LEFT_CURLY);
-            if missing_trailing_white_space {
-                self.recover_missing_whitespace_mode = true;
-            }
             if c != C_RIGHT_PARENTHESIS
                 && c != C_COMMA
                 && (c != C_LEFT_CURLY || (has_trailing_trivia && !has_after_white_space))
@@ -3307,8 +3305,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 }
             }
 
-            self.balanced
-                .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+            let mut item = BalancedItem::new(name, start, end);
+            item.recover_missing_whitespace_mode = missing_trailing_white_space;
+            self.balanced.push(item, self.mode_data.as_mut());
             self.handle_dependency
                 .handle_dependency(Dependency::Replace {
                     content: "",
