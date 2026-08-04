@@ -6,6 +6,14 @@ Captured on 2026-08-04 on the same macOS host with the release benchmark:
 cargo bench --bench main -- --noplot
 ```
 
+That command runs only the bootstrap and Rspack baseline groups. The focused
+micro benchmarks are opt-in so the default CodSpeed CI job stays on the stable
+baseline:
+
+```text
+CSS_MODULE_LEXER_RUN_MICRO_BENCHES=1 cargo bench --bench main -- --noplot
+```
+
 The three values in each cell are Criterion's lower bound, median, and upper
 bound. The reference captures were taken before the tokenizer refactor; small
 differences between runs are expected because these are wall-clock

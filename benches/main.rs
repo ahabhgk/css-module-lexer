@@ -23,6 +23,7 @@ const COMMENT_SEPARATED_MODE: &str = r#"
 const ESCAPE_HEAVY_IDENTIFIER: &str = r#"
     .a\31 23\20name, #\66 00d { --custom\2d property: url(https:\2f\2fexample.com\2fimage.png); }
 "#;
+const RUN_MICRO_BENCHES: &str = "CSS_MODULE_LEXER_RUN_MICRO_BENCHES";
 
 fn scan_tokens(input: &str) -> usize {
     let mut lexer = Lexer::new(input);
@@ -115,6 +116,13 @@ fn sink_dependencies(input: &str, mode: Mode) {
     lex_dependencies(input, mode, |_| {}, |_| {});
 }
 
+fn micro_benchmarks_enabled() -> bool {
+    matches!(
+        std::env::var(RUN_MICRO_BENCHES).as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 fn benchmark(c: &mut Criterion) {
     c.bench_function("bootstrap", |b| {
         b.iter(|| collect_dependencies(black_box(BOOTSTRAP), Mode::Local))
@@ -131,6 +139,10 @@ fn benchmark(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    if !micro_benchmarks_enabled() {
+        return;
+    }
 
     let mut tokenizer = c.benchmark_group("tokenizer");
     for (name, input) in [
