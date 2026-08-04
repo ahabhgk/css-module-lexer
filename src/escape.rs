@@ -44,6 +44,10 @@ pub fn unescape(input: &str) -> Cow<'_, str> {
     Cow::Owned(output)
 }
 
+pub(crate) fn eq_ignore_ascii_case(input: &str, expected: &str) -> bool {
+    unescape(input).eq_ignore_ascii_case(expected)
+}
+
 fn parse_escape(input: &str, start: usize) -> Escape {
     debug_assert_eq!(input.as_bytes()[start], b'\\');
 

@@ -11,8 +11,7 @@ pub use dependencies::UrlRangeKind;
 pub use dependencies::Warning;
 pub use dependencies::WarningKind;
 pub use escape::unescape;
-pub use lexer::Lexer;
-pub use lexer::Pos;
+pub use lexer::{Lexer, Pos, Token, TokenCursor, TokenKind, TokenWithTrivia, Trivia, Visitor};
 
 pub trait HandleDependency<'s> {
     fn handle_dependency(&mut self, dependency: Dependency<'s>);
@@ -42,7 +41,7 @@ pub fn lex_dependencies<'s>(
 ) {
     let mut lexer = Lexer::new(input);
     let mut visitor = LexDependencies::new(handle_dependency, handle_warning, mode);
-    lexer.lex(&mut visitor);
+    visitor.lex_streaming(&mut lexer);
 }
 
 pub fn collect_dependencies(input: &str, mode: Mode) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {

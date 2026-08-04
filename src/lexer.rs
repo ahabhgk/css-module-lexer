@@ -42,11 +42,98 @@ pub const C_GREATER_THAN_SIGN: u8 = b'>';
 
 pub type Pos = u32;
 
+/// The lexical kind of a CSS token.
+///
+/// Tokens retain only byte ranges into the original source.  Comments are
+/// emitted deliberately so that CSS Modules magic comments can be interpreted
+/// without a second scan of the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Trivia {
+pub enum TokenKind {
+    Eof,
+    Ident,
+    AtKeyword,
+    Hash,
+    IdHash,
+    QuotedString,
+    Url,
+    Function,
+    Number,
+    Percentage,
+    Dimension,
+    WhiteSpace,
+    Comment,
+    BadComment,
+    BadString,
+    BadUrl,
+    Delim,
+    Colon,
+    Semicolon,
+    Comma,
+    LeftParenthesis,
+    RightParenthesis,
+    LeftSquareBracket,
+    RightSquareBracket,
+    LeftCurlyBracket,
+    RightCurlyBracket,
+    IncludeMatch,
+    DashMatch,
+    PrefixMatch,
+    SuffixMatch,
+    SubstringMatch,
+}
+
+impl TokenKind {
+    #[inline]
+    pub fn is_trivia(self) -> bool {
+        matches!(self, Self::WhiteSpace | Self::Comment)
+    }
+
+    #[inline]
+    pub fn is_scan_error(self) -> bool {
+        matches!(self, Self::BadComment | Self::BadString | Self::BadUrl)
+    }
+}
+
+/// A CSS token represented by ranges into the input string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub range: Range,
+    pub value_range: Range,
+}
+
+impl Token {
+    #[inline]
+    pub const fn new(kind: TokenKind, range: Range, value_range: Range) -> Self {
+        Self {
+            kind,
+            range,
+            value_range,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trivia {
+    pub range: Range,
     pub end: Pos,
     pub first_comment_start: Option<Pos>,
     pub has_white_space: bool,
+}
+
+impl Trivia {
+    #[inline]
+    pub fn has_whitespace(self) -> bool {
+        self.has_white_space
+    }
+}
+
+/// A significant token together with all immediately preceding whitespace and
+/// comments.  The leading trivia is consumed once and never rescanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenWithTrivia {
+    pub token: Token,
+    pub leading: Trivia,
 }
 
 pub trait Visitor<'s> {
@@ -78,39 +165,85 @@ pub trait Visitor<'s> {
     fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Direction {
-    Forward,
-    Backward,
-}
-
 #[derive(Debug, Clone)]
 pub struct Lexer<'s> {
     value: &'s [u8],
-    direction: Direction,
     cur_pos: Option<Pos>,
+    token_pos: Pos,
 }
 
 impl<'s> Lexer<'s> {
     pub fn new(value: &'s str) -> Self {
+        assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
             value: value.as_bytes(),
-            direction: Direction::Forward,
             cur_pos: None,
+            token_pos: 0,
         }
     }
 
-    pub fn turn_back(self, end: Pos) -> Option<Lexer<'s>> {
-        let end = end as usize;
-        if !is_utf8_boundary(self.value, end) {
-            return None;
+    #[inline]
+    pub(crate) fn reset_token_stream(&mut self) {
+        self.cur_pos = None;
+        self.token_pos = 0;
+    }
+
+    #[inline]
+    pub(crate) fn set_legacy_position(&mut self, position: Pos) {
+        self.cur_pos = Some(position);
+    }
+
+    #[inline]
+    pub(crate) fn source_end(&self) -> Pos {
+        self.value.len() as Pos
+    }
+
+    #[inline]
+    pub(crate) fn sync_token_stream(&mut self, fallback: Pos) {
+        self.token_pos = self.cur_pos.unwrap_or(fallback);
+    }
+
+    pub(crate) fn token_cursor_at(&self, position: Pos) -> TokenCursor<'s> {
+        let mut lexer = self.clone();
+        lexer.cur_pos = None;
+        lexer.token_pos = position;
+        TokenCursor::from_lexer(lexer)
+    }
+
+    pub(crate) fn token_lexer_at(&self, position: Pos) -> Lexer<'s> {
+        let mut lexer = self.clone();
+        lexer.cur_pos = None;
+        lexer.token_pos = position;
+        lexer
+    }
+
+    /// Classify the next non-trivia item without scanning the complete token.
+    ///
+    /// Nested-rule detection only needs to distinguish an ident/function
+    /// prelude from selector punctuation. Keeping this byte-level fast path
+    /// avoids tokenizing the same property name once for lookahead and again
+    /// when the main stream reaches it.
+    pub(crate) fn next_significant_is_not_ident(&self, position: Pos) -> Option<bool> {
+        let bytes = self.value;
+        let mut position = position as usize;
+        loop {
+            while position < bytes.len() && is_white_space(bytes[position]) {
+                position += 1;
+            }
+            if position + 1 < bytes.len()
+                && bytes[position] == C_SOLIDUS
+                && bytes[position + 1] == C_ASTERISK
+            {
+                let (kind, end, _, _) = self.scan_comment(position);
+                if kind == TokenKind::BadComment {
+                    return Some(true);
+                }
+                position = end;
+                continue;
+            }
+            let byte = *bytes.get(position)?;
+            return Some(!self.starts_ident_at(position) && byte != C_RIGHT_CURLY);
         }
-        let value = self.value.get(..end)?;
-        Some(Lexer {
-            value,
-            direction: Direction::Backward,
-            cur_pos: None,
-        })
     }
 
     pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
@@ -145,25 +278,11 @@ impl<'s> Lexer<'s> {
     }
 }
 
-#[inline]
-fn is_utf8_boundary(input: &[u8], index: usize) -> bool {
-    index == 0
-        || index == input.len()
-        || input
-            .get(index)
-            .map(|byte| byte & 0b1100_0000 != 0b1000_0000)
-            .unwrap_or(false)
-}
-
 impl Lexer<'_> {
     #[inline]
     fn byte_at(&self, pos: Pos) -> Option<u8> {
         let pos = pos as usize;
-        let index = match self.direction {
-            Direction::Forward => pos,
-            Direction::Backward => self.value.len().checked_sub(pos + 1)?,
-        };
-        self.value.get(index).copied()
+        self.value.get(pos).copied()
     }
 
     #[inline]
@@ -211,6 +330,640 @@ impl Lexer<'_> {
 }
 
 impl<'s> Lexer<'s> {
+    /// Return the next CSS token without allocating or decoding its value.
+    ///
+    /// `TokenKind::Eof` is returned after the input is exhausted. Unterminated
+    /// comments, strings, and URLs are represented by the corresponding
+    /// `Bad*` token kinds, so EOF and tokenizer errors are never conflated.
+    pub fn next_token(&mut self) -> Token {
+        let start = self.token_pos as usize;
+        let len = self.value.len();
+        if start >= len {
+            self.token_pos = len as Pos;
+            return Token::new(
+                TokenKind::Eof,
+                Range::new(len as Pos, len as Pos),
+                Range::new(len as Pos, len as Pos),
+            );
+        }
+
+        let byte = self.value[start];
+        let (kind, end, value_start, value_end) = match byte {
+            C_SPACE | C_TAB | C_LINE_FEED | C_CARRIAGE_RETURN | C_FORM_FEED => {
+                self.scan_whitespace(start)
+            }
+            C_QUOTATION_MARK => self.scan_string(start, C_QUOTATION_MARK),
+            C_APOSTROPHE => self.scan_string(start, C_APOSTROPHE),
+            C_NUMBER_SIGN => {
+                let value_start = start + 1;
+                if self.starts_ident_at(value_start) {
+                    let end = self.scan_name(value_start);
+                    (TokenKind::IdHash, end, value_start, end)
+                } else if self
+                    .value
+                    .get(value_start)
+                    .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                {
+                    let end = self.scan_name(value_start);
+                    (TokenKind::Hash, end, value_start, end)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_LEFT_PARENTHESIS => (TokenKind::LeftParenthesis, start + 1, start, start + 1),
+            C_RIGHT_PARENTHESIS => (TokenKind::RightParenthesis, start + 1, start, start + 1),
+            C_LEFT_SQUARE => (TokenKind::LeftSquareBracket, start + 1, start, start + 1),
+            C_RIGHT_SQUARE => (TokenKind::RightSquareBracket, start + 1, start, start + 1),
+            C_LEFT_CURLY => (TokenKind::LeftCurlyBracket, start + 1, start, start + 1),
+            C_RIGHT_CURLY => (TokenKind::RightCurlyBracket, start + 1, start, start + 1),
+            C_COLON => (TokenKind::Colon, start + 1, start, start + 1),
+            C_SEMICOLON => (TokenKind::Semicolon, start + 1, start, start + 1),
+            C_COMMA => (TokenKind::Comma, start + 1, start, start + 1),
+            C_PLUS_SIGN => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_HYPHEN_MINUS => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else if self.starts_ident_at(start) {
+                    self.scan_ident_like(start)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_FULL_STOP => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_SOLIDUS => {
+                if self.value.get(start + 1) == Some(&C_ASTERISK) {
+                    self.scan_comment(start)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_AT_SIGN => {
+                let value_start = start + 1;
+                if self.starts_ident_at(value_start) {
+                    let end = self.scan_name(value_start);
+                    (TokenKind::AtKeyword, end, value_start, end)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            C_REVERSE_SOLIDUS => {
+                if self.is_valid_escape_at(start) {
+                    self.scan_ident_like(start)
+                } else {
+                    (TokenKind::Delim, start + 1, start, start + 1)
+                }
+            }
+            b'0'..=b'9' => self.scan_numeric(start),
+            b'$' if self.value[start..].starts_with(b"$=") => {
+                (TokenKind::SuffixMatch, start + 2, start, start + 2)
+            }
+            b'^' if self.value[start..].starts_with(b"^=") => {
+                (TokenKind::PrefixMatch, start + 2, start, start + 2)
+            }
+            b'|' if self.value[start..].starts_with(b"|=") => {
+                (TokenKind::DashMatch, start + 2, start, start + 2)
+            }
+            b'~' if self.value[start..].starts_with(b"~=") => {
+                (TokenKind::IncludeMatch, start + 2, start, start + 2)
+            }
+            b'*' if self.value[start..].starts_with(b"*=") => {
+                (TokenKind::SubstringMatch, start + 2, start, start + 2)
+            }
+            _ if self.starts_ident_at(start) => self.scan_ident_like(start),
+            _ => (TokenKind::Delim, start + 1, start, start + 1),
+        };
+
+        self.token_pos = end as Pos;
+        Token::new(
+            kind,
+            Range::new(start as Pos, end as Pos),
+            Range::new(value_start as Pos, value_end as Pos),
+        )
+    }
+
+    /// Drive the legacy Visitor API from the streaming tokenizer.
+    ///
+    /// The adapter keeps the old callback surface temporarily, but token
+    /// boundaries, comments, strings, and URLs are obtained from the same
+    /// forward-only scanner exposed by [`Lexer::next_token`].  Selector
+    /// punctuation is kept as a one-token lookahead so declarations and
+    /// nested rules can still be distinguished by the existing dependency
+    /// state machine.
+    pub fn lex_tokens<T: Visitor<'s>>(&mut self, visitor: &mut T) {
+        self.token_pos = 0;
+        self.cur_pos = None;
+
+        loop {
+            let token = self.next_token();
+            if token.kind == TokenKind::Eof {
+                self.cur_pos = Some(token.range.start);
+                return;
+            }
+
+            let mut result = Some(());
+            match token.kind {
+                TokenKind::Comment | TokenKind::BadComment => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.comment(self, token.range.start, token.range.end);
+                }
+                TokenKind::WhiteSpace => {
+                    self.cur_pos = Some(token.range.end);
+                }
+                TokenKind::QuotedString | TokenKind::BadString => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.string(self, token.range.start, token.range.end);
+                }
+                TokenKind::Url => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.url(
+                        self,
+                        token.range.start,
+                        token.range.end,
+                        token.value_range.start,
+                        token.value_range.end,
+                    );
+                }
+                TokenKind::Function => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.function(self, token.range.start, token.range.end);
+                }
+                TokenKind::Ident => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.ident(self, token.range.start, token.range.end);
+                }
+                TokenKind::AtKeyword => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.at_keyword(self, token.range.start, token.range.end);
+                }
+                TokenKind::IdHash | TokenKind::Hash => {
+                    let hash_end = token.range.start + 1;
+                    self.cur_pos = Some(hash_end);
+                    if visitor.is_selector(self).unwrap_or(false) {
+                        if token.kind == TokenKind::Hash && !self.starts_ident_at(hash_end as usize)
+                        {
+                            self.token_pos = hash_end;
+                            result = visitor.id(self, token.range.start, hash_end);
+                        } else {
+                            self.token_pos = token.range.end;
+                            self.cur_pos = Some(token.range.end);
+                            result = visitor.id(self, token.range.start, token.range.end);
+                        }
+                    } else {
+                        self.token_pos = hash_end;
+                    }
+                }
+                TokenKind::Delim if self.slice(token.range.start, token.range.end) == Some("#") => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.id(self, token.range.start, token.range.end);
+                }
+                TokenKind::Delim if self.slice(token.range.start, token.range.end) == Some(".") => {
+                    let mut lookahead = self.clone();
+                    let next = lookahead.next_token();
+                    let class_end =
+                        if next.kind == TokenKind::Ident && next.range.start == token.range.end {
+                            next.range.end
+                        } else {
+                            token.range.end
+                        };
+                    self.cur_pos = Some(token.range.end);
+                    if visitor.is_selector(self).unwrap_or(false) {
+                        self.token_pos = class_end;
+                        self.cur_pos = Some(class_end);
+                        result = visitor.class(self, token.range.start, class_end);
+                    } else {
+                        self.token_pos = token.range.end;
+                    }
+                }
+                TokenKind::Colon => {
+                    let mut lookahead = self.clone();
+                    let next = lookahead.next_token();
+                    if !matches!(next.kind, TokenKind::Ident | TokenKind::Function)
+                        || next.range.start != token.range.end
+                    {
+                        self.cur_pos = Some(token.range.end);
+                        continue;
+                    }
+                    let (end, function) = if next.kind == TokenKind::Function {
+                        (next.range.end, true)
+                    } else {
+                        let after_name = lookahead.next_token();
+                        if after_name.kind == TokenKind::LeftParenthesis
+                            && after_name.range.start == next.range.end
+                        {
+                            (after_name.range.end, true)
+                        } else {
+                            (next.range.end, false)
+                        }
+                    };
+                    self.cur_pos = Some(token.range.end);
+                    if !visitor.is_selector(self).unwrap_or(false) {
+                        self.token_pos = token.range.end;
+                        continue;
+                    }
+                    self.token_pos = end;
+                    self.cur_pos = Some(end);
+                    result = if function {
+                        visitor.pseudo_function(self, token.range.start, end)
+                    } else {
+                        visitor.pseudo_class(self, token.range.start, end)
+                    };
+                }
+                TokenKind::LeftParenthesis => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.left_parenthesis(self, token.range.start, token.range.end);
+                }
+                TokenKind::RightParenthesis => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.right_parenthesis(self, token.range.start, token.range.end);
+                }
+                TokenKind::Comma => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.comma(self, token.range.start, token.range.end);
+                }
+                TokenKind::Semicolon => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.semicolon(self, token.range.start, token.range.end);
+                }
+                TokenKind::LeftCurlyBracket => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.left_curly_bracket(self, token.range.start, token.range.end);
+                }
+                TokenKind::RightCurlyBracket => {
+                    self.cur_pos = Some(token.range.end);
+                    result = visitor.right_curly_bracket(self, token.range.start, token.range.end);
+                }
+                _ => {
+                    self.cur_pos = Some(token.range.end);
+                }
+            }
+
+            if result.is_none() {
+                return;
+            }
+            self.token_pos = self.cur_pos.unwrap_or(token.range.end);
+        }
+    }
+
+    #[inline]
+    fn scan_whitespace(&self, start: usize) -> (TokenKind, usize, usize, usize) {
+        let bytes = self.value;
+        let mut end = start;
+        while end < bytes.len() && is_white_space(bytes[end]) {
+            end += 1;
+        }
+        (TokenKind::WhiteSpace, end, start, end)
+    }
+
+    fn scan_comment(&self, start: usize) -> (TokenKind, usize, usize, usize) {
+        let bytes = self.value;
+        let mut end = start + 2;
+        while end + 1 < bytes.len() {
+            if bytes[end] == C_ASTERISK && bytes[end + 1] == C_SOLIDUS {
+                return (TokenKind::Comment, end + 2, start + 2, end);
+            }
+            end += if bytes[end] < 0x80 {
+                1
+            } else {
+                self.utf8_width_at(end)
+            };
+        }
+        (TokenKind::BadComment, bytes.len(), start + 2, bytes.len())
+    }
+
+    fn scan_string(&self, start: usize, quote: u8) -> (TokenKind, usize, usize, usize) {
+        let mut end = start + 1;
+        while end < self.value.len() {
+            let byte = self.value[end];
+            if byte == quote {
+                return (TokenKind::QuotedString, end + 1, start + 1, end);
+            }
+            if is_new_line(byte) {
+                return (TokenKind::BadString, end, start + 1, end);
+            }
+            if byte == C_REVERSE_SOLIDUS {
+                if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 1;
+                    if self.value.get(end) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end + 1) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                    end += 1;
+                } else if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else {
+                    end += 1;
+                }
+            } else {
+                end += self.utf8_width_at(end);
+            }
+        }
+        (TokenKind::BadString, end, start + 1, end)
+    }
+
+    fn scan_ident_like(&self, start: usize) -> (TokenKind, usize, usize, usize) {
+        let name_end = self.scan_name(start);
+        if self.value.get(name_end) != Some(&C_LEFT_PARENTHESIS) {
+            return (TokenKind::Ident, name_end, start, name_end);
+        }
+
+        let open_end = name_end + 1;
+        let name = &self.value[start..name_end];
+        let is_url = name.eq_ignore_ascii_case(b"url")
+            || (name
+                .iter()
+                .any(|byte| matches!(*byte, C_REVERSE_SOLIDUS | 0))
+                && crate::escape::eq_ignore_ascii_case(
+                    std::str::from_utf8(name).unwrap_or_default(),
+                    "url",
+                ));
+        if is_url {
+            let content_start = self.skip_white_space(open_end);
+            if !matches!(
+                self.value.get(content_start),
+                Some(&C_QUOTATION_MARK) | Some(&C_APOSTROPHE)
+            ) {
+                return self.scan_url(start, content_start);
+            }
+        }
+        (TokenKind::Function, open_end, start, name_end)
+    }
+
+    fn scan_url(&self, start: usize, content_start: usize) -> (TokenKind, usize, usize, usize) {
+        let mut end = content_start;
+        while end < self.value.len() {
+            let byte = self.value[end];
+            if byte == C_RIGHT_PARENTHESIS {
+                return (TokenKind::Url, end + 1, content_start, end);
+            }
+            if is_white_space(byte) {
+                let content_end = end;
+                let close = self.skip_white_space(end);
+                if self.value.get(close) == Some(&C_RIGHT_PARENTHESIS) {
+                    return (TokenKind::Url, close + 1, content_start, content_end);
+                }
+                return self.scan_bad_url(start, close, content_start);
+            }
+            if byte == C_QUOTATION_MARK
+                || byte == C_APOSTROPHE
+                || byte == C_LEFT_PARENTHESIS
+                || is_non_printable(byte)
+            {
+                return self.scan_bad_url(start, end, content_start);
+            }
+            if byte == C_REVERSE_SOLIDUS {
+                if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 2;
+                    if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                } else {
+                    return self.scan_bad_url(start, end, content_start);
+                }
+            } else {
+                end += self.utf8_width_at(end);
+            }
+        }
+        (
+            TokenKind::BadUrl,
+            self.value.len(),
+            content_start,
+            self.value.len(),
+        )
+    }
+
+    fn scan_bad_url(
+        &self,
+        _start: usize,
+        mut end: usize,
+        content_start: usize,
+    ) -> (TokenKind, usize, usize, usize) {
+        while end < self.value.len() {
+            if self.value[end] == C_RIGHT_PARENTHESIS {
+                end += 1;
+                break;
+            }
+            if self.value[end] == C_REVERSE_SOLIDUS {
+                if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 2;
+                    if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                } else {
+                    end += 1;
+                }
+            } else {
+                end += self.utf8_width_at(end);
+            }
+        }
+        (TokenKind::BadUrl, end, content_start, end)
+    }
+
+    fn scan_numeric(&self, start: usize) -> (TokenKind, usize, usize, usize) {
+        let mut end = start;
+        if matches!(
+            self.value.get(end),
+            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+        ) {
+            end += 1;
+        }
+        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+            end += 1;
+        }
+        if self.value.get(end) == Some(&C_FULL_STOP)
+            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
+        {
+            end += 1;
+            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                end += 1;
+            }
+        }
+        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
+            let exponent_start = end;
+            let mut exponent_end = end + 1;
+            if matches!(
+                self.value.get(exponent_end),
+                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+            ) {
+                exponent_end += 1;
+            }
+            if self
+                .value
+                .get(exponent_end)
+                .is_some_and(|byte| is_digit(*byte))
+            {
+                end = exponent_end + 1;
+                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                    end += 1;
+                }
+            } else {
+                end = exponent_start;
+            }
+        }
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return (TokenKind::Percentage, end + 1, start, end + 1);
+        }
+        if self.starts_ident_at(end) {
+            let end = self.scan_name(end);
+            return (TokenKind::Dimension, end, start, end);
+        }
+        (TokenKind::Number, end, start, end)
+    }
+
+    #[inline]
+    fn skip_white_space(&self, mut position: usize) -> usize {
+        while self
+            .value
+            .get(position)
+            .is_some_and(|byte| is_white_space(*byte))
+        {
+            position += 1;
+        }
+        position
+    }
+
+    #[inline]
+    fn scan_name(&self, mut position: usize) -> usize {
+        let bytes = self.value;
+        while position < bytes.len() {
+            let byte = bytes[position];
+            if byte == C_REVERSE_SOLIDUS {
+                if self.is_valid_escape_at(position) {
+                    position = self.scan_escape(position);
+                } else {
+                    break;
+                }
+            } else if is_ident(byte) || byte == 0 {
+                position += if byte < 0x80 {
+                    1
+                } else {
+                    self.utf8_width_at(position)
+                };
+            } else {
+                break;
+            }
+        }
+        position
+    }
+
+    #[inline]
+    fn starts_ident_at(&self, position: usize) -> bool {
+        let Some(byte) = self.value.get(position).copied() else {
+            return false;
+        };
+        match byte {
+            C_HYPHEN_MINUS => match self.value.get(position + 1).copied() {
+                Some(next) => {
+                    is_name_start_byte(next)
+                        || next == C_HYPHEN_MINUS
+                        || self.is_valid_escape_at(position + 1)
+                }
+                None => false,
+            },
+            C_REVERSE_SOLIDUS => self.is_valid_escape_at(position),
+            _ => is_name_start_byte(byte),
+        }
+    }
+
+    #[inline]
+    fn starts_number_at(&self, position: usize) -> bool {
+        let Some(first) = self.value.get(position).copied() else {
+            return false;
+        };
+        let second = self.value.get(position + 1).copied();
+        let third = self.value.get(position + 2).copied();
+        match first {
+            C_PLUS_SIGN | C_HYPHEN_MINUS => {
+                second.is_some_and(is_digit)
+                    || (second == Some(C_FULL_STOP) && third.is_some_and(is_digit))
+            }
+            C_FULL_STOP => second.is_some_and(is_digit),
+            _ => is_digit(first),
+        }
+    }
+
+    #[inline]
+    fn is_valid_escape_at(&self, position: usize) -> bool {
+        self.value.get(position) == Some(&C_REVERSE_SOLIDUS)
+            && self
+                .value
+                .get(position + 1)
+                .is_some_and(|byte| !is_new_line(*byte))
+    }
+
+    #[inline]
+    fn scan_escape(&self, position: usize) -> usize {
+        debug_assert!(self.is_valid_escape_at(position));
+        let mut end = position + 1;
+        if self.value[end].is_ascii_hexdigit() {
+            let mut digits = 0;
+            while end < self.value.len() && digits < 6 && self.value[end].is_ascii_hexdigit() {
+                end += 1;
+                digits += 1;
+            }
+            if self
+                .value
+                .get(end)
+                .is_some_and(|byte| is_white_space(*byte))
+            {
+                end += 1;
+                if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                    && self.value.get(end) == Some(&C_LINE_FEED)
+                {
+                    end += 1;
+                }
+            }
+            return end;
+        }
+        end + self.utf8_width_at(end)
+    }
+
+    #[inline]
+    fn utf8_width_at(&self, position: usize) -> usize {
+        let byte = self.value[position];
+        if byte < 0x80 {
+            1
+        } else if byte < 0xE0 {
+            2
+        } else if byte < 0xF0 {
+            3
+        } else {
+            4
+        }
+    }
+
     pub fn lex<T: Visitor<'s>>(&mut self, visitor: &mut T) {
         self.lex_impl(visitor);
     }
@@ -351,17 +1104,20 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn consume_escaped(&mut self) -> Option<()> {
-        if is_hex_digit(self.cur()?) {
-            for _ in 1..5 {
+        if self.cur().is_some_and(is_hex_digit) {
+            let mut digits = 1;
+            while digits < 6 {
                 self.consume();
-                if !is_hex_digit(self.cur()?) {
+                if self.cur().is_some_and(is_hex_digit) {
+                    digits += 1;
+                } else {
                     break;
                 }
             }
-            if is_white_space(self.cur()?) {
+            if self.cur().is_some_and(is_white_space) {
                 self.consume();
             }
-        } else {
+        } else if self.cur().is_some() {
             self.consume();
         }
         Some(())
@@ -598,6 +1354,83 @@ impl<'s> Lexer<'s> {
     }
 }
 
+/// A cursor that returns significant tokens with their leading trivia folded
+/// into one small value.
+pub struct TokenCursor<'s> {
+    lexer: Lexer<'s>,
+    peeked: Option<TokenWithTrivia>,
+}
+
+impl<'s> TokenCursor<'s> {
+    pub fn new(input: &'s str) -> Self {
+        Self {
+            lexer: Lexer::new(input),
+            peeked: None,
+        }
+    }
+
+    pub fn from_lexer(lexer: Lexer<'s>) -> Self {
+        Self {
+            lexer,
+            peeked: None,
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    #[inline]
+    pub fn next(&mut self) -> TokenWithTrivia {
+        self.peeked
+            .take()
+            .unwrap_or_else(|| self.read_significant())
+    }
+
+    #[inline]
+    pub fn peek(&mut self) -> TokenWithTrivia {
+        if self.peeked.is_none() {
+            self.peeked = Some(self.read_significant());
+        }
+        self.peeked.unwrap()
+    }
+
+    #[inline]
+    pub fn next_significant(&mut self) -> TokenWithTrivia {
+        self.next()
+    }
+
+    #[inline]
+    pub fn peek_significant(&mut self) -> TokenWithTrivia {
+        self.peek()
+    }
+
+    #[inline]
+    fn read_significant(&mut self) -> TokenWithTrivia {
+        let start = self.lexer.token_pos;
+        let mut end = start;
+        let mut first_comment_start = None;
+        let mut has_white_space = false;
+        loop {
+            let token = self.lexer.next_token();
+            if token.kind == TokenKind::WhiteSpace {
+                has_white_space = true;
+                end = token.range.end;
+                continue;
+            }
+            if token.kind == TokenKind::Comment {
+                first_comment_start.get_or_insert(token.range.start);
+                end = token.range.end;
+                continue;
+            }
+            let leading = Trivia {
+                range: Range::new(start, end),
+                end,
+                first_comment_start,
+                has_white_space,
+            };
+            return TokenWithTrivia { token, leading };
+        }
+    }
+}
+
 impl Lexer<'_> {
     pub fn consume_comments(&mut self) -> Option<()> {
         if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
@@ -634,31 +1467,6 @@ impl Lexer<'_> {
         }
         Some(())
     }
-
-    pub(crate) fn consume_trivia(&mut self) -> Option<Trivia> {
-        let mut first_comment_start = None;
-        let mut has_white_space = false;
-
-        loop {
-            if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
-                first_comment_start.get_or_insert(self.cur_pos()?);
-                self.consume_comments()?;
-                continue;
-            }
-            if is_white_space(self.cur()?) {
-                has_white_space = true;
-                self.consume_space()?;
-                continue;
-            }
-            break;
-        }
-
-        Some(Trivia {
-            end: self.cur_pos()?,
-            first_comment_start,
-            has_white_space,
-        })
-    }
 }
 
 pub fn is_new_line(c: u8) -> bool {
@@ -683,6 +1491,16 @@ pub fn is_hex_digit(c: u8) -> bool {
 
 pub fn is_ident_start(c: u8) -> bool {
     c == C_LOW_LINE || c.is_ascii_alphabetic() || !c.is_ascii()
+}
+
+#[inline]
+fn is_name_start_byte(c: u8) -> bool {
+    c == 0 || c == C_LOW_LINE || c.is_ascii_alphabetic() || !c.is_ascii()
+}
+
+#[inline]
+fn is_non_printable(c: u8) -> bool {
+    matches!(c, 0x00..=0x08 | 0x0B | 0x0E..=0x1F | 0x7F)
 }
 
 pub fn is_ident(c: u8) -> bool {
@@ -853,6 +1671,170 @@ mod tests {
     }
 
     #[test]
+    fn streaming_visitor_adapter_preserves_basic_token_callbacks() {
+        let input = r#"body { color: red; .child:hover { background: url(image.png); } }"#;
+        let mut old = Snapshot::default();
+        let mut old_lexer = Lexer::new(input);
+        old_lexer.lex(&mut old);
+
+        let mut streamed = Snapshot::default();
+        let mut streamed_lexer = Lexer::new(input);
+        streamed_lexer.lex_tokens(&mut streamed);
+
+        similar_asserts::assert_eq!(streamed.snapshot(), old.snapshot());
+    }
+
+    #[test]
+    fn streaming_visitor_adapter_preserves_unrestricted_hash_callbacks() {
+        for input in ["#123 { color: red; }", "# { color: red; }"] {
+            let mut old = Snapshot::default();
+            let mut old_lexer = Lexer::new(input);
+            old_lexer.lex(&mut old);
+
+            let mut streamed = Snapshot::default();
+            let mut streamed_lexer = Lexer::new(input);
+            streamed_lexer.lex_tokens(&mut streamed);
+
+            similar_asserts::assert_eq!(streamed.snapshot(), old.snapshot());
+        }
+    }
+
+    fn token_text(input: &str, token: Token) -> &str {
+        Lexer::slice_range(input, &token.range).unwrap()
+    }
+
+    #[test]
+    fn streaming_tokenizer_consumes_one_to_six_hex_escape_digits() {
+        for input in [
+            r"\1 ",
+            r"\12 ",
+            r"\123 ",
+            r"\1234 ",
+            r"\12345 ",
+            r"\123456 ",
+        ] {
+            let mut lexer = Lexer::new(input);
+            let token = lexer.next_token();
+            assert_eq!(token.kind, TokenKind::Ident);
+            assert_eq!(token_text(input, token), input);
+            assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+        }
+    }
+
+    #[test]
+    fn streaming_tokenizer_keeps_consecutive_comments_distinct() {
+        let input = "/** first **//** second **/ \tfoo";
+        let mut lexer = Lexer::new(input);
+        let first = lexer.next_token();
+        let second = lexer.next_token();
+        let whitespace = lexer.next_token();
+        let ident = lexer.next_token();
+        assert_eq!(first.kind, TokenKind::Comment);
+        assert_eq!(second.kind, TokenKind::Comment);
+        assert_eq!(token_text(input, first), "/** first **/");
+        assert_eq!(token_text(input, second), "/** second **/");
+        assert_eq!(whitespace.kind, TokenKind::WhiteSpace);
+        assert_eq!(ident.kind, TokenKind::Ident);
+
+        let mut cursor = TokenCursor::new(input);
+        let significant = cursor.next_significant();
+        assert_eq!(significant.token.kind, TokenKind::Ident);
+        assert_eq!(significant.leading.first_comment_start, Some(0));
+        assert!(significant.leading.has_whitespace());
+        assert_eq!(significant.leading.range, Range::new(0, 29));
+    }
+
+    #[test]
+    fn streaming_tokenizer_reports_eof_tokens_after_unterminated_inputs() {
+        let mut ident = Lexer::new("ident");
+        assert_eq!(ident.next_token().kind, TokenKind::Ident);
+        assert_eq!(ident.next_token().kind, TokenKind::Eof);
+
+        let mut string = Lexer::new("'unterminated");
+        assert_eq!(string.next_token().kind, TokenKind::BadString);
+        assert_eq!(string.next_token().kind, TokenKind::Eof);
+
+        let mut comment = Lexer::new("/* unterminated");
+        assert_eq!(comment.next_token().kind, TokenKind::BadComment);
+        assert_eq!(comment.next_token().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn streaming_tokenizer_does_not_treat_string_comments_as_trivia() {
+        let input = r#""/* not a comment */""#;
+        let mut lexer = Lexer::new(input);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::QuotedString);
+        assert_eq!(token_text(input, token), input);
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn streaming_tokenizer_scans_escaped_url_content_as_one_token() {
+        let input = r"url(https:\2f\2fexample.com\2fimage.png)";
+        let mut lexer = Lexer::new(input);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::Url);
+        assert_eq!(token_text(input, token), input);
+        assert_eq!(
+            Lexer::slice_range(input, &token.value_range).unwrap(),
+            r"https:\2f\2fexample.com\2fimage.png"
+        );
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn streaming_tokenizer_handles_escaped_url_names_and_string_continuations() {
+        let input = r"u\72l(foo)";
+        let mut lexer = Lexer::new(input);
+        assert_eq!(lexer.next_token().kind, TokenKind::Url);
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+
+        let input: String = ['"', 'a', '\\', '\n', 'b', '"'].into_iter().collect();
+        let mut lexer = Lexer::new(&input);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::QuotedString);
+        assert_eq!(token_text(&input, token), input);
+    }
+
+    #[test]
+    fn token_cursor_preserves_nested_value_at_rule_punctuation() {
+        let input = "@value (foo:bar, func(a,b; c)) from \"theme.css\";";
+        let mut cursor = TokenCursor::new(input);
+        let mut kinds = Vec::new();
+        loop {
+            let token = cursor.next_significant().token;
+            kinds.push(token.kind);
+            if token.kind == TokenKind::Eof {
+                break;
+            }
+        }
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::AtKeyword,
+                TokenKind::LeftParenthesis,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Ident,
+                TokenKind::Comma,
+                TokenKind::Function,
+                TokenKind::Ident,
+                TokenKind::Comma,
+                TokenKind::Ident,
+                TokenKind::Semicolon,
+                TokenKind::Ident,
+                TokenKind::RightParenthesis,
+                TokenKind::RightParenthesis,
+                TokenKind::Ident,
+                TokenKind::QuotedString,
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn lexer_state_1() {
         let mut l = Lexer::new("");
         assert_lexer_state(&l, None, None, None, Some(0), None, None);
@@ -861,20 +1843,6 @@ mod tests {
         assert_lexer_state(&l, None, Some(0), None, None, None, None);
         l.consume();
         assert_eq!(l.cur(), None);
-    }
-
-    #[test]
-    fn consume_trivia_distinguishes_comments_from_white_space() {
-        let input = " /** first **//** second **/ .class";
-        let mut lexer = Lexer::new(input);
-        lexer.consume();
-
-        let trivia = lexer.consume_trivia().unwrap();
-
-        assert!(trivia.has_white_space);
-        assert_eq!(trivia.first_comment_start, Some(1));
-        assert_eq!(trivia.end, input.find(".class").unwrap() as Pos);
-        assert_eq!(lexer.cur(), Some(b'.'));
     }
 
     #[test]
@@ -908,21 +1876,6 @@ mod tests {
         assert_lexer_state(&l, None, Some(11), None, None, None, None);
         l.consume();
         assert_eq!(l.cur(), None);
-    }
-
-    #[test]
-    fn lexer_state_3() {
-        let l = Lexer::new("");
-        let mut l = l.turn_back(0).unwrap();
-        assert_lexer_state(&l, None, None, None, Some(0), None, None);
-        l.consume();
-        assert_lexer_state(&l, None, Some(0), None, None, None, None);
-    }
-
-    #[test]
-    fn turn_back_rejects_invalid_positions_without_panicking() {
-        assert!(Lexer::new("é").turn_back(1).is_none());
-        assert!(Lexer::new("x").turn_back(2).is_none());
     }
 
     #[test]
