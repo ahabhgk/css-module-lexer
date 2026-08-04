@@ -362,6 +362,10 @@ fn is_css_space_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
 }
 
+fn is_css_white_space_char(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
+}
+
 fn trim_slice(input: &str) -> &str {
     let bytes = input.as_bytes();
     let mut start = 0usize;
@@ -1459,7 +1463,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
         let trivia = lookahead.consume_trivia()?;
         Some(
-            (!trivia.has_white_space && matches!(lookahead.cur()?, '.' | '#' | C_LEFT_CURLY))
+            (!trivia.has_white_space && matches!(lookahead.cur()?, b'.' | b'#' | C_LEFT_CURLY))
                 .then_some(mode),
         )
     }
@@ -1596,7 +1600,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         has_white_space
     }
 
-    fn eat(&mut self, lexer: &mut Lexer<'s>, chars: &[char], message: &'s str) -> Option<bool> {
+    fn eat(&mut self, lexer: &mut Lexer<'s>, chars: &[u8], message: &'s str) -> Option<bool> {
         if !chars.contains(&lexer.cur()?) {
             self.handle_warning.handle_warning(Warning {
                 kind: WarningKind::Unexpected { message },
@@ -1684,15 +1688,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 .handle_dependency(Dependency::ICSSImportValue {
                     prop: lexer
                         .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_white_space),
+                        .trim_end_matches(is_css_white_space_char),
                     value: lexer
                         .slice(value_start, value_end)?
-                        .trim_end_matches(is_white_space),
+                        .trim_end_matches(is_css_white_space_char),
                 });
             self.icss_symbols.insert(
                 lexer
                     .slice(prop_start, prop_end)?
-                    .trim_end_matches(is_white_space),
+                    .trim_end_matches(is_css_white_space_char),
             );
         }
         lexer.consume();
@@ -1725,7 +1729,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         Some(())
     }
 
-    fn consume_raw_string(&self, lexer: &mut Lexer<'s>, end: char) -> Option<()> {
+    fn consume_raw_string(&self, lexer: &mut Lexer<'s>, end: u8) -> Option<()> {
         lexer.consume();
         loop {
             let c = lexer.cur()?;
@@ -1870,17 +1874,17 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 .handle_dependency(Dependency::ICSSExportValue {
                     prop: lexer
                         .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_white_space),
+                        .trim_end_matches(is_css_white_space_char),
                     value: strip_css_comments(
                         lexer
                             .slice(value_start, value_end)?
-                            .trim_end_matches(is_white_space),
+                            .trim_end_matches(is_css_white_space_char),
                     ),
                 });
             self.icss_symbols.insert(
                 lexer
                     .slice(prop_start, prop_end)?
-                    .trim_end_matches(is_white_space),
+                    .trim_end_matches(is_css_white_space_char),
             );
         }
         lexer.consume();
@@ -1912,7 +1916,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             lexer.consume_white_space_and_comments()?;
             let c = lexer.cur()?;
             let path_start = lexer.cur_pos()?;
-            if c == '\'' || c == '"' {
+            if c == b'\'' || c == b'"' {
                 lexer.consume();
                 lexer.consume_string(self, c)?;
             } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {
@@ -2374,7 +2378,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 break;
             }
             let path_start = lexer.cur_pos()?;
-            if c == '\'' || c == '"' {
+            if c == b'\'' || c == b'"' {
                 lexer.consume();
                 lexer.consume_string(self, c)?;
             } else if start_ident_sequence(c, lexer.peek()?, lexer.peek2()?) {

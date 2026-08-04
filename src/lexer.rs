@@ -1,53 +1,43 @@
-use std::{iter::Rev, str::Chars};
-
 use crate::Range;
 
-pub const C_LINE_FEED: char = '\n';
-pub const C_CARRIAGE_RETURN: char = '\r';
-pub const C_FORM_FEED: char = '\u{c}';
+pub const C_LINE_FEED: u8 = b'\n';
+pub const C_CARRIAGE_RETURN: u8 = b'\r';
+pub const C_FORM_FEED: u8 = b'\x0c';
 
-pub const C_TAB: char = '\t';
-pub const C_SPACE: char = ' ';
+pub const C_TAB: u8 = b'\t';
+pub const C_SPACE: u8 = b' ';
 
-pub const C_SOLIDUS: char = '/';
-pub const C_REVERSE_SOLIDUS: char = '\\';
-pub const C_ASTERISK: char = '*';
+pub const C_SOLIDUS: u8 = b'/';
+pub const C_REVERSE_SOLIDUS: u8 = b'\\';
+pub const C_ASTERISK: u8 = b'*';
 
-pub const C_LEFT_PARENTHESIS: char = '(';
-pub const C_RIGHT_PARENTHESIS: char = ')';
-pub const C_LEFT_CURLY: char = '{';
-pub const C_RIGHT_CURLY: char = '}';
-pub const C_LEFT_SQUARE: char = '[';
-pub const C_RIGHT_SQUARE: char = ']';
+pub const C_LEFT_PARENTHESIS: u8 = b'(';
+pub const C_RIGHT_PARENTHESIS: u8 = b')';
+pub const C_LEFT_CURLY: u8 = b'{';
+pub const C_RIGHT_CURLY: u8 = b'}';
+pub const C_LEFT_SQUARE: u8 = b'[';
+pub const C_RIGHT_SQUARE: u8 = b']';
 
-pub const C_QUOTATION_MARK: char = '"';
-pub const C_APOSTROPHE: char = '\'';
+pub const C_QUOTATION_MARK: u8 = b'"';
+pub const C_APOSTROPHE: u8 = b'\'';
 
-pub const C_FULL_STOP: char = '.';
-pub const C_COLON: char = ':';
-pub const C_SEMICOLON: char = ';';
-pub const C_COMMA: char = ',';
-pub const C_PERCENTAGE: char = '%';
-pub const C_AT_SIGN: char = '@';
+pub const C_FULL_STOP: u8 = b'.';
+pub const C_COLON: u8 = b':';
+pub const C_SEMICOLON: u8 = b';';
+pub const C_COMMA: u8 = b',';
+pub const C_PERCENTAGE: u8 = b'%';
+pub const C_AT_SIGN: u8 = b'@';
 
-pub const C_LOW_LINE: char = '_';
-pub const C_LOWER_A: char = 'a';
-pub const C_LOWER_E: char = 'e';
-pub const C_LOWER_F: char = 'f';
-pub const C_LOWER_Z: char = 'z';
-pub const C_UPPER_A: char = 'A';
-pub const C_UPPER_E: char = 'E';
-pub const C_UPPER_F: char = 'F';
-pub const C_UPPER_Z: char = 'Z';
-pub const C_0: char = '0';
-pub const C_9: char = '9';
+pub const C_LOW_LINE: u8 = b'_';
+pub const C_LOWER_E: u8 = b'e';
+pub const C_UPPER_E: u8 = b'E';
 
-pub const C_NUMBER_SIGN: char = '#';
-pub const C_PLUS_SIGN: char = '+';
-pub const C_HYPHEN_MINUS: char = '-';
+pub const C_NUMBER_SIGN: u8 = b'#';
+pub const C_PLUS_SIGN: u8 = b'+';
+pub const C_HYPHEN_MINUS: u8 = b'-';
 
-pub const C_LESS_THAN_SIGN: char = '<';
-pub const C_GREATER_THAN_SIGN: char = '>';
+pub const C_LESS_THAN_SIGN: u8 = b'<';
+pub const C_GREATER_THAN_SIGN: u8 = b'>';
 
 pub type Pos = u32;
 
@@ -87,43 +77,34 @@ pub trait Visitor<'s> {
     fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
 #[derive(Debug, Clone)]
-pub struct Lexer<'s, I: Iterator<Item = char> = Chars<'s>> {
+pub struct Lexer<'s> {
     value: &'s str,
-    iter: I,
+    direction: Direction,
     cur_pos: Option<Pos>,
-    cur: Option<char>,
-    peek: Option<char>,
-    peek2: Option<char>,
 }
 
 impl<'s> Lexer<'s> {
     pub fn new(value: &'s str) -> Self {
-        let mut iter = value.chars();
-        let peek = iter.next();
-        let peek2 = iter.next();
         Self {
             value,
-            iter,
+            direction: Direction::Forward,
             cur_pos: None,
-            cur: None,
-            peek,
-            peek2,
         }
     }
 
-    pub fn turn_back(self, end: Pos) -> Lexer<'s, Rev<Chars<'s>>> {
+    pub fn turn_back(self, end: Pos) -> Lexer<'s> {
         let value = self.slice(0, end).unwrap();
-        let mut iter = value.chars().rev();
-        let peek = iter.next();
-        let peek2 = iter.next();
         Lexer {
             value,
-            iter,
+            direction: Direction::Backward,
             cur_pos: None,
-            cur: None,
-            peek,
-            peek2,
         }
     }
 
@@ -136,41 +117,58 @@ impl<'s> Lexer<'s> {
     }
 }
 
-impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
-    pub fn consume(&mut self) {
-        self.cur_pos = self.peek_pos();
-        self.cur = self.peek;
-        self.peek = self.peek2;
-        self.peek2 = self.iter.next();
+impl Lexer<'_> {
+    #[inline]
+    fn byte_at(&self, pos: Pos) -> Option<u8> {
+        let pos = pos as usize;
+        let index = match self.direction {
+            Direction::Forward => pos,
+            Direction::Backward => self.value.len().checked_sub(pos + 1)?,
+        };
+        self.value.as_bytes().get(index).copied()
     }
 
+    #[inline]
+    pub fn consume(&mut self) {
+        if self.cur_pos.is_none() {
+            self.cur_pos = Some(0);
+        } else if self.cur().is_some() {
+            self.cur_pos = self.cur_pos.map(|pos| pos + 1);
+        }
+    }
+
+    #[inline]
     pub fn cur_pos(&self) -> Option<Pos> {
         self.cur_pos
     }
 
-    pub fn cur(&self) -> Option<char> {
-        self.cur
+    #[inline]
+    pub fn cur(&self) -> Option<u8> {
+        self.cur_pos.and_then(|pos| self.byte_at(pos))
     }
 
+    #[inline]
     pub fn peek_pos(&self) -> Option<Pos> {
-        if let Some(pos) = self.cur_pos() {
-            self.cur().map(|c| pos + c.len_utf8() as u32)
-        } else {
-            Some(0)
+        match self.cur_pos {
+            Some(pos) if self.cur().is_some() => Some(pos + 1),
+            Some(_) => None,
+            None => Some(0),
         }
     }
 
-    pub fn peek(&self) -> Option<char> {
-        self.peek
+    #[inline]
+    pub fn peek(&self) -> Option<u8> {
+        self.peek_pos().and_then(|pos| self.byte_at(pos))
     }
 
+    #[inline]
     pub fn peek2_pos(&self) -> Option<Pos> {
-        self.peek_pos()
-            .and_then(|pos| self.peek().map(|c| pos + c.len_utf8() as u32))
+        self.peek_pos().and_then(|pos| self.peek().map(|_| pos + 1))
     }
 
-    pub fn peek2(&self) -> Option<char> {
-        self.peek2
+    #[inline]
+    pub fn peek2(&self) -> Option<u8> {
+        self.peek2_pos().and_then(|pos| self.byte_at(pos))
     }
 }
 
@@ -389,7 +387,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    pub fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
+    pub fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: u8) -> Option<()> {
         let start = self.cur_pos()?;
         self.consume();
         loop {
@@ -522,7 +520,7 @@ impl<'s> Lexer<'s> {
 
     pub fn consume_less_than_sign(&mut self) -> Option<()> {
         self.consume();
-        if self.cur()? == '!' && self.peek()? == '-' && self.peek2()? == '-' {
+        if self.cur()? == b'!' && self.peek()? == b'-' && self.peek2()? == b'-' {
             self.consume();
             self.consume();
             self.consume();
@@ -562,7 +560,7 @@ impl<'s> Lexer<'s> {
     }
 }
 
-impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
+impl Lexer<'_> {
     pub fn consume_comments(&mut self) -> Option<()> {
         if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
             self.consume();
@@ -625,38 +623,35 @@ impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
     }
 }
 
-pub fn is_new_line(c: char) -> bool {
+pub fn is_new_line(c: u8) -> bool {
     c == C_LINE_FEED || c == C_CARRIAGE_RETURN || c == C_FORM_FEED
 }
 
-pub fn is_space(c: char) -> bool {
+pub fn is_space(c: u8) -> bool {
     c == C_TAB || c == C_SPACE
 }
 
-pub fn is_white_space(c: char) -> bool {
+pub fn is_white_space(c: u8) -> bool {
     is_new_line(c) || is_space(c)
 }
 
-pub fn is_digit(c: char) -> bool {
-    c >= C_0 && c <= C_9
+pub fn is_digit(c: u8) -> bool {
+    c.is_ascii_digit()
 }
 
-pub fn is_hex_digit(c: char) -> bool {
-    is_digit(c) || (c >= C_UPPER_A && c <= C_UPPER_F) || (c >= C_LOWER_A && c <= C_LOWER_F)
+pub fn is_hex_digit(c: u8) -> bool {
+    c.is_ascii_hexdigit()
 }
 
-pub fn is_ident_start(c: char) -> bool {
-    c == C_LOW_LINE
-        || (c >= C_LOWER_A && c <= C_LOWER_Z)
-        || (c >= C_UPPER_A && c <= C_UPPER_Z)
-        || c >= '\u{80}'
+pub fn is_ident_start(c: u8) -> bool {
+    c == C_LOW_LINE || c.is_ascii_alphabetic() || !c.is_ascii()
 }
 
-pub fn is_ident(c: char) -> bool {
+pub fn is_ident(c: u8) -> bool {
     is_ident_start(c) || is_digit(c) || c == C_HYPHEN_MINUS
 }
 
-pub fn start_ident_sequence(c1: char, c2: char, c3: char) -> bool {
+pub fn start_ident_sequence(c1: u8, c2: u8, c3: u8) -> bool {
     if c1 == C_HYPHEN_MINUS {
         is_ident_start(c2) || c2 == C_HYPHEN_MINUS || are_valid_escape(c2, c3)
     } else {
@@ -664,15 +659,15 @@ pub fn start_ident_sequence(c1: char, c2: char, c3: char) -> bool {
     }
 }
 
-pub fn maybe_valid_escape(c: char) -> bool {
+pub fn maybe_valid_escape(c: u8) -> bool {
     c == C_REVERSE_SOLIDUS
 }
 
-pub fn are_valid_escape(c1: char, c2: char) -> bool {
+pub fn are_valid_escape(c1: u8, c2: u8) -> bool {
     c1 == C_REVERSE_SOLIDUS && !is_new_line(c2)
 }
 
-pub fn start_number(c1: char, c2: char, c3: char) -> bool {
+pub fn start_number(c1: u8, c2: u8, c3: u8) -> bool {
     if c1 == C_PLUS_SIGN || c1 == C_HYPHEN_MINUS {
         is_digit(c2) || (c2 == C_FULL_STOP && is_digit(c3))
     } else {
@@ -686,13 +681,13 @@ mod tests {
     use indoc::indoc;
     use std::fmt::Write as _;
 
-    fn assert_lexer_state<I: Iterator<Item = char>>(
-        lexer: &Lexer<'_, I>,
-        cur: Option<char>,
+    fn assert_lexer_state(
+        lexer: &Lexer<'_>,
+        cur: Option<u8>,
         cur_pos: Option<Pos>,
-        peek: Option<char>,
+        peek: Option<u8>,
         peek_pos: Option<Pos>,
-        peek2: Option<char>,
+        peek2: Option<u8>,
         peek2_pos: Option<Pos>,
     ) {
         assert_eq!(lexer.cur(), cur);
@@ -841,41 +836,35 @@ mod tests {
         assert!(trivia.has_white_space);
         assert_eq!(trivia.first_comment_start, Some(1));
         assert_eq!(trivia.end, input.find(".class").unwrap() as Pos);
-        assert_eq!(lexer.cur(), Some('.'));
+        assert_eq!(lexer.cur(), Some(b'.'));
     }
 
     #[test]
     fn lexer_state_2() {
-        let mut l = Lexer::new("0壹👂삼");
-        assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
-        l.consume();
-        assert_eq!(l.cur(), Some('0'));
+        let input = "0壹👂삼";
+        let bytes = input.as_bytes();
+        let mut l = Lexer::new(input);
         assert_lexer_state(
             &l,
-            Some('0'),
+            None,
+            None,
+            bytes.first().copied(),
             Some(0),
-            Some('壹'),
+            bytes.get(1).copied(),
             Some(1),
-            Some('👂'),
-            Some(4),
         );
-        l.consume();
-        assert_eq!(l.cur(), Some('壹'));
-        assert_lexer_state(
-            &l,
-            Some('壹'),
-            Some(1),
-            Some('👂'),
-            Some(4),
-            Some('삼'),
-            Some(8),
-        );
-        l.consume();
-        assert_eq!(l.cur(), Some('👂'));
-        assert_lexer_state(&l, Some('👂'), Some(4), Some('삼'), Some(8), None, Some(11));
-        l.consume();
-        assert_eq!(l.cur(), Some('삼'));
-        assert_lexer_state(&l, Some('삼'), Some(8), None, Some(11), None, None);
+        for (pos, byte) in bytes.iter().copied().enumerate() {
+            l.consume();
+            assert_lexer_state(
+                &l,
+                Some(byte),
+                Some(pos as Pos),
+                bytes.get(pos + 1).copied(),
+                Some((pos + 1) as Pos),
+                bytes.get(pos + 2).copied(),
+                bytes.get(pos + 1).map(|_| (pos + 2) as Pos),
+            );
+        }
         l.consume();
         assert_eq!(l.cur(), None);
         assert_lexer_state(&l, None, Some(11), None, None, None, None);
