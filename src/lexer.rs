@@ -200,7 +200,6 @@ pub struct TokenWithTrivia {
 #[derive(Debug)]
 pub struct Lexer<'s> {
     value: &'s [u8],
-    semantic_pos: Pos,
     scan_pos: Pos,
 }
 
@@ -209,21 +208,8 @@ impl<'s> Lexer<'s> {
         assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
             value: value.as_bytes(),
-            semantic_pos: 0,
             scan_pos: 0,
         }
-    }
-
-    #[inline]
-    pub(crate) fn reset_scan(&mut self) {
-        self.semantic_pos = 0;
-        self.scan_pos = 0;
-    }
-
-    #[inline]
-    pub(crate) fn set_position(&mut self, position: Pos) {
-        self.semantic_pos = position;
-        self.scan_pos = position;
     }
 
     #[inline]
@@ -234,14 +220,6 @@ impl<'s> Lexer<'s> {
     #[inline(always)]
     pub(crate) fn byte_at(&self, position: Pos) -> Option<u8> {
         self.value.get(position as usize).copied()
-    }
-
-    #[inline]
-    pub(crate) fn sync_scan_position(&mut self, _fallback: Pos) {
-        let position = self.semantic_pos;
-        if self.scan_pos != position {
-            self.scan_pos = position;
-        }
     }
 
     /// Classify the next non-trivia item without scanning the complete token.
@@ -281,6 +259,7 @@ impl<'s> Lexer<'s> {
         F: FnMut(&str) -> bool,
     {
         let mut position = self.scan_pos as usize;
+        let scan_start = position;
         while position < self.value.len() {
             if is_white_space(self.value[position]) {
                 position += 1;
@@ -305,6 +284,10 @@ impl<'s> Lexer<'s> {
             break;
         }
         self.scan_pos = position as Pos;
+        debug_assert!(
+            self.scan_pos >= scan_start as Pos,
+            "fast_forward moved scan_pos backward from {scan_start} to {position}"
+        );
     }
 
     pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
@@ -349,8 +332,8 @@ impl<'s> Lexer<'s> {
 
 impl Lexer<'_> {
     #[inline]
-    pub(crate) fn position(&self) -> Option<Pos> {
-        Some(self.semantic_pos)
+    pub(crate) fn scan_pos(&self) -> Pos {
+        self.scan_pos
     }
 }
 
@@ -594,6 +577,11 @@ impl<'s> Lexer<'s> {
         };
 
         self.scan_pos = end as Pos;
+        debug_assert!(
+            self.scan_pos >= start as Pos,
+            "scan_pos moved backward from {start} to {}",
+            self.scan_pos
+        );
         Token::with_flags(
             kind,
             Range::new(start as Pos, end as Pos),
@@ -1040,9 +1028,22 @@ impl<'s> Lexer<'s> {
 /// token of lookahead without cloning the lexer for every decision. Special
 /// parsers use the same stream through `next_parser_token`, so consuming a
 /// subgrammar never creates a second scanner over the source.
+///
+/// The cursor is strictly one-directional:
+///
+/// ```text
+/// Lexer::scan_pos         farthest tokenized position, only advances
+/// TokenStream::consumed   farthest semantically consumed position, only advances
+/// buffered lookahead      tokens scanned but not yet consumed
+/// ```
+///
+/// `next` consumes from the buffer first and only calls `lexer.next_token`
+/// when the buffer is empty; it never moves the scanner backwards, so every
+/// source range is tokenized at most once and every token is consumed at most
+/// once.
 pub(crate) struct TokenStream<'a, 's> {
     lexer: &'a mut Lexer<'s>,
-    current_end: Pos,
+    consumed: Pos,
     peeked: Option<TokenWithTrivia>,
     buffered: VecDeque<TokenWithTrivia>,
 }
@@ -1051,7 +1052,7 @@ impl<'a, 's> TokenStream<'a, 's> {
     pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s>) -> Self {
         Self {
             lexer,
-            current_end: 0,
+            consumed: 0,
             peeked: None,
             buffered: VecDeque::new(),
         }
@@ -1060,16 +1061,19 @@ impl<'a, 's> TokenStream<'a, 's> {
     #[inline(always)]
     pub(crate) fn next<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
         let token = if let Some(token) = self.peeked.take() {
-            self.lexer.set_position(token.token.range.end);
             token
         } else if let Some(token) = self.buffered.pop_front() {
-            self.lexer.set_position(token.token.range.end);
             token
         } else {
             self.read_significant::<KEEP_COMMENTS>()
         };
-        self.lexer.semantic_pos = token.token.range.end;
-        self.current_end = token.token.range.end;
+        self.consumed = self.consumed.max(token.token.range.end);
+        debug_assert!(
+            self.consumed <= self.lexer.scan_pos(),
+            "consumed_pos ({}) exceeded scan_pos ({})",
+            self.consumed,
+            self.lexer.scan_pos()
+        );
         token
     }
 
@@ -1141,14 +1145,98 @@ impl<'a, 's> TokenStream<'a, 's> {
         }
     }
 
-    pub(crate) fn take_buffered_comments(&mut self) -> Vec<TokenWithTrivia> {
-        let mut comments = Vec::new();
-        while self.buffered.front().is_some_and(|item| {
-            matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment)
-        }) {
-            comments.push(self.buffered.pop_front().unwrap());
+    /// Peek the next parser token (folding comments into its leading trivia)
+    /// without consuming it or any preceding comments. The stream state is
+    /// unchanged: `next` later returns the same tokens in the same order.
+    #[inline]
+    pub(crate) fn peek_parser_token(&mut self) -> TokenWithTrivia {
+        self.peek::<true>();
+        let mut items: VecDeque<TokenWithTrivia> = VecDeque::new();
+        if let Some(item) = self.peeked.take() {
+            items.push_back(item);
         }
-        comments
+        items.append(&mut self.buffered);
+
+        let mut leading_start = None;
+        let mut first_comment_start = None;
+        let mut has_white_space = false;
+        let mut scanned: VecDeque<TokenWithTrivia> = VecDeque::new();
+        loop {
+            let item = if let Some(item) = items.pop_front() {
+                item
+            } else {
+                let item = self.read_significant::<true>();
+                items.push_back(item);
+                continue;
+            };
+            leading_start.get_or_insert(item.leading.range.start);
+            has_white_space |= item.leading.has_whitespace();
+            if matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                first_comment_start.get_or_insert(item.token.range.start);
+                scanned.push_back(item);
+                continue;
+            }
+
+            let end = item.leading.end;
+            let mut result = item;
+            result.leading = Trivia {
+                range: Range::new(leading_start.unwrap_or(end), end),
+                end,
+                first_comment_start: first_comment_start.or(item.leading.first_comment_start),
+                has_white_space,
+            };
+            self.buffered = scanned;
+            self.buffered.push_back(result);
+            self.buffered.append(&mut items);
+            self.peeked = None;
+            return result;
+        }
+    }
+
+    /// Peek at the next significant token, leaving any skipped comments in
+    /// the buffer for `next` to consume in source order.
+    #[inline]
+    pub(crate) fn peek_significant_skipping_comments<const KEEP_COMMENTS: bool>(
+        &mut self,
+    ) -> TokenWithTrivia {
+        self.peek::<KEEP_COMMENTS>();
+        if let Some(item) = self.peeked {
+            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                return item;
+            }
+        }
+        for item in &self.buffered {
+            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                return *item;
+            }
+        }
+        loop {
+            let item = self.read_significant::<KEEP_COMMENTS>();
+            self.buffered.push_back(item);
+            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                return item;
+            }
+        }
+    }
+
+    /// The position of the next yet-untokenized source byte. The buffer may
+    /// still hold tokens; callers must drain `next` before fast-forwarding.
+    #[inline]
+    pub(crate) fn fast_forward_if_buffer_empty<F>(&mut self, mut is_candidate: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        if self.peeked.is_some() || !self.buffered.is_empty() {
+            return;
+        }
+        self.lexer.fast_forward_generic_value(&mut is_candidate);
+    }
+
+    /// The farthest position consumed by `next`. This is the current semantic
+    /// position of the dependency scanner.
+    #[inline]
+    pub(crate) fn consumed_pos(&self) -> Pos {
+        self.consumed
     }
 
     #[inline]
@@ -1159,24 +1247,6 @@ impl<'a, 's> TokenStream<'a, 's> {
     #[inline]
     pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s> {
         self.lexer
-    }
-
-    #[inline]
-    pub(crate) fn position(&self) -> Option<Pos> {
-        self.lexer.position()
-    }
-
-    #[inline]
-    pub(crate) fn set_position(&mut self, position: Pos) {
-        self.peeked = None;
-        self.buffered.clear();
-        self.current_end = position;
-        self.lexer.set_position(position);
-    }
-
-    #[inline]
-    pub(crate) fn set_lexer_position(&mut self, position: Pos) {
-        self.lexer.set_position(position);
     }
 
     #[inline]
@@ -1199,23 +1269,9 @@ impl<'a, 's> TokenStream<'a, 's> {
         self.lexer.slice_trusted(start, end)
     }
 
-    #[inline]
-    pub(crate) fn clear_peeked_at(&mut self, position: Pos) {
-        self.peeked = None;
-        self.buffered.clear();
-        self.current_end = position;
-        self.lexer.set_position(position);
-    }
-
-    #[inline]
-    pub(crate) fn rewind_to_current(&mut self) {
-        self.lexer.semantic_pos = self.current_end;
-        self.lexer.scan_pos = self.current_end;
-    }
-
     #[inline(always)]
     fn read_significant<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
-        let start = self.lexer.scan_pos;
+        let start = self.lexer.scan_pos();
         let mut end = start;
         let mut first_comment_start = None;
         let mut has_white_space = false;
@@ -1475,5 +1531,108 @@ mod tests {
         assert!(Lexer::slice_range(input, &Range::new(2, 3)).is_none());
         assert!(Lexer::slice_range(input, &Range::new(0, 5)).is_none());
         assert!(Lexer::slice_range(input, &Range::new(3, 1)).is_none());
+    }
+
+    #[test]
+    fn token_stream_cursors_are_monotonic_and_cover_the_input() {
+        for input in [
+            ".a { color: red; }",
+            ".a { width: 10px; }",
+            ".a { color: red; background: blue; }",
+            ":local(.a) {}",
+            ":local/**/.a {}",
+            ":global/**/#id {}",
+            ".a { color: var(--color); }",
+            ".a { background: url(\"./a.png\"); }",
+            ".a { color: rgb(1, 2, 3); }",
+        ] {
+            let mut lexer = Lexer::new(input);
+            let mut stream = TokenStream::from_lexer(&mut lexer);
+            let mut previous_scan = 0;
+            let mut previous_consumed = 0;
+            let mut previous_end = 0;
+            loop {
+                let item = stream.next_parser_token();
+                let scan = stream.lexer().scan_pos();
+                let consumed = stream.consumed_pos();
+                assert!(
+                    scan >= previous_scan,
+                    "scan_pos went backward in {input:?}"
+                );
+                assert!(
+                    consumed >= previous_consumed,
+                    "consumed_pos went backward in {input:?}"
+                );
+                assert!(
+                    consumed <= scan,
+                    "consumed_pos ({consumed}) exceeded scan_pos ({scan}) in {input:?}"
+                );
+                assert!(
+                    item.token.range.start >= previous_end,
+                    "token ranges are not increasing in {input:?}"
+                );
+                previous_end = item.token.range.end;
+                previous_scan = scan;
+                previous_consumed = consumed;
+                if item.token.kind == TokenKind::Eof {
+                    break;
+                }
+            }
+            assert_eq!(
+                previous_consumed,
+                input.len() as Pos,
+                "did not consume the whole input: {input:?}"
+            );
+            assert_eq!(
+                previous_scan,
+                input.len() as Pos,
+                "did not scan the whole input: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_stream_peek_past_value_does_not_rescan() {
+        // The colon lookahead must not read past `red`, and `red` must be
+        // consumed from the buffer instead of being tokenized twice.
+        let mut lexer = Lexer::new("color:red;");
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Colon);
+        let red = stream.peek_significant_skipping_comments::<true>().token;
+        assert_eq!(red.kind, TokenKind::Ident);
+        let (semi, _) = stream.peek_after_non_comment::<true>();
+        assert_eq!(semi.token.kind, TokenKind::Semicolon);
+        let scan_before = stream.lexer().scan_pos();
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Semicolon);
+        assert_eq!(
+            stream.lexer().scan_pos(),
+            scan_before,
+            "consuming buffered tokens must not advance the scanner"
+        );
+        assert_eq!(stream.consumed_pos(), scan_before);
+    }
+
+    #[test]
+    fn token_stream_comment_separated_mode_stays_buffered_in_source_order() {
+        // `:local/**/.foo` keeps the comment and `.foo` in the buffer so the
+        // dependency scanner consumes them exactly once in source order.
+        let mut lexer = Lexer::new(":local/**/.foo");
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Colon);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+        let delim = stream.peek_significant_skipping_comments::<true>().token;
+        assert_eq!(delim.kind, TokenKind::Delim);
+        let scan_after_peek = stream.lexer().scan_pos();
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Comment);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Delim);
+        assert_eq!(
+            stream.lexer().scan_pos(),
+            scan_after_peek,
+            "the buffered comment and delim must be consumed without rescanning"
+        );
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Eof);
     }
 }
