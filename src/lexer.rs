@@ -1,4 +1,5 @@
 use crate::Range;
+use std::str;
 
 pub const C_LINE_FEED: u8 = b'\n';
 pub const C_CARRIAGE_RETURN: u8 = b'\r';
@@ -85,7 +86,7 @@ enum Direction {
 
 #[derive(Debug, Clone)]
 pub struct Lexer<'s> {
-    value: &'s str,
+    value: &'s [u8],
     direction: Direction,
     cur_pos: Option<Pos>,
 }
@@ -93,28 +94,65 @@ pub struct Lexer<'s> {
 impl<'s> Lexer<'s> {
     pub fn new(value: &'s str) -> Self {
         Self {
-            value,
+            value: value.as_bytes(),
             direction: Direction::Forward,
             cur_pos: None,
         }
     }
 
-    pub fn turn_back(self, end: Pos) -> Lexer<'s> {
-        let value = self.slice(0, end).unwrap();
-        Lexer {
+    pub fn turn_back(self, end: Pos) -> Option<Lexer<'s>> {
+        let end = end as usize;
+        if !is_utf8_boundary(self.value, end) {
+            return None;
+        }
+        let value = self.value.get(..end)?;
+        Some(Lexer {
             value,
             direction: Direction::Backward,
             cur_pos: None,
-        }
+        })
     }
 
-    pub fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
-        Self::slice_range(self.value, &Range::new(start, end))
+    pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
+        let range = Range::new(start, end);
+        let start = start as usize;
+        let end = end as usize;
+        if start > end || end > self.value.len() {
+            return None;
+        }
+        // SAFETY: Lexer-generated positions always delimit complete tokens or
+        // source fragments and therefore stay on UTF-8 code point boundaries.
+        Some(unsafe { Self::slice_unchecked(self.value, &range) })
     }
 
     pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
-        input.get(range.start as usize..range.end as usize)
+        let start = range.start as usize;
+        let end = range.end as usize;
+        if start > end
+            || end > input.len()
+            || !input.is_char_boundary(start)
+            || !input.is_char_boundary(end)
+        {
+            return None;
+        }
+        // SAFETY: The range was checked against the original `str` above.
+        Some(unsafe { Self::slice_unchecked(input.as_bytes(), range) })
     }
+
+    unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
+        let value = input.get_unchecked(range.start as usize..range.end as usize);
+        str::from_utf8_unchecked(value)
+    }
+}
+
+#[inline]
+fn is_utf8_boundary(input: &[u8], index: usize) -> bool {
+    index == 0
+        || index == input.len()
+        || input
+            .get(index)
+            .map(|byte| byte & 0b1100_0000 != 0b1000_0000)
+            .unwrap_or(false)
 }
 
 impl Lexer<'_> {
@@ -125,7 +163,7 @@ impl Lexer<'_> {
             Direction::Forward => pos,
             Direction::Backward => self.value.len().checked_sub(pos + 1)?,
         };
-        self.value.as_bytes().get(index).copied()
+        self.value.get(index).copied()
     }
 
     #[inline]
@@ -875,10 +913,26 @@ mod tests {
     #[test]
     fn lexer_state_3() {
         let l = Lexer::new("");
-        let mut l = l.turn_back(0);
+        let mut l = l.turn_back(0).unwrap();
         assert_lexer_state(&l, None, None, None, Some(0), None, None);
         l.consume();
         assert_lexer_state(&l, None, Some(0), None, None, None, None);
+    }
+
+    #[test]
+    fn turn_back_rejects_invalid_positions_without_panicking() {
+        assert!(Lexer::new("é").turn_back(1).is_none());
+        assert!(Lexer::new("x").turn_back(2).is_none());
+    }
+
+    #[test]
+    fn slice_range_rejects_invalid_utf8_boundaries() {
+        let input = "aéz";
+        assert_eq!(Lexer::slice_range(input, &Range::new(1, 3)), Some("é"));
+        assert!(Lexer::slice_range(input, &Range::new(1, 2)).is_none());
+        assert!(Lexer::slice_range(input, &Range::new(2, 3)).is_none());
+        assert!(Lexer::slice_range(input, &Range::new(0, 5)).is_none());
+        assert!(Lexer::slice_range(input, &Range::new(3, 1)).is_none());
     }
 
     #[test]

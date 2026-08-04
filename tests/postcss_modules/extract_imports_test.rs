@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use css_module_lexer::Dependency;
 use css_module_lexer::LexDependencies;
@@ -20,31 +20,73 @@ enum StateMarker {
     Temporary,
 }
 
-fn add_import_to_graph<'import>(
-    import: &'import str,
+fn serialize_identifier(mut value: &str) -> String {
+    fn serialize_name(value: &str, output: &mut String) {
+        for character in value.chars() {
+            match character {
+                '\0' => output.push('\u{FFFD}'),
+                '0'..='9' | 'A'..='Z' | 'a'..='z' | '_' | '-' => output.push(character),
+                character if !character.is_ascii() => output.push(character),
+                character if character.is_ascii_control() => {
+                    write!(output, "\\{:x} ", character as u32).unwrap();
+                }
+                character => {
+                    output.push('\\');
+                    output.push(character);
+                }
+            }
+        }
+    }
+
+    let mut output = String::new();
+    if let Some(rest) = value.strip_prefix("--") {
+        output.push_str("--");
+        serialize_name(rest, &mut output);
+        return output;
+    }
+    if value == "-" {
+        return "\\-".to_string();
+    }
+    if let Some(rest) = value.strip_prefix('-') {
+        output.push('-');
+        value = rest;
+    }
+    if let Some(digit @ '0'..='9') = value.chars().next() {
+        write!(output, "\\{:x} ", digit as u32).unwrap();
+        value = &value[digit.len_utf8()..];
+    }
+    serialize_name(value, &mut output);
+    output
+}
+
+fn add_import_to_graph(
+    import: &str,
     rule_index: u32,
-    graph: &mut LinkedHashMap<&'import str, Vec<&'import str>>,
+    graph: &mut LinkedHashMap<String, Vec<String>>,
     visited: &mut HashSet<String>,
-    siblings: &mut HashMap<u32, Vec<&'import str>>,
+    siblings: &mut HashMap<u32, Vec<String>>,
 ) {
     let visited_id = format!("{rule_index}_{import}");
     if visited.contains(&visited_id) {
         return;
     }
-    let children = graph.entry(import).or_default();
+    let children = graph.entry(import.to_string()).or_default();
     if let Some(siblings) = siblings.get(&rule_index) {
-        children.extend(siblings);
+        children.extend(siblings.iter().cloned());
     }
     visited.insert(visited_id);
-    siblings.entry(rule_index).or_default().push(import);
+    siblings
+        .entry(rule_index)
+        .or_default()
+        .push(import.to_string());
 }
 
-fn walk_graph<'import>(
-    import: &'import str,
-    graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
-    state: &mut HashMap<&'import str, StateMarker>,
-    result: &mut Vec<&'import str>,
-    warnings: &mut Vec<Warning<'import>>,
+fn walk_graph(
+    import: &str,
+    graph: &LinkedHashMap<String, Vec<String>>,
+    state: &mut HashMap<String, StateMarker>,
+    result: &mut Vec<String>,
+    warnings: &mut Vec<Warning<'_>>,
 ) {
     if let Some(marker) = state.get(import) {
         match marker {
@@ -62,18 +104,18 @@ fn walk_graph<'import>(
             }
         }
     }
-    state.insert(import, StateMarker::Temporary);
+    state.insert(import.to_string(), StateMarker::Temporary);
     for child in &graph[import] {
         walk_graph(child, graph, state, result, warnings);
     }
-    state.insert(import, StateMarker::Permanent);
-    result.push(import);
+    state.insert(import.to_string(), StateMarker::Permanent);
+    result.push(import.to_string());
 }
 
-fn topological_sort<'import>(
-    graph: &LinkedHashMap<&'import str, Vec<&'import str>>,
-    warnings: &mut Vec<Warning<'import>>,
-) -> Vec<&'import str> {
+fn topological_sort(
+    graph: &LinkedHashMap<String, Vec<String>>,
+    warnings: &mut Vec<Warning<'_>>,
+) -> Vec<String> {
     let mut result = Vec::new();
     let mut state = HashMap::new();
     for import in graph.keys() {
@@ -91,9 +133,10 @@ impl ExtractImports {
         let mut lexer = Lexer::new(input);
         let mut composes_contents = Vec::new();
         let mut postfix = 0;
-        let mut imports: LinkedHashMap<&str, LinkedHashMap<&str, Cow<str>>> = LinkedHashMap::new();
+        let mut imports: LinkedHashMap<String, LinkedHashMap<String, String>> =
+            LinkedHashMap::new();
         let mut rule_index = 0;
-        let mut graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::new();
+        let mut graph: LinkedHashMap<String, Vec<String>> = LinkedHashMap::new();
         let mut visited = HashSet::new();
         let mut siblings = HashMap::new();
         let mut visitor = LexDependencies::new(
@@ -106,16 +149,16 @@ impl ExtractImports {
                     if let Some(from) = from {
                         if from == "global" {
                             for i in 0..names.len() {
-                                let name = names[i];
+                                let name = names[i].as_ref();
                                 composes_content += "global(";
-                                composes_content += name;
+                                composes_content += &serialize_identifier(name);
                                 composes_content += ")";
                                 if i + 1 != names.len() {
                                     composes_content += " ";
                                 }
                             }
                         } else {
-                            let path = from.trim_matches(|c| c == '\'' || c == '"');
+                            let path = from.as_ref().trim_matches(|c| c == '\'' || c == '"');
                             add_import_to_graph(
                                 path,
                                 rule_index,
@@ -123,11 +166,11 @@ impl ExtractImports {
                                 &mut visited,
                                 &mut siblings,
                             );
-                            let values = imports.entry(path).or_default();
+                            let values = imports.entry(path.to_string()).or_default();
                             for i in 0..names.len() {
-                                let name = names[i];
+                                let name = names[i].as_ref();
                                 if let Some(value) = values.get(name) {
-                                    composes_content += value.as_ref();
+                                    composes_content += value;
                                 } else {
                                     let value = format!(
                                         "i__imported_{}_{postfix}",
@@ -138,7 +181,7 @@ impl ExtractImports {
                                     );
                                     postfix += 1;
                                     composes_content += value.as_ref();
-                                    values.insert(name, value.into());
+                                    values.insert(name.to_string(), value);
                                 }
                                 if i + 1 != names.len() {
                                     composes_content += " ";
@@ -147,8 +190,8 @@ impl ExtractImports {
                         }
                     } else {
                         for i in 0..names.len() {
-                            let name = names[i];
-                            composes_content += name;
+                            let name = names[i].as_ref();
+                            composes_content += &serialize_identifier(name);
                             if i + 1 != names.len() {
                                 composes_content += " ";
                             }
@@ -176,13 +219,13 @@ impl ExtractImports {
                     }
                 }
                 Dependency::ICSSImportFrom { path } => {
-                    let path = path.trim_matches(|c| c == '\'' || c == '"');
-                    imports.insert(path, LinkedHashMap::new());
+                    let path = path.as_ref().trim_matches(|c| c == '\'' || c == '"');
+                    imports.insert(path.to_string(), LinkedHashMap::new());
                     add_import_to_graph(path, rule_index, &mut graph, &mut visited, &mut siblings);
                 }
                 Dependency::ICSSImportValue { prop, value } => {
                     let (_, values) = imports.iter_mut().last().unwrap();
-                    values.insert(value, prop.into());
+                    values.insert(value.into_owned(), prop.into_owned());
                 }
                 _ => {}
             },
@@ -196,15 +239,15 @@ impl ExtractImports {
         }
         let order = topological_sort(&graph, &mut warnings);
         for import in order {
-            let values = &imports[import];
+            let values = &imports[import.as_str()];
             imported += ":import(\"";
-            imported += import;
+            imported += &import;
             imported += "\") {\n";
             for (value, prop) in values {
                 imported += "    ";
                 imported += prop;
                 imported += ": ";
-                imported += value;
+                imported += &serialize_identifier(value);
                 imported += ";\n";
             }
             imported += "}\n";
@@ -800,11 +843,11 @@ fn valid_characters() {
                 i__imported_a__4: a_;
                 i__imported_b__5: b-;
                 i__imported_c___6: c--;
-                i__imported_d___7: d\%;
+                i__imported_d__7: d\%;
             }
             :local(.exportName) {
                 composes: i__imported_a_0 i__imported__b_1 i__imported___c_2 i__imported__d_3;
-                composes: i__imported_a__4 i__imported_b__5 i__imported_c___6 i__imported_d___7;
+                composes: i__imported_a__4 i__imported_b__5 i__imported_c___6 i__imported_d__7;
             }
         "#},
     );
@@ -851,22 +894,22 @@ mod topological_sort {
     #[test]
     fn should_resolve_graphs() {
         let mut warnings = Vec::new();
-        let graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::from_iter([
-            ("v1", vec!["v2", "v5"]),
-            ("v2", vec![]),
-            ("v3", vec!["v2", "v4", "v5"]),
-            ("v4", vec![]),
-            ("v5", vec![]),
+        let graph: LinkedHashMap<String, Vec<String>> = LinkedHashMap::from_iter([
+            ("v1".into(), vec!["v2".into(), "v5".into()]),
+            ("v2".into(), vec![]),
+            ("v3".into(), vec!["v2".into(), "v4".into(), "v5".into()]),
+            ("v4".into(), vec![]),
+            ("v5".into(), vec![]),
         ]);
         let order = topological_sort(&graph, &mut warnings);
         assert_eq!(order, vec!["v2", "v5", "v1", "v4", "v3"]);
         assert!(warnings.is_empty());
-        let graph: LinkedHashMap<&str, Vec<&str>> = LinkedHashMap::from_iter([
-            ("v1", vec!["v2", "v5"]),
-            ("v2", vec!["v4"]),
-            ("v3", vec!["v2", "v4", "v5"]),
-            ("v4", vec![]),
-            ("v5", vec![]),
+        let graph: LinkedHashMap<String, Vec<String>> = LinkedHashMap::from_iter([
+            ("v1".into(), vec!["v2".into(), "v5".into()]),
+            ("v2".into(), vec!["v4".into()]),
+            ("v3".into(), vec!["v2".into(), "v4".into(), "v5".into()]),
+            ("v4".into(), vec![]),
+            ("v5".into(), vec![]),
         ]);
         let order = topological_sort(&graph, &mut warnings);
         assert_eq!(order, vec!["v4", "v2", "v5", "v1", "v3"]);
@@ -876,8 +919,11 @@ mod topological_sort {
     #[test]
     fn cycle_in_the_graph() {
         let mut warnings = Vec::new();
-        let graph: LinkedHashMap<&str, Vec<&str>> =
-            LinkedHashMap::from_iter([("v1", vec!["v3"]), ("v2", vec![]), ("v3", vec!["v1"])]);
+        let graph: LinkedHashMap<String, Vec<String>> = LinkedHashMap::from_iter([
+            ("v1".into(), vec!["v3".into()]),
+            ("v2".into(), vec![]),
+            ("v3".into(), vec!["v1".into()]),
+        ]);
         let order = topological_sort(&graph, &mut warnings);
         assert_eq!(order, vec!["v3", "v1", "v2"]);
         assert!(!warnings.is_empty());

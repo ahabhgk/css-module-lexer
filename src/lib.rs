@@ -1,4 +1,5 @@
 mod dependencies;
+mod escape;
 mod lexer;
 
 pub use dependencies::Dependency;
@@ -9,6 +10,7 @@ pub use dependencies::Range;
 pub use dependencies::UrlRangeKind;
 pub use dependencies::Warning;
 pub use dependencies::WarningKind;
+pub use escape::unescape;
 pub use lexer::Lexer;
 pub use lexer::Pos;
 

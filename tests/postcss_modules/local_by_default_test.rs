@@ -19,7 +19,7 @@ impl LocalByDefault {
         let mut warnings = Vec::new();
         let mut index = 0;
         let mut lexer = Lexer::new(input);
-        let mut local_alias = HashSet::new();
+        let mut local_alias: HashSet<String> = HashSet::new();
         let add_local = |result: &mut String, name: &str| {
             *result += ":local(";
             *result += name;
@@ -41,20 +41,20 @@ impl LocalByDefault {
                         return;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, name);
+                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range } => {
-                    if local_alias.contains(name) {
+                    if local_alias.contains(name.as_ref()) {
                         return;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, name);
+                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
                     index = range.end;
                 }
-                Dependency::LocalKeyframesDecl { name, range } => {
+                Dependency::LocalKeyframesDecl { range, .. } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, name);
+                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
                     index = range.end;
                 }
                 Dependency::Replace { content, range } => {
@@ -67,7 +67,7 @@ impl LocalByDefault {
                     index = range.end;
                 }
                 Dependency::ICSSImportValue { prop, .. } => {
-                    local_alias.insert(prop);
+                    local_alias.insert(prop.into_owned());
                 }
                 _ => {}
             },

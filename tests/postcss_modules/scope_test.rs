@@ -43,14 +43,14 @@ impl Scope {
                 }
                 Dependency::LocalKeyframes { name, range } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    let new_name = generate_local_name(name);
+                    let new_name = generate_local_name(name.as_ref());
                     result += &new_name;
                     exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
                 }
                 Dependency::LocalKeyframesDecl { name, range } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    let new_name = generate_local_name(name);
+                    let new_name = generate_local_name(name.as_ref());
                     result += &new_name;
                     exports.insert(name.to_string(), vec![new_name]);
                     index = range.end;
@@ -61,13 +61,16 @@ impl Scope {
                     from,
                     ..
                 } => {
+                    let is_global = from.as_deref() == Some("global");
                     for name in names {
-                        let new_name = if matches!(from, Some("global")) {
+                        let name = name.as_ref();
+                        let new_name = if is_global {
                             name.to_string()
                         } else {
                             generate_local_name(name)
                         };
-                        for &local_class in local_classes.iter() {
+                        for local_class in &local_classes {
+                            let local_class = local_class.as_ref();
                             if let Some(existing) = exports.get(name) {
                                 let existing = existing.clone();
                                 exports.get_mut(local_class).unwrap().extend(existing);

@@ -5,6 +5,7 @@ use std::fmt::Display;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 
+use crate::escape::unescape;
 use crate::lexer::are_valid_escape;
 use crate::lexer::is_new_line;
 use crate::lexer::is_white_space;
@@ -366,6 +367,20 @@ fn is_css_white_space_char(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
+fn is_escaped_byte(bytes: &[u8], index: usize) -> bool {
+    let mut slash_count = 0usize;
+    let mut i = index;
+    while i > 0 && bytes[i - 1] == b'\\' {
+        slash_count += 1;
+        i -= 1;
+    }
+    slash_count % 2 == 1
+}
+
+fn unescape_names(names: SmallVec<[&str; 2]>) -> SmallVec<[Cow<'_, str>; 2]> {
+    names.into_iter().map(unescape).collect()
+}
+
 fn trim_slice(input: &str) -> &str {
     let bytes = input.as_bytes();
     let mut start = 0usize;
@@ -488,7 +503,7 @@ fn split_value_at_rule_from<'s>(input: &'s str, masked: &str) -> Option<(&'s str
         let mut start = end - 1;
         while start > 0 {
             start -= 1;
-            if bytes[start] == quote {
+            if bytes[start] == quote && !is_escaped_byte(bytes, start) {
                 break;
             }
         }
@@ -539,7 +554,7 @@ fn split_value_at_rule_items<'s>(input: &'s str, masked: &str) -> SmallVec<[&'s 
     while i < bytes.len() {
         let byte = bytes[i];
         if let Some(current_quote) = quote {
-            if byte == current_quote {
+            if byte == current_quote && !is_escaped_byte(bytes, i) {
                 quote = None;
             }
         } else if byte == b'"' || byte == b'\'' {
@@ -780,16 +795,14 @@ impl ModeData<'_> {
     pub fn is_current_local_mode(&self) -> bool {
         match self.current {
             Mode::Local | Mode::Pure => true,
-            Mode::Global => false,
-            Mode::Css => unreachable!(),
+            Mode::Global | Mode::Css => false,
         }
     }
 
     pub fn is_property_local_mode(&self) -> bool {
         match self.property {
             Mode::Local | Mode::Pure => true,
-            Mode::Global => false,
-            Mode::Css => unreachable!(),
+            Mode::Global | Mode::Css => false,
         }
     }
 
@@ -1187,19 +1200,19 @@ fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range;
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
-        request: &'s str,
+        request: Cow<'s, str>,
         range: Range,
         kind: UrlRangeKind,
     },
     Import {
-        request: &'s str,
+        request: Cow<'s, str>,
         range: Range,
         layer: Option<&'s str>,
         supports: Option<&'s str>,
         media: Option<&'s str>,
     },
     ICSSImportUrl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
         name_range: Range,
     },
@@ -1208,99 +1221,99 @@ pub enum Dependency<'s> {
         range: Range,
     },
     Charset {
-        value: &'s str,
+        value: Cow<'s, str>,
         range: Range,
     },
     LocalClass {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
         explicit: bool,
     },
     LocalId {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
         explicit: bool,
     },
     LocalVar {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
-        from: Option<&'s str>,
+        from: Option<Cow<'s, str>>,
     },
     LocalVarDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalPropertyDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalKeyframes {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalKeyframesDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalCounterStyle {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalCounterStyleDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalFontPalette {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalFontPaletteDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalContainer {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalContainerDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalFunction {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalFunctionDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalGrid {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     LocalGridDecl {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
     Composes {
-        local_classes: SmallVec<[&'s str; 2]>,
-        names: SmallVec<[&'s str; 2]>,
-        from: Option<&'s str>,
+        local_classes: SmallVec<[Cow<'s, str>; 2]>,
+        names: SmallVec<[Cow<'s, str>; 2]>,
+        from: Option<Cow<'s, str>>,
         range: Range,
     },
     ICSSImportFrom {
-        path: &'s str,
+        path: Cow<'s, str>,
     },
     ICSSImportValue {
-        prop: &'s str,
-        value: &'s str,
+        prop: Cow<'s, str>,
+        value: Cow<'s, str>,
     },
     ICSSExportValue {
-        prop: &'s str,
+        prop: Cow<'s, str>,
         value: Cow<'s, str>,
     },
     ICSSSymbol {
-        name: &'s str,
+        name: Cow<'s, str>,
         range: Range,
     },
 }
@@ -1402,7 +1415,7 @@ pub struct LexDependencies<'s, D, W> {
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
-    icss_symbols: HashSet<&'s str>,
+    icss_symbols: HashSet<Cow<'s, str>>,
     non_selector_mode: Option<Mode>,
     handle_dependency: D,
     handle_warning: W,
@@ -1495,7 +1508,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     lexer.consume();
                     self.handle_dependency
                         .handle_dependency(Dependency::Charset {
-                            value: lexer.slice(value_start, value_end)?,
+                            value: unescape(lexer.slice(value_start, value_end)?),
                             range: Range::new(start, lexer.cur_pos()?),
                         });
                 }
@@ -1561,14 +1574,16 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 
     fn back_white_space_and_comments_distance(&self, lexer: &Lexer<'s>, end: Pos) -> Option<Pos> {
-        let mut lexer = lexer.clone().turn_back(end);
+        let mut lexer = lexer.clone().turn_back(end)?;
         lexer.consume();
         lexer.consume_white_space_and_comments()?;
         lexer.cur_pos()
     }
 
     fn should_have_after_white_space(&self, lexer: &Lexer<'s>, end: Pos) -> bool {
-        let mut lexer = lexer.clone().turn_back(end);
+        let Some(mut lexer) = lexer.clone().turn_back(end) else {
+            return true;
+        };
         let mut has_white_space = false;
         lexer.consume();
         loop {
@@ -1651,7 +1666,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         self.handle_dependency
             .handle_dependency(Dependency::ICSSImportFrom {
-                path: lexer.slice(start, end)?,
+                path: unescape(lexer.slice(start, end)?),
             });
         lexer.consume();
         lexer.consume_white_space_and_comments()?;
@@ -1686,18 +1701,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             self.handle_dependency
                 .handle_dependency(Dependency::ICSSImportValue {
-                    prop: lexer
-                        .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_css_white_space_char),
-                    value: lexer
-                        .slice(value_start, value_end)?
-                        .trim_end_matches(is_css_white_space_char),
+                    prop: unescape(
+                        lexer
+                            .slice(prop_start, prop_end)?
+                            .trim_end_matches(is_css_white_space_char),
+                    ),
+                    value: unescape(
+                        lexer
+                            .slice(value_start, value_end)?
+                            .trim_end_matches(is_css_white_space_char),
+                    ),
                 });
-            self.icss_symbols.insert(
+            self.icss_symbols.insert(unescape(
                 lexer
                     .slice(prop_start, prop_end)?
                     .trim_end_matches(is_css_white_space_char),
-            );
+            ));
         }
         lexer.consume();
         Some(())
@@ -1792,18 +1811,20 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     });
                 } else {
                     self.handle_dependency
-                        .handle_dependency(Dependency::ICSSImportFrom { path: from });
+                        .handle_dependency(Dependency::ICSSImportFrom {
+                            path: unescape(from),
+                        });
                     for item in items {
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSImportValue {
-                                prop: item.local_name,
-                                value: item.import_name,
+                                prop: unescape(item.local_name),
+                                value: unescape(item.import_name),
                             });
-                        self.icss_symbols.insert(item.local_name);
+                        self.icss_symbols.insert(unescape(item.local_name));
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSExportValue {
-                                prop: item.local_name,
-                                value: Cow::Borrowed(item.local_name),
+                                prop: unescape(item.local_name),
+                                value: unescape(item.local_name),
                             });
                     }
                 }
@@ -1824,10 +1845,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 if !local_name.is_empty() {
                     self.handle_dependency
                         .handle_dependency(Dependency::ICSSExportValue {
-                            prop: local_name,
+                            prop: unescape(local_name),
                             value: Cow::Borrowed(value),
                         });
-                    self.icss_symbols.insert(local_name);
+                    self.icss_symbols.insert(unescape(local_name));
                 }
             }
         }
@@ -1872,20 +1893,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             self.handle_dependency
                 .handle_dependency(Dependency::ICSSExportValue {
-                    prop: lexer
-                        .slice(prop_start, prop_end)?
-                        .trim_end_matches(is_css_white_space_char),
+                    prop: unescape(
+                        lexer
+                            .slice(prop_start, prop_end)?
+                            .trim_end_matches(is_css_white_space_char),
+                    ),
                     value: strip_css_comments(
                         lexer
                             .slice(value_start, value_end)?
                             .trim_end_matches(is_css_white_space_char),
                     ),
                 });
-            self.icss_symbols.insert(
+            self.icss_symbols.insert(unescape(
                 lexer
                     .slice(prop_start, prop_end)?
                     .trim_end_matches(is_css_white_space_char),
-            );
+            ));
         }
         lexer.consume();
         Some(())
@@ -1930,13 +1953,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 });
                 return Some(());
             }
-            Some(lexer.slice(path_start, lexer.cur_pos()?)?)
+            Some(unescape(lexer.slice(path_start, lexer.cur_pos()?)?))
         } else {
             None
         };
         self.handle_dependency
             .handle_dependency(Dependency::LocalVar {
-                name: lexer.slice(name_start, end)?,
+                name: unescape(lexer.slice(name_start, end)?),
                 range: Range::new(start, end),
                 from,
             });
@@ -1957,7 +1980,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         lexer.consume();
         self.handle_dependency
             .handle_dependency(Dependency::LocalVarDecl {
-                name,
+                name: unescape(name),
                 range: Range::new(start, end),
             });
         Some(())
@@ -1966,7 +1989,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn lex_local_dashed_ident_decl(
         &mut self,
         lexer: &mut Lexer<'s>,
-        local_decl_dependency: impl FnOnce(&'s str, Range) -> Dependency<'s>,
+        local_decl_dependency: impl FnOnce(Cow<'s, str>, Range) -> Dependency<'s>,
         dashed_warning: impl FnOnce(Range) -> Warning<'s>,
         left_curly_warning: impl FnOnce(Range) -> Warning<'s>,
     ) -> Option<()> {
@@ -1982,7 +2005,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let end = lexer.cur_pos()?;
         self.handle_dependency
             .handle_dependency(local_decl_dependency(
-                lexer.slice(name_start, end)?,
+                unescape(lexer.slice(name_start, end)?),
                 Range::new(start, end),
             ));
         lexer.consume_white_space_and_comments()?;
@@ -2050,7 +2073,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalKeyframesDecl {
-                    name: lexer.slice(start, end)?,
+                    name: unescape(lexer.slice(start, end)?),
                     range: Range::new(start, end),
                 });
         }
@@ -2092,7 +2115,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if let Some(range) = animation.take_rename(self.balanced.len()) {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalKeyframes {
-                    name: lexer.slice(range.start, range.end)?,
+                    name: unescape(lexer.slice(range.start, range.end)?),
                     range,
                 });
         }
@@ -2116,7 +2139,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let end = lexer.cur_pos()?;
         self.handle_dependency
             .handle_dependency(Dependency::LocalCounterStyleDecl {
-                name: lexer.slice(start, end)?,
+                name: unescape(lexer.slice(start, end)?),
                 range: Range::new(start, end),
             });
         lexer.consume_white_space_and_comments()?;
@@ -2150,7 +2173,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalContainer {
-                    name: ident,
+                    name: unescape(ident),
                     range: Range::new(start, end),
                 });
         }
@@ -2211,7 +2234,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFunctionDecl {
-                    name: lexer.slice(start + 2, end)?,
+                    name: unescape(lexer.slice(start + 2, end)?),
                     range: Range::new(start, end),
                 });
         }
@@ -2253,7 +2276,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if let Some(range) = list_style.take_rename(self.balanced.len()) {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalCounterStyle {
-                    name: lexer.slice(range.start, range.end)?,
+                    name: unescape(lexer.slice(range.start, range.end)?),
                     range,
                 });
         }
@@ -2265,7 +2288,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if let Some(range) = font_palette.take_rename(self.balanced.len()) {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFontPalette {
-                    name: lexer.slice(range.start + 2, range.end)?,
+                    name: unescape(lexer.slice(range.start + 2, range.end)?),
                     range,
                 });
         }
@@ -2324,9 +2347,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     end = lexer.cur_pos()?;
                     self.handle_dependency
                         .handle_dependency(Dependency::Composes {
-                            local_classes: local_classes.clone(),
-                            names: smallvec![lexer.slice(name_start, name_end)?],
-                            from: Some("global"),
+                            local_classes: unescape_names(local_classes.clone()),
+                            names: smallvec![unescape(lexer.slice(name_start, name_end)?)],
+                            from: Some(Cow::Borrowed("global")),
                             range: Range::new(maybe_global_start, lexer.cur_pos()?),
                         });
                 } else {
@@ -2365,8 +2388,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 if !names.is_empty() {
                     self.handle_dependency
                         .handle_dependency(Dependency::Composes {
-                            local_classes: local_classes.clone(),
-                            names: std::mem::take(&mut names),
+                            local_classes: unescape_names(local_classes.clone()),
+                            names: unescape_names(std::mem::take(&mut names)),
                             from: None,
                             range: Range::new(start, end),
                         });
@@ -2394,11 +2417,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             let path_end = lexer.cur_pos()?;
             end = path_end;
-            let from = Some(lexer.slice(path_start, path_end)?);
+            let from = Some(unescape(lexer.slice(path_start, path_end)?));
             self.handle_dependency
                 .handle_dependency(Dependency::Composes {
-                    local_classes: local_classes.clone(),
-                    names: std::mem::take(&mut names),
+                    local_classes: unescape_names(local_classes.clone()),
+                    names: unescape_names(std::mem::take(&mut names)),
                     from,
                     range: Range::new(start, end),
                 });
@@ -2480,7 +2503,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 import_data.url_range = Some(Range::new(start, end));
             }
             Scope::InBlock => self.handle_dependency.handle_dependency(Dependency::Url {
-                request: value,
+                request: unescape(value),
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
             }),
@@ -2536,7 +2559,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         ) {
                             self.handle_dependency
                                 .handle_dependency(Dependency::LocalGridDecl {
-                                    name: lexer.slice(range.start, range.end)?,
+                                    name: unescape(lexer.slice(range.start, range.end)?),
                                     range,
                                 });
                         }
@@ -2552,7 +2575,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 };
                 let value = lexer.slice(start + 1, end - 1)?;
                 self.handle_dependency.handle_dependency(Dependency::Url {
-                    request: value,
+                    request: unescape(value),
                     range: Range::new(start, end),
                     kind,
                 });
@@ -2654,7 +2677,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                     if let Some((name, name_range)) = import_data.prelude.icss_import_url() {
                         self.handle_dependency
                             .handle_dependency(Dependency::ICSSImportUrl {
-                                name,
+                                name: unescape(name),
                                 range: Range::new(import_data.start, end),
                                 name_range: name_range.clone(),
                             });
@@ -2753,7 +2776,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 let media = self.get_media(lexer, last_end, start);
                 self.handle_dependency
                     .handle_dependency(Dependency::Import {
-                        request: url,
+                        request: unescape(url),
                         range: Range::new(import_data.start, end),
                         layer,
                         supports,
@@ -2835,7 +2858,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         if mode_data.is_current_local_mode() && name.starts_with("--") && end > start + 1 {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalFunction {
-                    name: lexer.slice(start + 2, end - 1)?,
+                    name: unescape(lexer.slice(start + 2, end - 1)?),
                     range: Range::new(start, end - 1),
                 });
         }
@@ -2912,10 +2935,11 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 };
 
                 let ident = lexer.slice(start, end)?;
-                if self.icss_symbols.contains(ident) {
+                let unescaped_ident = unescape(ident);
+                if self.icss_symbols.contains(unescaped_ident.as_ref()) {
                     self.handle_dependency
                         .handle_dependency(Dependency::ICSSSymbol {
-                            name: ident,
+                            name: unescaped_ident,
                             range: Range::new(start, end),
                         });
                     return Some(());
@@ -2931,7 +2955,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                 {
                     self.handle_dependency
                         .handle_dependency(Dependency::LocalFunction {
-                            name: lexer.slice(start + 2, end)?,
+                            name: unescape(lexer.slice(start + 2, end)?),
                             range: Range::new(start, end),
                         });
                     return Some(());
@@ -2970,7 +2994,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                             if let Some(range) = container.take_rename(self.balanced.len()) {
                                 self.handle_dependency.handle_dependency(
                                     Dependency::LocalContainerDecl {
-                                        name: lexer.slice(range.start, range.end)?,
+                                        name: unescape(lexer.slice(range.start, range.end)?),
                                         range,
                                     },
                                 );
@@ -2983,7 +3007,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
                         if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
                             self.handle_dependency
                                 .handle_dependency(Dependency::LocalGrid {
-                                    name: ident,
+                                    name: unescape(ident),
                                     range: Range::new(start, end),
                                 });
                         }
@@ -3102,7 +3126,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             if name != "." && mode == Mode::Local {
                 self.handle_dependency
                     .handle_dependency(Dependency::LocalClass {
-                        name,
+                        name: unescape(name),
                         range: Range::new(start, end),
                         explicit: true,
                     });
@@ -3121,7 +3145,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalClass {
-                    name,
+                    name: unescape(name),
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
@@ -3147,7 +3171,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
             if name != "#" && mode == Mode::Local {
                 self.handle_dependency
                     .handle_dependency(Dependency::LocalId {
-                        name,
+                        name: unescape(name),
                         range: Range::new(start, end),
                         explicit: true,
                     });
@@ -3166,7 +3190,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> Visitor<'s> for LexDepen
         if mode_data.is_current_local_mode() {
             self.handle_dependency
                 .handle_dependency(Dependency::LocalId {
-                    name,
+                    name: unescape(name),
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
