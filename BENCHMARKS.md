@@ -21,29 +21,28 @@ microbenchmarks.
 
 | case | pre-refactor branch | main snapshot | refactored |
 | --- | ---: | ---: | ---: |
-| bootstrap | 874.72 µs | 891.35 µs | 951.49–963.32–975.75 µs |
-| Rspack local | 242.53 µs | 265.36 µs | 310.28–312.64–315.25 µs |
-| Rspack global | 204.00 µs | 253.10 µs | 287.60–290.07–292.79 µs |
-| Rspack pure | 253.57 µs | 269.19 µs | 311.79–312.81–313.96 µs |
+| bootstrap | 874.72 µs | 891.35 µs | 802.69–806.41–810.83 µs |
+| Rspack local | 242.53 µs | 265.36 µs | 260.07–260.34–260.70 µs |
+| Rspack global | 204.00 µs | 253.10 µs | 232.57–233.17–233.98 µs |
+| Rspack pure | 253.57 µs | 269.19 µs | 265.14–266.74–268.69 µs |
 
 The refactored benchmark also contains independent tokenizer and semantic-sink
 cases. Their final medians were:
 
 | case | tokenizer | dependency sink |
 | --- | ---: | ---: |
-| comment-heavy `@value` / ICSS | 266.68 ns | 1.0256 µs |
-| nested selector | 172.27 ns | 404.88 ns |
-| comment-separated mode | 116.93 ns | 252.78 ns |
-| escape-heavy identifier | 112.27 ns | 337.27 ns |
-| large CSS | 457.43 µs | 827.54 µs |
+| comment-heavy `@value` / ICSS | 215.95 ns | 782.88 ns |
+| nested selector | 106.94 ns | 495.87 ns |
+| comment-separated mode | 71.10 ns | 370.15 ns |
+| escape-heavy identifier | 91.63 ns | 327.15 ns |
+| large CSS | 252.45 µs | 828.78 µs |
 
-`tokenizer/legacy_scanner` measured 472.05 µs on the large CSS fixture, which
-provides a direct scanner-only comparison. The focused cases are defined in
-[`benches/main.rs`](benches/main.rs).
+The legacy scanner benchmark was removed together with the incompatible
+`Visitor` API. The focused cases are defined in [`benches/main.rs`](benches/main.rs).
 
 Validation for this change:
 
 ```text
-cargo test                         # 20 unit + 3 integration + 281 fixture tests
+cargo test --all-targets --quiet   # 13 unit + 3 integration + 281 fixture tests
 cargo clippy --all-targets -- -D warnings
 ```

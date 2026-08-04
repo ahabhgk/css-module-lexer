@@ -1,7 +1,5 @@
 use codspeed_criterion_compat::*;
-use css_module_lexer::{
-    collect_dependencies, lex_dependencies, Lexer, Mode, Pos, TokenKind, Visitor,
-};
+use css_module_lexer::{collect_dependencies, lex_dependencies, Lexer, Mode, TokenKind};
 
 const BOOTSTRAP: &str = include_str!("../fixtures/bootstrap.min.css");
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");
@@ -35,81 +33,6 @@ fn scan_tokens(input: &str) -> usize {
             return count;
         }
     }
-}
-
-struct NoopVisitor;
-
-impl<'s> Visitor<'s> for NoopVisitor {
-    fn function(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn ident(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn url(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn string(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn is_selector(&mut self, _: &mut Lexer<'s>) -> Option<bool> {
-        Some(true)
-    }
-
-    fn id(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn left_parenthesis(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn right_parenthesis(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn comma(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn class(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn pseudo_function(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn pseudo_class(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn semicolon(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn at_keyword(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn left_curly_bracket(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-
-    fn right_curly_bracket(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
-    }
-}
-
-fn scan_legacy(input: &str) -> Pos {
-    let mut lexer = Lexer::new(input);
-    let mut visitor = NoopVisitor;
-    lexer.lex(&mut visitor);
-    lexer.cur_pos().unwrap_or_default()
 }
 
 fn sink_dependencies(input: &str, mode: Mode) {
@@ -156,9 +79,6 @@ fn benchmark(c: &mut Criterion) {
             b.iter(|| black_box(scan_tokens(black_box(input))))
         });
     }
-    tokenizer.bench_function("legacy_scanner", |b| {
-        b.iter(|| black_box(scan_legacy(black_box(BOOTSTRAP))))
-    });
     tokenizer.finish();
 
     let mut sink = c.benchmark_group("dependency_sink");

@@ -74,7 +74,7 @@ impl LocalByDefault {
             |warning| warnings.push(warning),
             self.mode,
         );
-        lexer.lex(&mut visitor);
+        visitor.lex_streaming(&mut lexer);
         let len = input.len() as u32;
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
@@ -133,7 +133,7 @@ fn scope_ids() {
 #[test]
 fn scope_escaped_ids() {
     test("#\\#test {}", ":local(#\\#test) {}");
-    test("#u-m\\00002b {}", ":local(#u-m\\00002b) {}");
+    test("#u-m\\00002b {}", ":local(#u-m\\00002b ){}");
 }
 
 #[test]

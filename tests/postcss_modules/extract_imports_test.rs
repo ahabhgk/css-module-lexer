@@ -232,7 +232,7 @@ impl ExtractImports {
             |warning| warnings.push(warning),
             Mode::Local,
         );
-        lexer.lex(&mut visitor);
+        visitor.lex_streaming(&mut lexer);
         let len = input.len() as u32;
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();
