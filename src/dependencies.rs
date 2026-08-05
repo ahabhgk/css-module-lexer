@@ -1330,6 +1330,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if HAS_MODE
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Colon
+                && stream.lexer().could_start_ident_at(token.range.end)
             {
                 let first = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
                 if first.token.kind != TokenKind::Eof {
@@ -1339,6 +1340,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Delim
                 && stream.lexer().byte_at(token.range.start) == Some(b'.')
+                && stream.lexer().could_start_ident_at(token.range.end)
             {
                 let next = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
                 if next.token.kind != TokenKind::Eof {

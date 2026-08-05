@@ -222,6 +222,13 @@ impl<'s> Lexer<'s> {
         self.value.get(position as usize).copied()
     }
 
+    #[inline(always)]
+    pub(crate) fn could_start_ident_at(&self, position: Pos) -> bool {
+        self.byte_at(position).is_some_and(|byte| {
+            matches!(byte, C_HYPHEN_MINUS | C_REVERSE_SOLIDUS) || is_name_start_byte(byte)
+        })
+    }
+
     /// Skip value text that cannot produce a dependency or change the block
     /// structure. Delimiters of ordinary functions are tracked without
     /// manufacturing tokens, and the scanner stops before dependency-bearing
