@@ -280,10 +280,11 @@ impl<'s> Lexer<'s> {
                 _ => is_name_start_byte(byte),
             };
             if starts_ident {
-                let (end, flags) = self.scan_name_with_flags(position);
-                if end == position {
+                let end = self.scan_plain_ascii_name(position);
+                if end == position || self.raw_name_needs_tokenizer(end) {
                     break;
                 }
+                let flags = TokenFlags::ascii();
                 let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
                 let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
                 let is_candidate = !flags.has_escape() && is_candidate(name);
@@ -317,23 +318,30 @@ impl<'s> Lexer<'s> {
                 _ => false,
             };
             if starts_number {
-                position = self.scan_numeric(position).1;
+                let Some(end) = self.scan_raw_numeric_end(position) else {
+                    break;
+                };
+                position = end;
                 continue;
             }
 
             match byte {
                 C_NUMBER_SIGN => {
                     let name_start = position + 1;
-                    position = if self.starts_ident_at(name_start)
+                    if self.starts_ident_at(name_start)
                         || self
                             .value
                             .get(name_start)
                             .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
                     {
-                        self.scan_name(name_start)
+                        let end = self.scan_plain_ascii_name(name_start);
+                        if end == name_start || self.raw_name_needs_tokenizer(end) {
+                            break;
+                        }
+                        position = end;
                     } else {
-                        name_start
-                    };
+                        position = name_start;
+                    }
                 }
                 C_LEFT_PARENTHESIS => {
                     if options.preserve_delimiters {
@@ -1128,6 +1136,81 @@ impl<'s> Lexer<'s> {
             position += 1;
         }
         position
+    }
+
+    #[inline]
+    fn scan_plain_ascii_name(&self, mut position: usize) -> usize {
+        while self.value.get(position).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, C_LOW_LINE | C_HYPHEN_MINUS)
+        }) {
+            position += 1;
+        }
+        position
+    }
+
+    #[inline]
+    fn raw_name_needs_tokenizer(&self, position: usize) -> bool {
+        self.value
+            .get(position)
+            .is_some_and(|byte| *byte == 0 || *byte == C_REVERSE_SOLIDUS || !byte.is_ascii())
+    }
+
+    #[inline]
+    fn scan_raw_numeric_end(&self, start: usize) -> Option<usize> {
+        let mut end = start;
+        if matches!(
+            self.value.get(end),
+            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+        ) {
+            end += 1;
+        }
+        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+            end += 1;
+        }
+        if self.value.get(end) == Some(&C_FULL_STOP)
+            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
+        {
+            end += 1;
+            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                end += 1;
+            }
+        }
+        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
+            let exponent_start = end;
+            let mut exponent_end = end + 1;
+            if matches!(
+                self.value.get(exponent_end),
+                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+            ) {
+                exponent_end += 1;
+            }
+            if self
+                .value
+                .get(exponent_end)
+                .is_some_and(|byte| is_digit(*byte))
+            {
+                end = exponent_end + 1;
+                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                    end += 1;
+                }
+            } else {
+                end = exponent_start;
+            }
+        }
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return Some(end + 1);
+        }
+        if self.starts_ident_at(end) {
+            let name_end = self.scan_plain_ascii_name(end);
+            if name_end == end || self.raw_name_needs_tokenizer(name_end) {
+                return None;
+            }
+            return Some(name_end);
+        }
+        if self.raw_name_needs_tokenizer(end) {
+            return None;
+        }
+        Some(end)
     }
 
     #[inline]
