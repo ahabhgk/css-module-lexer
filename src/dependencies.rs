@@ -1253,6 +1253,20 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.dependency_context
     }
 
+    #[inline]
+    fn set_scan_context(&mut self, stream: &mut TokenStream<'_, 's>, scan_context: ScanContext) {
+        if self.scan_context == scan_context {
+            return;
+        }
+        match self.scan_context {
+            ScanContext::Selector => self.selector_square_depth = 0,
+            ScanContext::AtRule => stream.reset_at_rule_scan_state(),
+            ScanContext::SpecialValue(_) => stream.reset_special_value_scan_state(),
+            _ => {}
+        }
+        self.scan_context = scan_context;
+    }
+
     /// Drive dependency extraction from the forward token stream.
     pub fn lex_streaming(&mut self, source: &mut Lexer<'s>) {
         self.selector_fast_forward_enabled = source.source_end() >= 256;
@@ -1296,18 +1310,19 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         mode_data.composes_local_classes.reset_to_initial();
                     }
                 }
-                self.scan_context = if self.is_next_rule_prelude {
+                let scan_context = if self.is_next_rule_prelude {
                     ScanContext::Selector
                 } else {
                     ScanContext::DeclarationName
                 };
+                self.set_scan_context(stream, scan_context);
             }
 
             if self.scan_context == ScanContext::TopLevel
                 && self.is_next_rule_prelude
                 && token.kind != TokenKind::AtKeyword
             {
-                self.scan_context = ScanContext::Selector;
+                self.set_scan_context(stream, ScanContext::Selector);
             }
 
             let mut colon_next = None;
@@ -1432,7 +1447,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }
                 }
                 TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
-                    result = self.enter_property_value(stream.lexer());
+                    result = self.enter_property_value(stream);
                 }
                 TokenKind::Colon if !HAS_MODE => {}
                 TokenKind::Colon => {
@@ -1498,18 +1513,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     );
                 }
                 TokenKind::LeftCurlyBracket => {
-                    result = self.handle_left_curly_bracket(
-                        stream.lexer_mut(),
-                        token.range.start,
-                        token.range.end,
-                    );
+                    result =
+                        self.handle_left_curly_bracket(stream, token.range.start, token.range.end);
                 }
                 TokenKind::RightCurlyBracket => {
-                    result = self.handle_right_curly_bracket(
-                        stream.lexer_mut(),
-                        token.range.start,
-                        token.range.end,
-                    );
+                    result =
+                        self.handle_right_curly_bracket(stream, token.range.start, token.range.end);
                 }
                 _ => {}
             }
@@ -1517,12 +1526,15 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if result.is_none() {
                 return;
             }
-            if token.kind == TokenKind::Semicolon && matches!(self.scope, Scope::TopLevel) {
-                self.scan_context = ScanContext::TopLevel;
-                self.is_next_rule_prelude = true;
-            }
-            if self.scan_context != ScanContext::Selector {
-                self.selector_square_depth = 0;
+            if token.kind == TokenKind::Semicolon {
+                match self.scope {
+                    Scope::TopLevel => {
+                        self.set_scan_context(stream, ScanContext::TopLevel);
+                        self.is_next_rule_prelude = true;
+                    }
+                    Scope::InBlock => self.set_scan_context(stream, ScanContext::BlockItem),
+                    _ => {}
+                }
             }
             match self.scan_context {
                 ScanContext::Selector if self.selector_fast_forward_enabled => {
@@ -1540,12 +1552,6 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     self.fast_forward_generic_value::<KEEP_COMMENTS>(stream);
                 }
                 _ => {}
-            }
-            if self.scan_context != ScanContext::AtRule {
-                stream.reset_at_rule_scan_state();
-            }
-            if !matches!(self.scan_context, ScanContext::SpecialValue(_)) {
-                stream.reset_special_value_scan_state();
             }
         }
     }
@@ -1678,7 +1684,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.icss_symbols.insert(value);
     }
 
-    fn enter_property_value(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+    fn enter_property_value(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
         match self.property_kind {
             PropertyKind::Animation => self.enter_animation_property(),
             PropertyKind::ListStyle => self.enter_list_style_property(),
@@ -1699,7 +1705,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         self.dependency_context
                             .push_dependency(Dependency::LocalVarDecl {
                                 name: unescape_token(
-                                    lexer.slice(range.start + 2, range.end)?,
+                                    stream.lexer().slice(range.start + 2, range.end)?,
                                     flags,
                                 ),
                                 range,
@@ -1711,7 +1717,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
         self.pending_custom_property = None;
         self.pending_grid_property = None;
-        self.scan_context = ScanContext::for_property(self.property_kind);
+        self.set_scan_context(stream, ScanContext::for_property(self.property_kind));
         Some(())
     }
 
@@ -2975,10 +2981,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         end: Pos,
         _flags: TokenFlags,
     ) -> Option<()> {
-        stream.reset_at_rule_scan_state();
         let name = stream.slice_trusted(start, end);
         let kind = Self::classify_at_rule(name);
-        self.scan_context = ScanContext::AtRule;
+        self.set_scan_context(stream, ScanContext::AtRule);
         if kind == AtRuleKind::Namespace {
             self.scope = Scope::AtNamespaceInvalid;
             self.handle_warning.handle_warning(Warning {
@@ -2997,14 +3002,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if kind == AtRuleKind::Charset {
             self.lex_charset_at_rule(stream, start)?;
-            self.scan_context = ScanContext::TopLevel;
+            self.set_scan_context(stream, ScanContext::TopLevel);
             self.is_next_rule_prelude = true;
         } else if self.mode_data.is_some() {
             let mut can_contain_rules = true;
             if kind == AtRuleKind::Value {
                 self.lex_value_at_rule(stream, start)?;
                 can_contain_rules = false;
-                self.scan_context = ScanContext::TopLevel;
+                self.set_scan_context(stream, ScanContext::TopLevel);
                 self.is_next_rule_prelude = true;
             } else if kind == AtRuleKind::Keyframes {
                 self.lex_local_keyframes_decl(stream)?;
@@ -3051,7 +3056,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             } else {
                 self.is_next_rule_prelude = kind == AtRuleKind::Scope;
                 if self.is_next_rule_prelude {
-                    self.scan_context = ScanContext::Selector;
+                    self.set_scan_context(stream, ScanContext::Selector);
                 }
             }
 
@@ -3211,11 +3216,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 self.pending_custom_property = None;
                 self.pending_grid_property = None;
                 self.property_kind = PropertyKind::Generic;
-                self.scan_context = ScanContext::BlockItem;
             }
             Scope::TopLevel => {
                 self.is_next_rule_prelude = true;
-                self.scan_context = ScanContext::TopLevel;
             }
         }
         Some(())
@@ -3366,6 +3369,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     self.pending_custom_property = (self.property_kind
                         == PropertyKind::CustomProperty)
                         .then_some((Range::new(start, end), flags));
+                    if self.property_kind != PropertyKind::Composes {
+                        return Some(());
+                    }
                 }
                 let can_reference_icss = matches!(
                     self.scan_context,
@@ -3618,7 +3624,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_left_curly_bracket(
         &mut self,
-        _lexer: &mut Lexer<'s>,
+        stream: &mut TokenStream<'_, 's>,
         start: Pos,
         _: Pos,
     ) -> Option<()> {
@@ -3661,7 +3667,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 (false, false)
             };
         if self.mode_data.is_none() {
-            self.scan_context = ScanContext::BlockItem;
+            self.set_scan_context(stream, ScanContext::BlockItem);
             return Some(());
         }
         if let Some(mode_data) = &mut self.mode_data {
@@ -3708,13 +3714,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.pending_custom_property = None;
         self.pending_grid_property = None;
         self.property_kind = PropertyKind::Generic;
-        self.scan_context = ScanContext::BlockItem;
+        self.set_scan_context(stream, ScanContext::BlockItem);
         Some(())
     }
 
     fn handle_right_curly_bracket(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        stream: &mut TokenStream<'_, 's>,
         _: Pos,
         end: Pos,
     ) -> Option<()> {
@@ -3732,15 +3738,15 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
                 if mode_data.is_property_local_mode() {
                     if self.in_animation_property.is_some() {
-                        self.handle_local_keyframes_dependency(lexer)?;
+                        self.handle_local_keyframes_dependency(stream.lexer_mut())?;
                         self.exit_animation_property();
                     }
                     if self.in_list_style_property.is_some() {
-                        self.handle_local_counter_style_dependency(lexer)?;
+                        self.handle_local_counter_style_dependency(stream.lexer_mut())?;
                         self.exit_list_style_property();
                     }
                     if self.in_font_palette_property.is_some() {
-                        self.handle_local_font_palette_dependency(lexer)?;
+                        self.handle_local_font_palette_dependency(stream.lexer_mut())?;
                         self.exit_font_palette_property();
                     }
                     if self.in_container_property.is_some() {
@@ -3760,13 +3766,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             if self.block_nesting_level == 0 {
                 self.scope = Scope::TopLevel;
-                self.scan_context = ScanContext::TopLevel;
+                self.set_scan_context(stream, ScanContext::TopLevel);
                 self.is_next_rule_prelude = true;
                 if let Some(mode_data) = &mut self.mode_data {
                     mode_data.composes_local_classes.reset_to_initial();
                 }
             } else {
-                self.scan_context = ScanContext::BlockItem;
+                self.set_scan_context(stream, ScanContext::BlockItem);
             }
             self.pending_custom_property = None;
             self.pending_grid_property = None;
