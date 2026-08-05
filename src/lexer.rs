@@ -2,6 +2,22 @@ use crate::Range;
 use std::collections::VecDeque;
 use std::str;
 
+const fn build_plain_ascii_name_byte_table() -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut byte = 0usize;
+    while byte < table.len() {
+        table[byte] = (byte >= b'0' as usize && byte <= b'9' as usize)
+            || (byte >= b'A' as usize && byte <= b'Z' as usize)
+            || (byte >= b'a' as usize && byte <= b'z' as usize)
+            || byte == b'_' as usize
+            || byte == b'-' as usize;
+        byte += 1;
+    }
+    table
+}
+
+const PLAIN_ASCII_NAME_BYTE: [bool; 256] = build_plain_ascii_name_byte_table();
+
 pub const C_LINE_FEED: u8 = b'\n';
 pub const C_CARRIAGE_RETURN: u8 = b'\r';
 pub const C_FORM_FEED: u8 = b'\x0c';
@@ -1147,9 +1163,11 @@ impl<'s> Lexer<'s> {
 
     #[inline]
     fn scan_plain_ascii_name(&self, mut position: usize) -> usize {
-        while self.value.get(position).is_some_and(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, C_LOW_LINE | C_HYPHEN_MINUS)
-        }) {
+        while self
+            .value
+            .get(position)
+            .is_some_and(|byte| PLAIN_ASCII_NAME_BYTE[*byte as usize])
+        {
             position += 1;
         }
         position
@@ -1237,14 +1255,12 @@ impl<'s> Lexer<'s> {
         while position < bytes.len() {
             while position < bytes.len() {
                 let byte = bytes[position];
-                if byte == 0 {
+                if PLAIN_ASCII_NAME_BYTE[byte as usize] {
+                    position += 1;
+                } else if byte == 0 {
                     if TRACK_FLAGS {
                         flags.mark_null();
                     }
-                    position += 1;
-                } else if byte.is_ascii_alphanumeric()
-                    || matches!(byte, C_LOW_LINE | C_HYPHEN_MINUS)
-                {
                     position += 1;
                 } else {
                     break;
