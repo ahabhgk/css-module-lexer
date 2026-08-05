@@ -227,7 +227,7 @@ impl<'s> Lexer<'s> {
     /// manufacturing tokens, and the scanner stops before dependency-bearing
     /// functions, ICSS symbols, selector-independent magic comments, or a
     /// declaration boundary.
-    fn fast_forward_generic_value<F, C>(
+    fn fast_forward_generic_value<const STOP_AT_TOP_LEVEL_LEFT_CURLY: bool, F, C>(
         &mut self,
         state: &mut GenericValueScanState,
         options: GenericValueScanOptions,
@@ -352,7 +352,7 @@ impl<'s> Lexer<'s> {
                     state.squares = state.squares.saturating_sub(1);
                     position += 1;
                 }
-                C_LEFT_CURLY if options.stop_at_top_level_left_curly && !state.is_nested() => break,
+                C_LEFT_CURLY if STOP_AT_TOP_LEVEL_LEFT_CURLY && !state.is_nested() => break,
                 C_LEFT_CURLY => {
                     if options.preserve_delimiters {
                         break;
@@ -365,7 +365,6 @@ impl<'s> Lexer<'s> {
                     position += 1;
                 }
                 C_RIGHT_CURLY => break,
-                C_COMMA if options.stop_at_top_level_comma && !state.is_nested() => break,
                 C_SEMICOLON if !state.is_nested() => break,
                 _ => position += 1,
             }
@@ -1305,8 +1304,6 @@ struct GenericValueScanOptions {
     keep_comments: bool,
     preserve_strings: bool,
     preserve_delimiters: bool,
-    stop_at_top_level_left_curly: bool,
-    stop_at_top_level_comma: bool,
 }
 
 impl GenericValueScanState {
@@ -1328,6 +1325,11 @@ fn is_dependency_value_function(name: &str) -> bool {
                     .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
             })
         || name.starts_with("--")
+}
+
+#[inline(always)]
+fn never_fast_forward_candidate(_: &str) -> bool {
+    false
 }
 
 impl<'a, 's> TokenStream<'a, 's> {
@@ -1488,17 +1490,37 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value(
+        self.lexer.fast_forward_generic_value::<false, _, _>(
             &mut self.generic_value_state,
             GenericValueScanOptions {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
-                stop_at_top_level_left_curly: false,
-                stop_at_top_level_comma: false,
             },
             &mut is_candidate,
             &mut is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_generic_value_without_candidates_if_buffer_empty(
+        &mut self,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+    ) {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        self.lexer.fast_forward_generic_value::<false, _, _>(
+            &mut self.generic_value_state,
+            GenericValueScanOptions {
+                keep_comments: false,
+                preserve_strings,
+                preserve_delimiters,
+            },
+            never_fast_forward_candidate,
+            never_fast_forward_candidate,
         );
         self.consumed = self.lexer.scan_pos();
     }
@@ -1518,14 +1540,12 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value(
+        self.lexer.fast_forward_generic_value::<true, _, _>(
             &mut self.at_rule_state,
             GenericValueScanOptions {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
-                stop_at_top_level_left_curly: true,
-                stop_at_top_level_comma: false,
             },
             &mut is_candidate,
             &mut is_comment_candidate,
@@ -1553,14 +1573,12 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value(
+        self.lexer.fast_forward_generic_value::<false, _, _>(
             &mut self.special_value_state,
             GenericValueScanOptions {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
-                stop_at_top_level_left_curly: false,
-                stop_at_top_level_comma: false,
             },
             &mut is_candidate,
             &mut is_comment_candidate,

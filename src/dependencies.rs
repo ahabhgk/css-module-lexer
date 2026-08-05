@@ -1584,13 +1584,20 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
         );
         let preserve_delimiters = !self.balanced.is_empty();
-        stream.fast_forward_if_buffer_empty(
-            KEEP_COMMENTS,
-            preserve_strings,
-            preserve_delimiters,
-            |ident| self.contains_icss_symbol(ident),
-            is_css_modules_pure_magic_comment,
-        );
+        if self.icss_symbols.is_empty() && !KEEP_COMMENTS {
+            stream.fast_forward_generic_value_without_candidates_if_buffer_empty(
+                preserve_strings,
+                preserve_delimiters,
+            );
+        } else {
+            stream.fast_forward_if_buffer_empty(
+                KEEP_COMMENTS,
+                preserve_strings,
+                preserve_delimiters,
+                |ident| self.contains_icss_symbol(ident),
+                is_css_modules_pure_magic_comment,
+            );
+        }
     }
 
     #[inline]
@@ -1631,7 +1638,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             preserve_strings,
             preserve_delimiters,
             |ident| {
-                if self.contains_icss_symbol(ident) {
+                if !self.icss_symbols.is_empty() && self.contains_icss_symbol(ident) {
                     return true;
                 }
                 match property {
