@@ -33,10 +33,8 @@ pub fn lex_dependencies<'s>(
     mut handle_dependency: impl FnMut(&Dependency<'s>),
     handle_warning: impl HandleWarning<'s>,
 ) -> DependencyContext<'s> {
-    let capacity = estimate_result_capacity(input.len(), mode);
     let mut lexer = Lexer::new(input);
-    let dependency_context = DependencyContext::with_dependency_capacity(capacity.dependencies);
-    let mut visitor = LexDependencies::with_context(dependency_context, handle_warning, mode);
+    let mut visitor = LexDependencies::new(handle_warning, mode);
     visitor.lex_streaming(&mut lexer);
     let dependency_context = visitor.into_dependency_context();
     for dependency in dependency_context.iter() {
@@ -46,35 +44,20 @@ pub fn lex_dependencies<'s>(
 }
 
 pub fn collect_dependencies(input: &str, mode: Mode) -> (DependencyContext<'_>, Vec<Warning<'_>>) {
-    let capacity = estimate_result_capacity(input.len(), mode);
-    let mut warnings = Vec::with_capacity(capacity.warnings);
-    let dependency_context = DependencyContext::with_dependency_capacity(capacity.dependencies);
+    let mut warnings = Vec::with_capacity(estimate_warning_capacity(input.len(), mode));
     let mut lexer = Lexer::new(input);
-    let mut visitor = LexDependencies::with_context(dependency_context, |v| warnings.push(v), mode);
+    let mut visitor = LexDependencies::new(|v| warnings.push(v), mode);
     visitor.lex_streaming(&mut lexer);
     (visitor.into_dependency_context(), warnings)
 }
 
-struct CapacityEstimate {
-    dependencies: usize,
-    warnings: usize,
-}
-
-fn estimate_result_capacity(input_len: usize, mode: Mode) -> CapacityEstimate {
-    let dependency_rate = match mode {
-        Mode::Local | Mode::Pure => (1, 32),
-        Mode::Global => (1, 256),
-        Mode::Css => (1, 1024),
-    };
+fn estimate_warning_capacity(input_len: usize, mode: Mode) -> usize {
     let warning_rate = match mode {
         Mode::Pure => (1, 256),
         _ => (1, 512),
     };
 
-    CapacityEstimate {
-        dependencies: estimate_capacity(input_len, dependency_rate.0, dependency_rate.1, 4, 8192),
-        warnings: estimate_capacity(input_len, warning_rate.0, warning_rate.1, 2, 512),
-    }
+    estimate_capacity(input_len, warning_rate.0, warning_rate.1, 2, 512)
 }
 
 #[inline]

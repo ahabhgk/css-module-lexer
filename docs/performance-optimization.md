@@ -104,10 +104,10 @@ dependency 写入结果 Vec。现有源码长度估算已经避免 realloc：
 | --- | ---: | ---: |
 | bootstrap local | 6177 | 7275 |
 | rspack local | 1853 | 1940 |
-| rspack global | 694 | 968 |
+| rspack global | 694 | 776 |
 | rspack pure | 1853 | 1940 |
 
-因此进一步增加 `with_capacity` 没有收益。应把 `Composes` 等少见 variant 的变长
+因此 dependency Vec 不需要继续增加 `with_capacity`。应把 `Composes` 等少见 variant 的变长
 payload 外置到 context，enum 只保存索引 range，降低所有 dependency 的 move/copy
 成本。
 
@@ -115,6 +115,25 @@ payload 外置到 context，enum 只保存索引 range，降低所有 dependency
 `DependencyContext` 的 dependencies、composes local classes、composes names 和
 `@value` import items 四个 Vec，`Composes` 与内部 `ValueAtRule::Import` 只保留 8-byte
 的半开索引 range。该阶段不改变扫描策略，后续性能变化可以单独归因于存储布局。
+
+扫描迁移后，Context 会按源码长度和 mode 估算所有结果 Vec。dependency Vec 在扫描前
+立即 reserve；稀有 side table 只保存估计值，在第一次写入前 reserve，避免普通 CSS
+为不存在的 `composes` 或 `@value` payload 分配内存。Rspack fixture 的估计与实际值：
+
+| Mode | local classes | names | `@value` items |
+| --- | ---: | ---: | ---: |
+| local/pure estimate | 97 | 107 | 34 |
+| local/pure actual | 82 | 99 | 31 |
+| global estimate | 16 | 16 | 35 |
+| global actual | 11 | 11 | 31 |
+
+扫描实现直接向 `DependencyContext` 写入已经确认的结果，不再为 grid area ranges、
+unescaped composes names 和 ICSS export comment ranges 创建中间 `SmallVec`。仍保留的
+`SmallVec` 只用于必须等待语法闭合或支持错误恢复的状态，例如嵌套栈、`@import`
+prelude、selector local classes、`composes` item 和 `@value` token grammar。
+
+ICSS symbol 集合从标准库随机哈希切换为 `rustc_hash::FxHashSet`。该集合仅保存 lexer
+内部已确认的 symbol，不暴露迭代顺序，因此替换 hasher 不改变 dependency 结果。
 
 ## 暂不处理
 

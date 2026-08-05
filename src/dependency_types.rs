@@ -2,6 +2,8 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::ops::Index;
 
@@ -231,12 +233,17 @@ pub enum Dependency<'s> {
 /// is appended to a context vector and referenced through
 /// [`DependencyListRange`]. Consumers should traverse and resolve those ranges
 /// through this type rather than retaining raw list indices independently.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DependencyContext<'s> {
     dependencies: Vec<Dependency<'s>>,
     composes_local_classes: Vec<Cow<'s, str>>,
     composes_names: Vec<Cow<'s, str>>,
     value_at_rule_import_items: Vec<ValueAtRuleImportItem<'s>>,
+    // Rare side tables reserve lazily on first write so ordinary CSS only
+    // pays for the dependency Vec while CSS Modules still avoids growth.
+    estimated_composes_local_classes: u16,
+    estimated_composes_names: u16,
+    estimated_value_at_rule_import_items: u16,
 }
 
 impl<'s> DependencyContext<'s> {
@@ -244,11 +251,22 @@ impl<'s> DependencyContext<'s> {
         Self::default()
     }
 
-    pub(crate) fn with_dependency_capacity(capacity: usize) -> Self {
-        Self {
-            dependencies: Vec::with_capacity(capacity),
-            ..Self::default()
+    pub(crate) fn reserve_estimated_capacity(&mut self, input_len: usize, mode: Mode) {
+        let estimate = DependencyContextCapacity::estimate(input_len, mode);
+        if self.dependencies.capacity() < estimate.dependencies {
+            self.dependencies.reserve(
+                estimate
+                    .dependencies
+                    .saturating_sub(self.dependencies.len()),
+            );
         }
+        self.estimated_composes_local_classes = self
+            .estimated_composes_local_classes
+            .max(estimate.composes_local_classes);
+        self.estimated_composes_names = self.estimated_composes_names.max(estimate.composes_names);
+        self.estimated_value_at_rule_import_items = self
+            .estimated_value_at_rule_import_items
+            .max(estimate.value_at_rule_import_items);
     }
 
     pub fn len(&self) -> usize {
@@ -295,6 +313,10 @@ impl<'s> DependencyContext<'s> {
     }
 
     pub(crate) fn push_value_at_rule_import_item(&mut self, item: ValueAtRuleImportItem<'s>) {
+        if self.value_at_rule_import_items.capacity() == 0 {
+            self.value_at_rule_import_items
+                .reserve(self.estimated_value_at_rule_import_items as usize);
+        }
         self.value_at_rule_import_items.push(item);
     }
 
@@ -309,6 +331,14 @@ impl<'s> DependencyContext<'s> {
         from: Option<Cow<'s, str>>,
         range: Range,
     ) {
+        if self.composes_local_classes.capacity() == 0 {
+            self.composes_local_classes
+                .reserve(self.estimated_composes_local_classes as usize);
+        }
+        if self.composes_names.capacity() == 0 {
+            self.composes_names
+                .reserve(self.estimated_composes_names as usize);
+        }
         let local_classes_start = self.composes_local_classes.len();
         self.composes_local_classes.extend(local_classes);
         let local_classes = DependencyListRange::<Cow<'s, str>>::from_bounds(
@@ -330,6 +360,76 @@ impl<'s> DependencyContext<'s> {
             range,
         });
     }
+}
+
+impl PartialEq for DependencyContext<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.dependencies == other.dependencies
+            && self.composes_local_classes == other.composes_local_classes
+            && self.composes_names == other.composes_names
+            && self.value_at_rule_import_items == other.value_at_rule_import_items
+    }
+}
+
+impl Eq for DependencyContext<'_> {}
+
+impl Hash for DependencyContext<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.dependencies.hash(state);
+        self.composes_local_classes.hash(state);
+        self.composes_names.hash(state);
+        self.value_at_rule_import_items.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DependencyContextCapacity {
+    dependencies: usize,
+    composes_local_classes: u16,
+    composes_names: u16,
+    value_at_rule_import_items: u16,
+}
+
+impl DependencyContextCapacity {
+    fn estimate(input_len: usize, mode: Mode) -> Self {
+        let dependency_denominator = match mode {
+            Mode::Local | Mode::Pure => 32,
+            Mode::Global => 80,
+            Mode::Css => 4096,
+        };
+        let dependencies = estimate_capacity(input_len, dependency_denominator, 4, 8192);
+        let (composes_local_classes, composes_names, value_at_rule_import_items) = match mode {
+            Mode::Local | Mode::Pure => (
+                estimate_capacity(input_len, 640, 2, 4096),
+                estimate_capacity(input_len, 576, 2, 4096),
+                estimate_capacity(input_len, 1792, 2, 4096),
+            ),
+            Mode::Global => (
+                estimate_capacity(input_len, 3880, 2, 4096),
+                estimate_capacity(input_len, 3880, 2, 4096),
+                estimate_capacity(input_len, 1774, 2, 4096),
+            ),
+            Mode::Css => (0, 0, 0),
+        };
+        Self {
+            dependencies,
+            composes_local_classes: composes_local_classes as u16,
+            composes_names: composes_names as u16,
+            value_at_rule_import_items: value_at_rule_import_items as u16,
+        }
+    }
+}
+
+fn estimate_capacity(
+    input_len: usize,
+    denominator: usize,
+    minimum: usize,
+    maximum: usize,
+) -> usize {
+    input_len
+        .checked_div(denominator)
+        .unwrap_or(0)
+        .clamp(minimum, maximum)
 }
 
 impl<'s> Index<usize> for DependencyContext<'s> {
@@ -424,6 +524,38 @@ impl Display for Warning<'_> {
             WarningKind::UnexpectedComposition { message, .. } => {
                 write!(f, "Composition is {message}")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DependencyContextCapacity;
+    use super::Mode;
+    use crate::collect_dependencies;
+
+    const BOOTSTRAP: &str = include_str!("../fixtures/bootstrap.min.css");
+    const RSPACK: &str = include_str!("../fixtures/rspack-css-modules.css");
+
+    #[test]
+    fn estimated_capacities_cover_fixtures_without_eager_side_allocations() {
+        let (bootstrap, _) = collect_dependencies(BOOTSTRAP, Mode::Local);
+        assert_eq!(bootstrap.composes_local_classes.capacity(), 0);
+        assert_eq!(bootstrap.composes_names.capacity(), 0);
+        assert_eq!(bootstrap.value_at_rule_import_items.capacity(), 0);
+
+        for mode in [Mode::Local, Mode::Global, Mode::Pure] {
+            let estimate = DependencyContextCapacity::estimate(RSPACK.len(), mode);
+            let (context, _) = collect_dependencies(RSPACK, mode);
+            assert!(context.dependencies.len() <= estimate.dependencies);
+            assert!(
+                context.composes_local_classes.len() <= estimate.composes_local_classes as usize
+            );
+            assert!(context.composes_names.len() <= estimate.composes_names as usize);
+            assert!(
+                context.value_at_rule_import_items.len()
+                    <= estimate.value_at_rule_import_items as usize
+            );
         }
     }
 }

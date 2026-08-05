@@ -1,8 +1,8 @@
 //! Dependency parser and lexer visitor implementation.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::dependency_types::{
@@ -394,8 +394,8 @@ fn is_css_white_space_char(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
-fn unescape_names(names: SmallVec<[&str; 2]>) -> SmallVec<[Cow<'_, str>; 2]> {
-    names.into_iter().map(unescape).collect()
+fn unescape_names(names: SmallVec<[&str; 2]>) -> impl Iterator<Item = Cow<'_, str>> {
+    names.into_iter().map(unescape)
 }
 
 fn trim_slice(input: &str) -> &str {
@@ -504,31 +504,6 @@ fn ident_like_range(token: Token) -> Option<Range> {
         TokenKind::Function => Some(token.value_range),
         _ => None,
     }
-}
-
-fn remove_comment_ranges_from_export_value<'s>(
-    input: &'s str,
-    value_start: Pos,
-    value_end: Pos,
-    comments: &[Range],
-) -> Cow<'s, str> {
-    let value = &input[value_start as usize..value_end as usize];
-    if comments.is_empty() {
-        return Cow::Borrowed(value);
-    }
-
-    let mut output = String::with_capacity(value.len());
-    let mut copied_until = value_start as usize;
-    for range in comments {
-        let start = range.start.max(value_start).min(value_end) as usize;
-        let end = range.end.max(value_start).min(value_end) as usize;
-        if start < end {
-            output.push_str(&input[copied_until..start]);
-            copied_until = end;
-        }
-    }
-    output.push_str(&input[copied_until..value_end as usize]);
-    Cow::Owned(output)
 }
 
 fn parse_value_at_rule_import_item<'s>(
@@ -1165,12 +1140,11 @@ fn is_reserved_container_query_ident(ident: &str) -> bool {
     })
 }
 
-fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range; 4]> {
-    let mut result = SmallVec::new();
+fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> impl Iterator<Item = Range> + '_ {
     let bytes = input.as_bytes();
     let mut i = 0usize;
 
-    while i < bytes.len() {
+    std::iter::from_fn(move || loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -1179,15 +1153,12 @@ fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range;
             i += 1;
         }
         if start == i {
-            break;
+            return None;
         }
-        let token = &input[start..i];
-        if !token.bytes().all(|c| c == b'.') {
-            result.push(Range::new(offset + start as Pos, offset + i as Pos));
+        if !input[start..i].bytes().all(|c| c == b'.') {
+            return Some(Range::new(offset + start as Pos, offset + i as Pos));
         }
-    }
-
-    result
+    })
 }
 
 #[derive(Debug)]
@@ -1206,7 +1177,7 @@ pub struct LexDependencies<'s, W> {
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
-    icss_symbols: HashSet<Cow<'s, str>>,
+    icss_symbols: FxHashSet<Cow<'s, str>>,
     icss_symbol_filter: [u64; 16],
     icss_symbol_min_len: usize,
     icss_symbol_max_len: usize,
@@ -1264,6 +1235,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     /// Drive dependency extraction from the forward token stream.
     pub fn lex_streaming(&mut self, source: &mut Lexer<'s>) {
+        let mode = self
+            .mode_data
+            .as_ref()
+            .map_or(Mode::Css, ModeData::default_mode);
+        self.dependency_context
+            .reserve_estimated_capacity(source.source_end() as usize, mode);
         let mut stream = TokenStream::from_lexer(source);
         let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
         let has_mode = self.mode_data.is_some();
@@ -1771,7 +1748,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return None;
             }
             let value_start = value_start_token.range.start;
-            let (value_end, _) = self.consume_icss_export_value(stream, value_start_token)?;
+            let value_end = self.consume_icss_value(stream, value_start_token, |_| {})?;
             let delimiter = stream.next_parser_token().token;
             self.dependency_context
                 .push_dependency(Dependency::ICSSImportValue {
@@ -1853,17 +1830,17 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn consume_icss_export_value(
+    fn consume_icss_value(
         &self,
         stream: &mut TokenStream<'_, 's>,
         first: Token,
-    ) -> Option<(Pos, SmallVec<[Range; 4]>)> {
-        let mut comments = SmallVec::new();
+        mut handle_comment: impl FnMut(Range),
+    ) -> Option<Pos> {
         if matches!(
             first.kind,
             TokenKind::RightCurlyBracket | TokenKind::Semicolon
         ) {
-            return Some((first.range.start, comments));
+            return Some(first.range.start);
         }
         loop {
             let token = stream.peek::<true>().token;
@@ -1874,11 +1851,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 token.kind,
                 TokenKind::RightCurlyBracket | TokenKind::Semicolon
             ) {
-                return Some((token.range.start, comments));
+                return Some(token.range.start);
             }
             let token = stream.next::<true>().token;
             if matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
-                comments.push(token.range);
+                handle_comment(token.range);
             }
         }
     }
@@ -2023,13 +2000,25 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return None;
             }
             let value_start = value_start_token.range.start;
-            let (value_end, comments) =
-                self.consume_icss_export_value(stream, value_start_token)?;
+            let input = stream.slice(0, stream.source_end())?;
+            let mut value_without_comments = None;
+            let mut copied_until = value_start;
+            let value_end = self.consume_icss_value(stream, value_start_token, |comment| {
+                let output = value_without_comments.get_or_insert_with(String::new);
+                output.push_str(&input[copied_until as usize..comment.start as usize]);
+                copied_until = comment.end;
+            })?;
             let delimiter = stream.next_parser_token().token;
             let value = stream
                 .slice(value_start, value_end)?
                 .trim_end_matches(is_css_white_space_char);
             let trimmed_value_end = value_start + value.len() as Pos;
+            let value = if let Some(mut output) = value_without_comments {
+                output.push_str(&input[copied_until as usize..trimmed_value_end as usize]);
+                Cow::Owned(output)
+            } else {
+                Cow::Borrowed(value)
+            };
             self.dependency_context
                 .push_dependency(Dependency::ICSSExportValue {
                     prop: unescape(
@@ -2037,12 +2026,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                             .slice(prop_start, prop_end)?
                             .trim_end_matches(is_css_white_space_char),
                     ),
-                    value: remove_comment_ranges_from_export_value(
-                        stream.slice(0, stream.source_end())?,
-                        value_start,
-                        trimmed_value_end,
-                        &comments,
-                    ),
+                    value,
                 });
             self.insert_icss_symbol(unescape(
                 stream
