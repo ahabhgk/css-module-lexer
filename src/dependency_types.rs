@@ -310,12 +310,6 @@ pub struct DependencyContext<'s> {
     composes_local_classes: Vec<&'s str>,
     composes_names: Vec<&'s str>,
     value_at_rule_import_items: Vec<ValueAtRuleImportItem<'s>>,
-    // Rare side tables reserve lazily on first write so ordinary CSS only
-    // pays for the dependency Vec while CSS Modules still avoids growth.
-    estimated_import_attributes: u16,
-    estimated_composes_local_classes: u16,
-    estimated_composes_names: u16,
-    estimated_value_at_rule_import_items: u16,
 }
 
 impl<'s> DependencyContext<'s> {
@@ -325,23 +319,20 @@ impl<'s> DependencyContext<'s> {
 
     pub(crate) fn reserve_estimated_capacity(&mut self, input_len: usize, mode: Mode) {
         let estimate = DependencyContextCapacity::estimate(input_len, mode);
-        if self.dependencies.capacity() < estimate.dependencies {
-            self.dependencies.reserve(
-                estimate
-                    .dependencies
-                    .saturating_sub(self.dependencies.len()),
-            );
-        }
-        self.estimated_composes_local_classes = self
-            .estimated_composes_local_classes
-            .max(estimate.composes_local_classes);
-        self.estimated_import_attributes = self
-            .estimated_import_attributes
-            .max(estimate.import_attributes);
-        self.estimated_composes_names = self.estimated_composes_names.max(estimate.composes_names);
-        self.estimated_value_at_rule_import_items = self
-            .estimated_value_at_rule_import_items
-            .max(estimate.value_at_rule_import_items);
+        reserve_estimated_capacity(&mut self.dependencies, estimate.dependencies);
+        reserve_estimated_capacity(
+            &mut self.import_attributes,
+            estimate.import_attributes as usize,
+        );
+        reserve_estimated_capacity(
+            &mut self.composes_local_classes,
+            estimate.composes_local_classes as usize,
+        );
+        reserve_estimated_capacity(&mut self.composes_names, estimate.composes_names as usize);
+        reserve_estimated_capacity(
+            &mut self.value_at_rule_import_items,
+            estimate.value_at_rule_import_items as usize,
+        );
     }
 
     pub fn len(&self) -> usize {
@@ -395,10 +386,6 @@ impl<'s> DependencyContext<'s> {
         supports: Option<&'s str>,
         media: Option<&'s str>,
     ) {
-        if self.import_attributes.capacity() == 0 {
-            self.import_attributes
-                .reserve(self.estimated_import_attributes as usize);
-        }
         let attributes = DependencyIndex::from_index(self.import_attributes.len());
         self.import_attributes
             .push(ImportAttributes::new(layer, supports, media));
@@ -414,10 +401,6 @@ impl<'s> DependencyContext<'s> {
     }
 
     pub(crate) fn push_value_at_rule_import_item(&mut self, item: ValueAtRuleImportItem<'s>) {
-        if self.value_at_rule_import_items.capacity() == 0 {
-            self.value_at_rule_import_items
-                .reserve(self.estimated_value_at_rule_import_items as usize);
-        }
         self.value_at_rule_import_items.push(item);
     }
 
@@ -432,14 +415,6 @@ impl<'s> DependencyContext<'s> {
         from: Option<&'s str>,
         range: Range,
     ) {
-        if self.composes_local_classes.capacity() == 0 {
-            self.composes_local_classes
-                .reserve(self.estimated_composes_local_classes as usize);
-        }
-        if self.composes_names.capacity() == 0 {
-            self.composes_names
-                .reserve(self.estimated_composes_names as usize);
-        }
         let local_classes_start = self.composes_local_classes.len();
         self.composes_local_classes.extend(local_classes);
         let local_classes = DependencyListRange::<&'s str>::from_bounds(
@@ -534,6 +509,12 @@ fn estimate_capacity(
         .checked_div(denominator)
         .unwrap_or(0)
         .clamp(minimum, maximum)
+}
+
+fn reserve_estimated_capacity<T>(values: &mut Vec<T>, estimated_capacity: usize) {
+    if values.capacity() < estimated_capacity {
+        values.reserve(estimated_capacity.saturating_sub(values.len()));
+    }
 }
 
 impl<'s> Index<usize> for DependencyContext<'s> {
@@ -635,6 +616,7 @@ impl Display for Warning<'_> {
 #[cfg(test)]
 mod tests {
     use super::Dependency;
+    use super::DependencyContext;
     use super::DependencyContextCapacity;
     use super::ImportAttributes;
     use super::Mode;
@@ -644,12 +626,19 @@ mod tests {
     const RSPACK: &str = include_str!("../fixtures/rspack-css-modules.css");
 
     #[test]
-    fn estimated_capacities_cover_fixtures_without_eager_side_allocations() {
+    fn estimated_capacities_are_reserved_eagerly_and_cover_fixtures() {
+        let estimate = DependencyContextCapacity::estimate(BOOTSTRAP.len(), Mode::Local);
         let (bootstrap, _) = collect_dependencies(BOOTSTRAP, Mode::Local);
-        assert_eq!(bootstrap.composes_local_classes.capacity(), 0);
-        assert_eq!(bootstrap.composes_names.capacity(), 0);
-        assert_eq!(bootstrap.import_attributes.capacity(), 0);
-        assert_eq!(bootstrap.value_at_rule_import_items.capacity(), 0);
+        assert!(bootstrap.dependencies.capacity() >= estimate.dependencies);
+        assert!(bootstrap.import_attributes.capacity() >= estimate.import_attributes as usize);
+        assert!(
+            bootstrap.composes_local_classes.capacity() >= estimate.composes_local_classes as usize
+        );
+        assert!(bootstrap.composes_names.capacity() >= estimate.composes_names as usize);
+        assert!(
+            bootstrap.value_at_rule_import_items.capacity()
+                >= estimate.value_at_rule_import_items as usize
+        );
 
         for mode in [Mode::Local, Mode::Global, Mode::Pure] {
             let estimate = DependencyContextCapacity::estimate(RSPACK.len(), mode);
@@ -670,6 +659,7 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn dependency_keeps_rare_import_payload_out_of_hot_storage() {
+        assert_eq!(std::mem::size_of::<DependencyContext<'static>>(), 120);
         assert_eq!(std::mem::size_of::<Dependency<'static>>(), 48);
         assert_eq!(std::mem::size_of::<ImportAttributes<'static>>(), 48);
     }
