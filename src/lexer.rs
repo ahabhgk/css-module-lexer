@@ -222,66 +222,153 @@ impl<'s> Lexer<'s> {
         self.value.get(position as usize).copied()
     }
 
-    /// Classify the next non-trivia item without scanning the complete token.
-    ///
-    /// Nested-rule detection only needs to distinguish an ident/function
-    /// prelude from selector punctuation. Keeping this byte-level fast path
-    /// avoids tokenizing the same property name once for lookahead and again
-    /// when the main stream reaches it.
-    pub(crate) fn next_significant_is_not_ident(&self, position: Pos) -> Option<bool> {
-        let bytes = self.value;
-        let mut position = position as usize;
-        loop {
-            while position < bytes.len() && is_white_space(bytes[position]) {
-                position += 1;
-            }
-            if position + 1 < bytes.len()
-                && bytes[position] == C_SOLIDUS
-                && bytes[position + 1] == C_ASTERISK
-            {
-                let (kind, end, _, _, _) = self.scan_comment(position);
-                if kind == TokenKind::BadComment {
-                    return Some(true);
-                }
-                position = end;
-                continue;
-            }
-            let byte = *bytes.get(position)?;
-            return Some(!self.starts_ident_at(position) && byte != C_RIGHT_CURLY);
-        }
-    }
-
     /// Skip value text that cannot produce a dependency or change the block
-    /// structure.  The next function-like name, property candidate, string,
-    /// comment, or punctuation is left for the normal token path.
-    pub(crate) fn fast_forward_generic_value<F>(&mut self, mut is_candidate: F)
-    where
+    /// structure. Delimiters of ordinary functions are tracked without
+    /// manufacturing tokens, and the scanner stops before dependency-bearing
+    /// functions, ICSS symbols, selector-independent magic comments, or a
+    /// declaration boundary.
+    pub(crate) fn fast_forward_generic_value<F, C>(
+        &mut self,
+        state: &mut GenericValueScanState,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
         F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
     {
         let mut position = self.scan_pos as usize;
         let scan_start = position;
         while position < self.value.len() {
-            if is_white_space(self.value[position]) {
+            let byte = self.value[position];
+            if is_white_space(byte) {
                 position += 1;
                 continue;
             }
-            if self.starts_ident_at(position) {
-                let end = self.scan_name(position);
-                if end == position {
-                    break;
-                }
-                let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
-                if self.value.get(end) == Some(&C_LEFT_PARENTHESIS) || is_candidate(name) {
-                    break;
+
+            if byte == C_SOLIDUS && self.value.get(position + 1) == Some(&C_ASTERISK) {
+                let (kind, end, _, _, _) = self.scan_comment(position);
+                if keep_comments && kind == TokenKind::Comment {
+                    let content = &self.value[position + 2..end.saturating_sub(2)];
+                    let mut first = 0usize;
+                    while content.get(first).is_some_and(|byte| is_white_space(*byte)) {
+                        first += 1;
+                    }
+                    if content.get(first) == Some(&b'c') {
+                        let content = unsafe { str::from_utf8_unchecked(content) };
+                        if is_comment_candidate(content) {
+                            break;
+                        }
+                    }
                 }
                 position = end;
                 continue;
             }
-            if self.starts_number_at(position) {
+
+            if matches!(byte, C_QUOTATION_MARK | C_APOSTROPHE) {
+                if preserve_strings {
+                    break;
+                }
+                position = self.scan_string(position, byte).1;
+                continue;
+            }
+
+            let starts_ident = match byte {
+                C_HYPHEN_MINUS | C_REVERSE_SOLIDUS => self.starts_ident_at(position),
+                _ => is_name_start_byte(byte),
+            };
+            if starts_ident {
+                let (end, flags) = self.scan_name_with_flags(position);
+                if end == position {
+                    break;
+                }
+                let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
+                let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
+                if flags.has_escape()
+                    || is_candidate(name)
+                    || (is_function && is_dependency_value_function(name))
+                    || (is_function && preserve_delimiters)
+                {
+                    break;
+                }
+                if is_function {
+                    state.parentheses += 1;
+                    position = end + 1;
+                } else {
+                    position = end;
+                }
+                continue;
+            }
+
+            let starts_number = match byte {
+                b'0'..=b'9' => true,
+                C_PLUS_SIGN | C_HYPHEN_MINUS | C_FULL_STOP => self.starts_number_at(position),
+                _ => false,
+            };
+            if starts_number {
                 position = self.scan_numeric(position).1;
                 continue;
             }
-            break;
+
+            match byte {
+                C_NUMBER_SIGN => {
+                    let name_start = position + 1;
+                    position = if self.starts_ident_at(name_start)
+                        || self
+                            .value
+                            .get(name_start)
+                            .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                    {
+                        self.scan_name(name_start)
+                    } else {
+                        name_start
+                    };
+                }
+                C_LEFT_PARENTHESIS => {
+                    if preserve_delimiters {
+                        break;
+                    }
+                    state.parentheses += 1;
+                    position += 1;
+                }
+                C_RIGHT_PARENTHESIS => {
+                    if preserve_delimiters {
+                        break;
+                    }
+                    state.parentheses = state.parentheses.saturating_sub(1);
+                    position += 1;
+                }
+                C_LEFT_SQUARE => {
+                    if preserve_delimiters {
+                        break;
+                    }
+                    state.squares += 1;
+                    position += 1;
+                }
+                C_RIGHT_SQUARE => {
+                    if preserve_delimiters {
+                        break;
+                    }
+                    state.squares = state.squares.saturating_sub(1);
+                    position += 1;
+                }
+                C_LEFT_CURLY => {
+                    if preserve_delimiters {
+                        break;
+                    }
+                    state.curlies += 1;
+                    position += 1;
+                }
+                C_RIGHT_CURLY if state.curlies > 0 && !preserve_delimiters => {
+                    state.curlies -= 1;
+                    position += 1;
+                }
+                C_RIGHT_CURLY => break,
+                C_SEMICOLON if !state.is_nested() => break,
+                _ => position += 1,
+            }
         }
         self.scan_pos = position as Pos;
         debug_assert!(
@@ -1044,8 +1131,36 @@ impl<'s> Lexer<'s> {
 pub(crate) struct TokenStream<'a, 's> {
     lexer: &'a mut Lexer<'s>,
     consumed: Pos,
-    peeked: Option<TokenWithTrivia>,
     buffered: VecDeque<TokenWithTrivia>,
+    generic_value_state: GenericValueScanState,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct GenericValueScanState {
+    parentheses: u32,
+    squares: u32,
+    curlies: u32,
+}
+
+impl GenericValueScanState {
+    #[inline]
+    fn is_nested(&self) -> bool {
+        self.parentheses != 0 || self.squares != 0 || self.curlies != 0
+    }
+}
+
+#[inline]
+fn is_dependency_value_function(name: &str) -> bool {
+    name.eq_ignore_ascii_case("url")
+        || name.eq_ignore_ascii_case("var")
+        || name.eq_ignore_ascii_case("image-set")
+        || ["-webkit-", "-moz-", "-ms-", "-o-"]
+            .into_iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
+            })
+        || name.starts_with("--")
 }
 
 impl<'a, 's> TokenStream<'a, 's> {
@@ -1053,21 +1168,31 @@ impl<'a, 's> TokenStream<'a, 's> {
         Self {
             lexer,
             consumed: 0,
-            peeked: None,
             buffered: VecDeque::new(),
+            generic_value_state: GenericValueScanState::default(),
         }
     }
 
     #[inline(always)]
     pub(crate) fn next<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
-        let token = if let Some(token) = self.peeked.take() {
-            token
-        } else if let Some(token) = self.buffered.pop_front() {
+        let token = if let Some(token) = self.buffered.pop_front() {
             token
         } else {
             self.read_significant::<KEEP_COMMENTS>()
         };
-        self.consumed = self.consumed.max(token.token.range.end);
+        debug_assert!(
+            token.token.range.start >= self.consumed,
+            "token range starts before consumed_pos: {:?} < {}",
+            token.token.range,
+            self.consumed
+        );
+        self.consumed = token.token.range.end;
+        if matches!(
+            token.token.kind,
+            TokenKind::Semicolon | TokenKind::RightCurlyBracket
+        ) {
+            self.generic_value_state = GenericValueScanState::default();
+        }
         debug_assert!(
             self.consumed <= self.lexer.scan_pos(),
             "consumed_pos ({}) exceeded scan_pos ({})",
@@ -1113,36 +1238,11 @@ impl<'a, 's> TokenStream<'a, 's> {
 
     #[inline]
     pub(crate) fn peek<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
-        if self.peeked.is_none() {
-            self.peeked = self
-                .buffered
-                .pop_front()
-                .or_else(|| Some(self.read_significant::<KEEP_COMMENTS>()));
-        }
-        self.peeked.unwrap()
-    }
-
-    #[inline]
-    pub(crate) fn peek_after_non_comment<const KEEP_COMMENTS: bool>(
-        &mut self,
-    ) -> (TokenWithTrivia, bool) {
-        self.peek::<KEEP_COMMENTS>();
-        let mut has_whitespace = false;
-        loop {
-            for item in &self.buffered {
-                has_whitespace |= item.leading.has_whitespace();
-                if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
-                    return (*item, has_whitespace);
-                }
-            }
+        if self.buffered.is_empty() {
             let item = self.read_significant::<KEEP_COMMENTS>();
-            has_whitespace |= item.leading.has_whitespace();
-            let is_comment = matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment);
             self.buffered.push_back(item);
-            if !is_comment {
-                return (item, has_whitespace);
-            }
         }
+        *self.buffered.front().unwrap()
     }
 
     /// Peek the next parser token (folding comments into its leading trivia)
@@ -1151,29 +1251,21 @@ impl<'a, 's> TokenStream<'a, 's> {
     #[inline]
     pub(crate) fn peek_parser_token(&mut self) -> TokenWithTrivia {
         self.peek::<true>();
-        let mut items: VecDeque<TokenWithTrivia> = VecDeque::new();
-        if let Some(item) = self.peeked.take() {
-            items.push_back(item);
-        }
-        items.append(&mut self.buffered);
-
         let mut leading_start = None;
         let mut first_comment_start = None;
         let mut has_white_space = false;
-        let mut scanned: VecDeque<TokenWithTrivia> = VecDeque::new();
+        let mut index = 0usize;
         loop {
-            let item = if let Some(item) = items.pop_front() {
-                item
-            } else {
+            if index == self.buffered.len() {
                 let item = self.read_significant::<true>();
-                items.push_back(item);
-                continue;
-            };
+                self.buffered.push_back(item);
+            }
+            let item = self.buffered[index];
             leading_start.get_or_insert(item.leading.range.start);
             has_white_space |= item.leading.has_whitespace();
             if matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
                 first_comment_start.get_or_insert(item.token.range.start);
-                scanned.push_back(item);
+                index += 1;
                 continue;
             }
 
@@ -1185,10 +1277,6 @@ impl<'a, 's> TokenStream<'a, 's> {
                 first_comment_start: first_comment_start.or(item.leading.first_comment_start),
                 has_white_space,
             };
-            self.buffered = scanned;
-            self.buffered.push_back(result);
-            self.buffered.append(&mut items);
-            self.peeked = None;
             return result;
         }
     }
@@ -1200,11 +1288,6 @@ impl<'a, 's> TokenStream<'a, 's> {
         &mut self,
     ) -> TokenWithTrivia {
         self.peek::<KEEP_COMMENTS>();
-        if let Some(item) = self.peeked {
-            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
-                return item;
-            }
-        }
         for item in &self.buffered {
             if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
                 return *item;
@@ -1222,14 +1305,29 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// The position of the next yet-untokenized source byte. The buffer may
     /// still hold tokens; callers must drain `next` before fast-forwarding.
     #[inline]
-    pub(crate) fn fast_forward_if_buffer_empty<F>(&mut self, mut is_candidate: F)
-    where
+    pub(crate) fn fast_forward_if_buffer_empty<F, C>(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
         F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
     {
-        if self.peeked.is_some() || !self.buffered.is_empty() {
+        if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value(&mut is_candidate);
+        self.lexer.fast_forward_generic_value(
+            &mut self.generic_value_state,
+            keep_comments,
+            preserve_strings,
+            preserve_delimiters,
+            &mut is_candidate,
+            &mut is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
     }
 
     /// The farthest position consumed by `next`. This is the current semantic
@@ -1277,6 +1375,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         let mut has_white_space = false;
         loop {
             let token = self.lexer.next_token();
+            debug_assert!(token.range.start >= end);
             if token.kind == TokenKind::WhiteSpace {
                 has_white_space = true;
                 end = token.range.end;
@@ -1514,13 +1613,13 @@ mod tests {
     fn token_stream_peeks_past_comments_without_rescanning() {
         let mut lexer = Lexer::new("local/**/.foo");
         let mut stream = TokenStream::from_lexer(&mut lexer);
-        assert_eq!(stream.peek::<true>().token.kind, TokenKind::Ident);
-        let (next, has_whitespace) = stream.peek_after_non_comment::<true>();
-        assert_eq!(next.token.kind, TokenKind::Delim);
-        assert!(!has_whitespace);
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+        let next = stream.peek_significant_skipping_comments::<true>();
+        assert_eq!(next.token.kind, TokenKind::Delim);
+        let scan_after_peek = stream.lexer().scan_pos();
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Comment);
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Delim);
+        assert_eq!(stream.lexer().scan_pos(), scan_after_peek);
     }
 
     #[test]
@@ -1555,10 +1654,7 @@ mod tests {
                 let item = stream.next_parser_token();
                 let scan = stream.lexer().scan_pos();
                 let consumed = stream.consumed_pos();
-                assert!(
-                    scan >= previous_scan,
-                    "scan_pos went backward in {input:?}"
-                );
+                assert!(scan >= previous_scan, "scan_pos went backward in {input:?}");
                 assert!(
                     consumed >= previous_consumed,
                     "consumed_pos went backward in {input:?}"
@@ -1592,26 +1688,21 @@ mod tests {
     }
 
     #[test]
-    fn token_stream_peek_past_value_does_not_rescan() {
-        // The colon lookahead must not read past `red`, and `red` must be
-        // consumed from the buffer instead of being tokenized twice.
+    fn token_stream_single_peek_does_not_rescan() {
         let mut lexer = Lexer::new("color:red;");
         let mut stream = TokenStream::from_lexer(&mut lexer);
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Colon);
         let red = stream.peek_significant_skipping_comments::<true>().token;
         assert_eq!(red.kind, TokenKind::Ident);
-        let (semi, _) = stream.peek_after_non_comment::<true>();
-        assert_eq!(semi.token.kind, TokenKind::Semicolon);
         let scan_before = stream.lexer().scan_pos();
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
-        assert_eq!(stream.next::<true>().token.kind, TokenKind::Semicolon);
         assert_eq!(
             stream.lexer().scan_pos(),
             scan_before,
-            "consuming buffered tokens must not advance the scanner"
+            "consuming the buffered token must not advance the scanner"
         );
-        assert_eq!(stream.consumed_pos(), scan_before);
+        assert_eq!(stream.next::<true>().token.kind, TokenKind::Semicolon);
     }
 
     #[test]
@@ -1634,5 +1725,31 @@ mod tests {
         );
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
         assert_eq!(stream.next::<true>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn generic_value_fast_forward_keeps_raw_depth_across_candidates() {
+        let input = "calc(1px + imported) url(a.png);";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+
+        stream.fast_forward_if_buffer_empty(
+            false,
+            false,
+            false,
+            |ident| ident == "imported",
+            |_| false,
+        );
+        assert_eq!(stream.consumed_pos(), 11);
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Ident);
+
+        stream.fast_forward_if_buffer_empty(false, false, false, |_| false, |_| false);
+        assert_eq!(stream.consumed_pos(), 21);
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Url);
+
+        stream.fast_forward_if_buffer_empty(false, false, false, |_| false, |_| false);
+        assert_eq!(stream.byte_at(stream.consumed_pos()), Some(b';'));
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Semicolon);
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
     }
 }

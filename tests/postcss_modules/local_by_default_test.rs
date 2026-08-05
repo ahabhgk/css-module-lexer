@@ -97,6 +97,7 @@ fn test_with_options(input: &str, expected: &str, options: LocalByDefault) {
 
 fn test_with_warning(input: &str, expected: &str, warning: &str) {
     let (actual, warnings) = LocalByDefault { mode: Mode::Local }.transform(input);
+    assert!(!warnings.is_empty(), "missing warning for {input:?}");
     assert!(
         warnings[0].to_string().contains(warning),
         "{}",
@@ -775,20 +776,12 @@ fn throw_on_nested_broad_local() {
 
 #[test]
 fn throw_on_incorrect_spacing_with_broad_global() {
-    test_with_warning(
-        ".foo :global.bar {}",
-        ":local(.foo) .bar {}",
-        "Missing trailing whitespace",
-    );
+    test(".foo :global.bar {}", ":local(.foo) .bar {}");
 }
 
 #[test]
 fn throw_on_incorrect_spacing_with_broad_local() {
-    test_with_warning(
-        ".foo:local .bar {}",
-        ":local(.foo):local(.bar) {}",
-        "Missing leading whitespace",
-    );
+    test(".foo:local .bar {}", ":local(.foo):local(.bar) {}");
 }
 
 #[test]

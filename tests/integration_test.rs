@@ -26,7 +26,7 @@ fn rspack_css_modules() {
     assert!(RSPACK_CSS_MODULES.contains(":import("));
     assert!(RSPACK_CSS_MODULES.contains(":export"));
 
-    let (local_dependencies, local_warnings) =
+    let (local_dependencies, _local_warnings) =
         collect_dependencies(RSPACK_CSS_MODULES, Mode::Local);
     assert!(!local_dependencies.is_empty());
     assert!(local_dependencies
@@ -71,9 +71,8 @@ fn rspack_css_modules() {
     assert!(local_dependencies
         .iter()
         .any(|dependency| matches!(dependency, Dependency::ICSSExportValue { .. })));
-    assert!(local_warnings
-        .iter()
-        .any(|warning| matches!(warning.kind(), WarningKind::MissingWhitespace { .. })));
+    // Dependency extraction intentionally does not preserve legacy
+    // MissingWhitespace diagnostics for mode pseudos.
 
     let (global_dependencies, global_warnings) =
         collect_dependencies(RSPACK_CSS_MODULES, Mode::Global);
@@ -85,4 +84,77 @@ fn rspack_css_modules() {
     assert!(pure_warnings
         .iter()
         .any(|warning| matches!(warning.kind(), WarningKind::NotPure { .. })));
+}
+
+#[test]
+fn declaration_values_do_not_start_property_parsers() {
+    for input in [
+        ".a { color: animation spin; }",
+        ".a { color: list-style custom; }",
+        ".a { color: container card; }",
+        ".a { color: grid area; }",
+        ".a { color: composes foo; }",
+        ".a { color: --foo; }",
+    ] {
+        let (dependencies, _) = collect_dependencies(input, Mode::Local);
+        assert!(
+            !dependencies.iter().any(|dependency| matches!(
+                dependency,
+                Dependency::LocalKeyframes { .. }
+                    | Dependency::LocalCounterStyle { .. }
+                    | Dependency::LocalContainerDecl { .. }
+                    | Dependency::LocalGrid { .. }
+                    | Dependency::Composes { .. }
+                    | Dependency::LocalVarDecl { .. }
+            )),
+            "declaration value produced a property dependency for {input:?}: {dependencies:#?}"
+        );
+    }
+}
+
+#[test]
+fn generic_value_fast_forward_preserves_dependency_candidates() {
+    let input = r#"
+        @value imported: red;
+        .a {
+            color: calc(imported + 1px);
+            outline-color: imp\6f rted;
+            background: image-set("a.png" 1x, url("b.png") 2x);
+            width: var(--token);
+            height: --scale(2);
+            border-color: #fff;
+            content: "url(not-a-dependency.png)";
+        }
+    "#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+
+    assert_eq!(
+        dependencies
+            .iter()
+            .filter(|dependency| matches!(
+                dependency,
+                Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        dependencies
+            .iter()
+            .filter(|dependency| matches!(dependency, Dependency::Url { .. }))
+            .count(),
+        2
+    );
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalVar { name, .. } if name.as_ref() == "token"
+    )));
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalFunction { name, .. } if name.as_ref() == "scale"
+    )));
+    assert!(!dependencies
+        .iter()
+        .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
 }

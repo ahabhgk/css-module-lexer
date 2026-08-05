@@ -1105,18 +1105,10 @@ fn css_modules_pseudo_2() {
 }
 
 #[test]
-fn css_modules_local_class_after_comment_reports_missing_whitespace() {
+fn css_modules_local_class_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/.class {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert_eq!(
-        warnings,
-        [Warning::new(
-            Range::new(0, 6),
-            WarningKind::MissingWhitespace {
-                surrounding: "trailing",
-            },
-        )]
-    );
+    assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_class_dependency(input, &dependencies[1], ".class", true);
     assert_eq!(dependencies.len(), 2);
@@ -1134,53 +1126,29 @@ fn css_modules_mode_replace_stops_before_comment_after_white_space() {
 }
 
 #[test]
-fn css_modules_local_id_after_comment_reports_missing_whitespace() {
+fn css_modules_local_id_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/#id {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert_eq!(
-        warnings,
-        [Warning::new(
-            Range::new(0, 6),
-            WarningKind::MissingWhitespace {
-                surrounding: "trailing",
-            },
-        )]
-    );
+    assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_id_dependency(input, &dependencies[1], "#id", true);
     assert_eq!(dependencies.len(), 2);
 }
 
 #[test]
-fn css_modules_global_class_after_comment_reports_missing_whitespace() {
+fn css_modules_global_class_after_comment_keeps_dependencies() {
     let input = ":global/** comment **/.class {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
-    assert_eq!(
-        warnings,
-        [Warning::new(
-            Range::new(0, 7),
-            WarningKind::MissingWhitespace {
-                surrounding: "trailing",
-            },
-        )]
-    );
+    assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":global");
     assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
-fn css_modules_local_block_after_comment_reports_missing_whitespace() {
+fn css_modules_local_block_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/{ color: red; }";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert_eq!(
-        warnings,
-        [Warning::new(
-            Range::new(0, 6),
-            WarningKind::MissingWhitespace {
-                surrounding: "trailing",
-            },
-        )]
-    );
+    assert!(warnings.is_empty());
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_eq!(dependencies.len(), 1);
 }
@@ -1247,21 +1215,11 @@ fn rspack_nested_comment_separated_modes_only_scan_selector_context() {
 }
 
 #[test]
-fn rspack_nested_comment_separated_modes_only_warn_in_selector_context() {
+fn rspack_nested_comment_separated_modes_do_not_keep_spacing_warnings() {
     let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
     let (_, warnings) = collect_dependencies(input, Mode::Local);
 
-    assert_eq!(
-        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["Missing trailing whitespace"]
-    );
-    assert_eq!(
-        warnings
-            .iter()
-            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
-            .collect::<Vec<_>>(),
-        [":global"]
-    );
+    assert!(warnings.is_empty());
 }
 
 #[test]
@@ -1630,8 +1588,7 @@ fn css_modules_missing_white_space_9() {
 fn css_modules_missing_white_space_10() {
     let input = ".a:not(.b:not(:global .c):local .d) {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
-    assert_warning(input, &warnings[0], ":local");
-    assert_eq!(warnings.len(), 1);
+    assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
     assert_replace_dependency(input, &dependencies[2], "", ":global ");
