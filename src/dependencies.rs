@@ -1,7 +1,5 @@
 //! Dependency parser and lexer visitor implementation.
 
-use std::borrow::Cow;
-
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
@@ -9,7 +7,6 @@ use crate::dependency_types::{
     Dependency, DependencyContext, DependencyListRange, Mode, Range, UrlRangeKind,
     ValueAtRuleImportItem, Warning, WarningKind,
 };
-use crate::escape::unescape;
 use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
@@ -17,15 +14,6 @@ use crate::lexer::TokenStream;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
-
-#[inline]
-fn unescape_token(value: &str, flags: TokenFlags) -> Cow<'_, str> {
-    if flags.has_escape() || flags.has_null() {
-        unescape(value)
-    } else {
-        Cow::Borrowed(value)
-    }
-}
 
 macro_rules! match_ignore_ascii_case {
     (
@@ -408,10 +396,6 @@ fn is_css_space_byte(byte: u8) -> bool {
 
 fn is_css_white_space_char(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
-}
-
-fn unescape_names(names: SmallVec<[&str; 2]>) -> impl Iterator<Item = Cow<'_, str>> {
-    names.into_iter().map(unescape)
 }
 
 fn trim_slice(input: &str) -> &str {
@@ -887,7 +871,7 @@ enum SingleLocalClass {
 #[derive(Debug)]
 struct InProperty<T: ReservedValues> {
     reserved: T,
-    rename: Option<(Range, TokenFlags)>,
+    rename: Option<Range>,
     balanced_len: usize,
 }
 
@@ -908,13 +892,13 @@ impl<T: ReservedValues> InProperty<T> {
         self.reserved.reset();
     }
 
-    pub fn set_rename(&mut self, ident: &str, range: Range, flags: TokenFlags) {
+    pub fn set_rename(&mut self, ident: &str, range: Range) {
         if self.check_reserved(ident) {
-            self.rename = Some((range, flags));
+            self.rename = Some(range);
         }
     }
 
-    pub fn take_rename(&mut self, balanced_len: usize) -> Option<(Range, TokenFlags)> {
+    pub fn take_rename(&mut self, balanced_len: usize) -> Option<Range> {
         // Don't rename when we in functions
         if balanced_len != self.balanced_len {
             return None;
@@ -1195,11 +1179,11 @@ pub struct LexDependencies<'s, W> {
     in_font_palette_property: Option<InProperty<FontPaletteReserved>>,
     in_container_property: Option<InProperty<ContainerReserved>>,
     in_grid_property: Option<GridPropertyKind>,
-    icss_symbols: FxHashSet<Cow<'s, str>>,
+    icss_symbols: FxHashSet<&'s str>,
     icss_symbol_filter: [u64; 16],
     icss_symbol_min_len: usize,
     icss_symbol_max_len: usize,
-    pending_custom_property: Option<(Range, TokenFlags)>,
+    pending_custom_property: Option<Range>,
     pending_grid_property: Option<GridPropertyKind>,
     handle_warning: W,
 }
@@ -1684,11 +1668,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.icss_symbol_filter[word] & bit != 0 && self.icss_symbols.contains(value)
     }
 
-    fn insert_icss_symbol(&mut self, value: Cow<'s, str>) {
+    fn insert_icss_symbol(&mut self, value: &'s str) {
         let len = value.len();
         self.icss_symbol_min_len = self.icss_symbol_min_len.min(len);
         self.icss_symbol_max_len = self.icss_symbol_max_len.max(len);
-        let (word, bit) = Self::icss_symbol_filter_bit(value.as_ref());
+        let (word, bit) = Self::icss_symbol_filter_bit(value);
         self.icss_symbol_filter[word] |= bit;
         self.icss_symbols.insert(value);
     }
@@ -1710,13 +1694,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     .as_ref()
                     .is_some_and(ModeData::is_property_local_mode)
                 {
-                    if let Some((range, flags)) = self.pending_custom_property.take() {
+                    if let Some(range) = self.pending_custom_property.take() {
                         self.dependency_context
                             .push_dependency(Dependency::LocalVarDecl {
-                                name: unescape_token(
-                                    stream.lexer().slice(range.start + 2, range.end)?,
-                                    flags,
-                                ),
+                                name: stream.lexer().slice(range.start + 2, range.end)?,
                                 range,
                             });
                     }
@@ -1819,10 +1800,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if next.kind == TokenKind::Semicolon {
             self.dependency_context
                 .push_dependency(Dependency::Charset {
-                    value: unescape_token(
-                        stream.slice(string.value_range.start, string.value_range.end)?,
-                        string.flags,
-                    ),
+                    value: stream.slice(string.value_range.start, string.value_range.end)?,
                     range: Range::new(start, next.range.end),
                 });
         }
@@ -1887,7 +1865,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
         self.dependency_context
             .push_dependency(Dependency::ICSSImportFrom {
-                path: unescape(stream.slice(start, end)?),
+                path: stream.slice(start, end)?,
             });
         let left_curly = stream.next_parser_token().token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
@@ -1925,26 +1903,22 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return None;
             }
             let value_start = value_start_token.range.start;
-            let value_end = self.consume_icss_value(stream, value_start_token, |_| {})?;
+            let value_end = self.consume_icss_value(stream, value_start_token)?;
             let delimiter = stream.next_parser_token().token;
             self.dependency_context
                 .push_dependency(Dependency::ICSSImportValue {
-                    prop: unescape(
-                        stream
-                            .slice(prop_start, prop_end)?
-                            .trim_end_matches(is_css_white_space_char),
-                    ),
-                    value: unescape(
-                        stream
-                            .slice(value_start, value_end)?
-                            .trim_end_matches(is_css_white_space_char),
-                    ),
+                    prop: stream
+                        .slice(prop_start, prop_end)?
+                        .trim_end_matches(is_css_white_space_char),
+                    value: stream
+                        .slice(value_start, value_end)?
+                        .trim_end_matches(is_css_white_space_char),
                 });
-            self.insert_icss_symbol(unescape(
+            self.insert_icss_symbol(
                 stream
                     .slice(prop_start, prop_end)?
                     .trim_end_matches(is_css_white_space_char),
-            ));
+            );
             if delimiter.kind == TokenKind::RightCurlyBracket {
                 break;
             }
@@ -2007,12 +1981,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn consume_icss_value(
-        &self,
-        stream: &mut TokenStream<'_, 's>,
-        first: Token,
-        mut handle_comment: impl FnMut(Range),
-    ) -> Option<Pos> {
+    fn consume_icss_value(&self, stream: &mut TokenStream<'_, 's>, first: Token) -> Option<Pos> {
         if matches!(
             first.kind,
             TokenKind::RightCurlyBracket | TokenKind::Semicolon
@@ -2030,10 +1999,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             ) {
                 return Some(token.range.start);
             }
-            let token = stream.next::<true>().token;
-            if matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
-                handle_comment(token.range);
-            }
+            stream.next::<true>();
         }
     }
 
@@ -2090,21 +2056,19 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     });
                 } else {
                     self.dependency_context
-                        .push_dependency(Dependency::ICSSImportFrom {
-                            path: unescape(from),
-                        });
+                        .push_dependency(Dependency::ICSSImportFrom { path: from });
                     for index in items.as_usize_range() {
                         let item = self.dependency_context.value_at_rule_import_item(index);
                         self.dependency_context
                             .push_dependency(Dependency::ICSSImportValue {
-                                prop: unescape(item.local_name()),
-                                value: unescape(item.import_name()),
+                                prop: item.local_name(),
+                                value: item.import_name(),
                             });
-                        self.insert_icss_symbol(unescape(item.local_name()));
+                        self.insert_icss_symbol(item.local_name());
                         self.dependency_context
                             .push_dependency(Dependency::ICSSExportValue {
-                                prop: unescape(item.local_name()),
-                                value: unescape(item.local_name()),
+                                prop: item.local_name(),
+                                value: item.local_name(),
                             });
                     }
                 }
@@ -2125,10 +2089,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 if !local_name.is_empty() {
                     self.dependency_context
                         .push_dependency(Dependency::ICSSExportValue {
-                            prop: unescape(local_name),
-                            value: Cow::Borrowed(value),
+                            prop: local_name,
+                            value,
                         });
-                    self.insert_icss_symbol(unescape(local_name));
+                    self.insert_icss_symbol(local_name);
                 }
             }
         }
@@ -2177,39 +2141,23 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return None;
             }
             let value_start = value_start_token.range.start;
-            let input = stream.slice(0, stream.source_end())?;
-            let mut value_without_comments = None;
-            let mut copied_until = value_start;
-            let value_end = self.consume_icss_value(stream, value_start_token, |comment| {
-                let output = value_without_comments.get_or_insert_with(String::new);
-                output.push_str(&input[copied_until as usize..comment.start as usize]);
-                copied_until = comment.end;
-            })?;
+            let value_end = self.consume_icss_value(stream, value_start_token)?;
             let delimiter = stream.next_parser_token().token;
             let value = stream
                 .slice(value_start, value_end)?
                 .trim_end_matches(is_css_white_space_char);
-            let trimmed_value_end = value_start + value.len() as Pos;
-            let value = if let Some(mut output) = value_without_comments {
-                output.push_str(&input[copied_until as usize..trimmed_value_end as usize]);
-                Cow::Owned(output)
-            } else {
-                Cow::Borrowed(value)
-            };
             self.dependency_context
                 .push_dependency(Dependency::ICSSExportValue {
-                    prop: unescape(
-                        stream
-                            .slice(prop_start, prop_end)?
-                            .trim_end_matches(is_css_white_space_char),
-                    ),
+                    prop: stream
+                        .slice(prop_start, prop_end)?
+                        .trim_end_matches(is_css_white_space_char),
                     value,
                 });
-            self.insert_icss_symbol(unescape(
+            self.insert_icss_symbol(
                 stream
                     .slice(prop_start, prop_end)?
                     .trim_end_matches(is_css_white_space_char),
-            ));
+            );
             if delimiter.kind == TokenKind::RightCurlyBracket {
                 break;
             }
@@ -2250,16 +2198,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return Some(());
             }
             stream.next_parser_token();
-            Some(unescape_token(
-                stream.slice(path_start, path_end)?,
-                path.flags,
-            ))
+            Some(stream.slice(path_start, path_end)?)
         } else {
             None
         };
         self.dependency_context
             .push_dependency(Dependency::LocalVar {
-                name: unescape_token(stream.slice(start + 2, end)?, name_token.flags),
+                name: stream.slice(start + 2, end)?,
                 range: Range::new(start, end),
                 from,
             });
@@ -2269,7 +2214,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     fn lex_local_dashed_ident_decl(
         &mut self,
         stream: &mut TokenStream<'_, 's>,
-        local_decl_dependency: impl FnOnce(Cow<'s, str>, Range) -> Dependency<'s>,
+        local_decl_dependency: impl FnOnce(&'s str, Range) -> Dependency<'s>,
         dashed_warning: impl FnOnce(Range) -> Warning<'s>,
         left_curly_warning: impl FnOnce(Range) -> Warning<'s>,
     ) -> Option<()> {
@@ -2288,7 +2233,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let end = name_token.range.end;
         self.dependency_context
             .push_dependency(local_decl_dependency(
-                unescape_token(stream.slice(start + 2, end)?, name_token.flags),
+                stream.slice(start + 2, end)?,
                 Range::new(start, end),
             ));
         let left_curly = stream.peek_significant_skipping_comments::<true>().token;
@@ -2367,7 +2312,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             let name = stream.slice(start, end)?;
             self.dependency_context
                 .push_dependency(Dependency::LocalKeyframesDecl {
-                    name: unescape_token(name, name_token.flags),
+                    name,
                     range: Range::new(start, end),
                 });
         }
@@ -2407,10 +2352,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let animation = self.in_animation_property.as_mut().unwrap();
-        if let Some((range, flags)) = animation.take_rename(self.balanced.len()) {
+        if let Some(range) = animation.take_rename(self.balanced.len()) {
             self.dependency_context
                 .push_dependency(Dependency::LocalKeyframes {
-                    name: unescape_token(lexer.slice(range.start, range.end)?, flags),
+                    name: lexer.slice(range.start, range.end)?,
                     range,
                 });
         }
@@ -2433,7 +2378,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let end = name_token.range.end;
         self.dependency_context
             .push_dependency(Dependency::LocalCounterStyleDecl {
-                name: unescape_token(stream.slice(start, end)?, name_token.flags),
+                name: stream.slice(start, end)?,
                 range: Range::new(start, end),
             });
         let left_curly = stream.peek_significant_skipping_comments::<true>().token;
@@ -2466,7 +2411,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
             self.dependency_context
                 .push_dependency(Dependency::LocalContainer {
-                    name: unescape_token(ident, name_token.flags),
+                    name: ident,
                     range: Range::new(start, end),
                 });
         }
@@ -2545,7 +2490,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
             self.dependency_context
                 .push_dependency(Dependency::LocalFunctionDecl {
-                    name: unescape_token(stream.slice(start + 2, end)?, name_token.flags),
+                    name: stream.slice(start + 2, end)?,
                     range: Range::new(start, end),
                 });
         }
@@ -2593,10 +2538,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_local_counter_style_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let list_style = self.in_list_style_property.as_mut().unwrap();
-        if let Some((range, flags)) = list_style.take_rename(self.balanced.len()) {
+        if let Some(range) = list_style.take_rename(self.balanced.len()) {
             self.dependency_context
                 .push_dependency(Dependency::LocalCounterStyle {
-                    name: unescape_token(lexer.slice(range.start, range.end)?, flags),
+                    name: lexer.slice(range.start, range.end)?,
                     range,
                 });
         }
@@ -2605,10 +2550,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_local_font_palette_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let font_palette = self.in_font_palette_property.as_mut().unwrap();
-        if let Some((range, flags)) = font_palette.take_rename(self.balanced.len()) {
+        if let Some(range) = font_palette.take_rename(self.balanced.len()) {
             self.dependency_context
                 .push_dependency(Dependency::LocalFontPalette {
-                    name: unescape_token(lexer.slice(range.start + 2, range.end)?, flags),
+                    name: lexer.slice(range.start + 2, range.end)?,
                     range,
                 });
         }
@@ -2693,9 +2638,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     stream.next_parser_token();
                     item_end = right_parenthesis.range.end;
                     self.dependency_context.push_composes(
-                        unescape_names(local_classes.clone()),
-                        std::iter::once(unescape(stream.slice(name_range.start, name_range.end)?)),
-                        Some(Cow::Borrowed("global")),
+                        local_classes.iter().copied(),
+                        std::iter::once(stream.slice(name_range.start, name_range.end)?),
+                        Some("global"),
                         Range::new(global_start, item_end),
                     );
                     delimiter = stream.peek_significant_skipping_comments::<true>().token;
@@ -2730,9 +2675,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         };
                         item_end = path_range.end;
                         self.dependency_context.push_composes(
-                            unescape_names(local_classes.clone()),
-                            unescape_names(std::mem::take(&mut names)),
-                            Some(unescape(stream.slice(path_range.start, path_range.end)?)),
+                            local_classes.iter().copied(),
+                            std::mem::take(&mut names),
+                            Some(stream.slice(path_range.start, path_range.end)?),
                             Range::new(item_start, item_end),
                         );
                         has_from = true;
@@ -2773,8 +2718,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if delimiter.kind == TokenKind::Comma {
                 if !names.is_empty() {
                     self.dependency_context.push_composes(
-                        unescape_names(local_classes.clone()),
-                        unescape_names(names),
+                        local_classes.iter().copied(),
+                        names,
                         None,
                         Range::new(item_start, item_end),
                     );
@@ -2787,8 +2732,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if delimiter.kind == TokenKind::Semicolon {
                 if !names.is_empty() {
                     self.dependency_context.push_composes(
-                        unescape_names(local_classes.clone()),
-                        unescape_names(names),
+                        local_classes.iter().copied(),
+                        names,
                         None,
                         Range::new(item_start, item_end),
                     );
@@ -2801,8 +2746,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if delimiter.kind == TokenKind::RightCurlyBracket {
                 if !names.is_empty() {
                     self.dependency_context.push_composes(
-                        unescape_names(local_classes.clone()),
-                        unescape_names(names),
+                        local_classes.iter().copied(),
+                        names,
                         None,
                         Range::new(item_start, item_end),
                     );
@@ -2891,7 +2836,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 import_data.url_range = Some(Range::new(start, end));
             }
             Scope::InBlock => self.dependency_context.push_dependency(Dependency::Url {
-                request: unescape_token(value, flags),
+                request: value,
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
             }),
@@ -2954,10 +2899,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         ) {
                             self.dependency_context
                                 .push_dependency(Dependency::LocalGridDecl {
-                                    name: unescape_token(
-                                        lexer.slice(range.start, range.end)?,
-                                        flags,
-                                    ),
+                                    name: lexer.slice(range.start, range.end)?,
                                     range,
                                 });
                         }
@@ -2973,7 +2915,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 };
                 let value = lexer.slice(start + 1, end - 1)?;
                 self.dependency_context.push_dependency(Dependency::Url {
-                    request: unescape_token(value, flags),
+                    request: value,
                     range: Range::new(start, end),
                     kind,
                 });
@@ -3088,7 +3030,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some((name, name_range)) = import_data.prelude.icss_import_url() {
                         self.dependency_context
                             .push_dependency(Dependency::ICSSImportUrl {
-                                name: unescape(name),
+                                name,
                                 range: Range::new(import_data.start, end),
                                 name_range: *name_range,
                             });
@@ -3186,7 +3128,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     .end;
                 let media = self.get_media(lexer, last_end, start);
                 self.dependency_context.push_dependency(Dependency::Import {
-                    request: unescape_token(url, import_data.url_flags),
+                    request: url,
                     range: Range::new(import_data.start, end),
                     layer,
                     supports,
@@ -3238,7 +3180,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        flags: TokenFlags,
+        _flags: TokenFlags,
     ) -> Option<()> {
         let name = stream.slice_trusted(start, end);
         let item = BalancedItem::new(name, start, end);
@@ -3275,7 +3217,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if mode_data.is_current_local_mode() && name.starts_with("--") && end > start + 1 {
             self.dependency_context
                 .push_dependency(Dependency::LocalFunction {
-                    name: unescape_token(stream.slice(start + 2, end - 1)?, flags),
+                    name: stream.slice(start + 2, end - 1)?,
                     range: Range::new(start, end - 1),
                 });
         }
@@ -3362,7 +3304,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        flags: TokenFlags,
+        _flags: TokenFlags,
     ) -> Option<()> {
         match self.scope {
             Scope::InBlock => {
@@ -3377,7 +3319,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         Self::classify_property(ident, property_local_mode);
                     self.pending_custom_property = (self.property_kind
                         == PropertyKind::CustomProperty)
-                        .then_some((Range::new(start, end), flags));
+                        .then_some(Range::new(start, end));
                     if self.property_kind != PropertyKind::Composes {
                         return Some(());
                     }
@@ -3386,16 +3328,16 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     self.scan_context,
                     ScanContext::GenericValue | ScanContext::SpecialValue(_) | ScanContext::AtRule
                 );
-                if can_reference_icss && !self.icss_symbols.is_empty() {
-                    let unescaped_ident = unescape_token(ident, flags);
-                    if self.contains_icss_symbol(unescaped_ident.as_ref()) {
-                        self.dependency_context
-                            .push_dependency(Dependency::ICSSSymbol {
-                                name: unescaped_ident,
-                                range: Range::new(start, end),
-                            });
-                        return Some(());
-                    }
+                if can_reference_icss
+                    && !self.icss_symbols.is_empty()
+                    && self.contains_icss_symbol(ident)
+                {
+                    self.dependency_context
+                        .push_dependency(Dependency::ICSSSymbol {
+                            name: ident,
+                            range: Range::new(start, end),
+                        });
+                    return Some(());
                 }
                 let Some(mode_data) = &mut self.mode_data else {
                     return Some(());
@@ -3411,7 +3353,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 {
                     self.dependency_context
                         .push_dependency(Dependency::LocalFunction {
-                            name: unescape_token(stream.slice(start + 2, end)?, flags),
+                            name: stream.slice(start + 2, end)?,
                             range: Range::new(start, end),
                         });
                     return Some(());
@@ -3422,11 +3364,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            animation.set_rename(
-                                stream.slice(start, end)?,
-                                Range::new(start, end),
-                                flags,
-                            );
+                            animation.set_rename(stream.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
@@ -3434,11 +3372,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(list_style) = &mut self.in_list_style_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            list_style.set_rename(
-                                stream.slice(start, end)?,
-                                Range::new(start, end),
-                                flags,
-                            );
+                            list_style
+                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
@@ -3448,26 +3383,19 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         if self.balanced.is_empty()
                             || matches!(self.balanced.last(), Some(last) if matches!(last.kind, BalancedItemKind::PaletteMix))
                         {
-                            font_palette.set_rename(
-                                stream.slice(start, end)?,
-                                Range::new(start, end),
-                                flags,
-                            );
+                            font_palette
+                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
                         }
                         return Some(());
                     }
 
                     if let Some(container) = &mut self.in_container_property {
                         if self.balanced.is_empty() {
-                            container.set_rename(ident, Range::new(start, end), flags);
-                            if let Some((range, flags)) = container.take_rename(self.balanced.len())
-                            {
+                            container.set_rename(ident, Range::new(start, end));
+                            if let Some(range) = container.take_rename(self.balanced.len()) {
                                 self.dependency_context.push_dependency(
                                     Dependency::LocalContainerDecl {
-                                        name: unescape_token(
-                                            stream.slice(range.start, range.end)?,
-                                            flags,
-                                        ),
+                                        name: stream.slice(range.start, range.end)?,
                                         range,
                                     },
                                 );
@@ -3480,7 +3408,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
                             self.dependency_context
                                 .push_dependency(Dependency::LocalGrid {
-                                    name: unescape_token(ident, flags),
+                                    name: ident,
                                     range: Range::new(start, end),
                                 });
                         }
@@ -3557,7 +3485,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         lexer: &mut Lexer<'s>,
         start: Pos,
         end: Pos,
-        flags: TokenFlags,
+        _flags: TokenFlags,
     ) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
@@ -3575,7 +3503,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if mode_data.is_current_local_mode() {
             self.dependency_context
                 .push_dependency(Dependency::LocalClass {
-                    name: unescape_token(name, flags),
+                    name,
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });
@@ -3597,7 +3525,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         lexer: &mut Lexer<'s>,
         start: Pos,
         end: Pos,
-        flags: TokenFlags,
+        _flags: TokenFlags,
     ) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
@@ -3615,7 +3543,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if mode_data.is_current_local_mode() {
             self.dependency_context
                 .push_dependency(Dependency::LocalId {
-                    name: unescape_token(name, flags),
+                    name,
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
                 });

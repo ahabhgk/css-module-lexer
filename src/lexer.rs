@@ -957,13 +957,7 @@ impl<'s> Lexer<'s> {
         let open_end = name_end + 1;
         let name = &self.value[start..name_end];
         let is_url = name.eq_ignore_ascii_case(b"url")
-            || (name
-                .iter()
-                .any(|byte| matches!(*byte, C_REVERSE_SOLIDUS | 0))
-                && crate::escape::eq_ignore_ascii_case(
-                    std::str::from_utf8(name).unwrap_or_default(),
-                    "url",
-                ));
+            || (name.contains(&C_REVERSE_SOLIDUS) && eq_css_ascii_case(name, b"url"));
         if is_url {
             let content_start = self.skip_white_space(open_end);
             if !matches!(
@@ -1450,6 +1444,79 @@ fn is_dependency_value_function(name: &str) -> bool {
                     .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
             })
         || name.starts_with("--")
+}
+
+fn eq_css_ascii_case(input: &[u8], expected: &[u8]) -> bool {
+    let mut input_position = 0;
+    let mut expected_position = 0;
+    while input_position < input.len() {
+        let byte = if input[input_position] == C_REVERSE_SOLIDUS {
+            input_position += 1;
+            let Some(&first) = input.get(input_position) else {
+                return false;
+            };
+            if first.is_ascii_hexdigit() {
+                let mut value = 0u32;
+                let mut digits = 0;
+                while let Some(&digit) = input.get(input_position) {
+                    if digits == 6 || !digit.is_ascii_hexdigit() {
+                        break;
+                    }
+                    value = value * 16 + hex_digit_value(digit) as u32;
+                    input_position += 1;
+                    digits += 1;
+                }
+                if input
+                    .get(input_position)
+                    .is_some_and(|byte| is_white_space(*byte))
+                {
+                    input_position += 1;
+                    if input.get(input_position - 1) == Some(&C_CARRIAGE_RETURN)
+                        && input.get(input_position) == Some(&C_LINE_FEED)
+                    {
+                        input_position += 1;
+                    }
+                }
+                let Ok(byte) = u8::try_from(value) else {
+                    return false;
+                };
+                if byte == 0 {
+                    return false;
+                }
+                byte
+            } else {
+                if !first.is_ascii() || is_new_line(first) {
+                    return false;
+                }
+                input_position += 1;
+                first
+            }
+        } else {
+            let byte = input[input_position];
+            if !byte.is_ascii() || byte == 0 {
+                return false;
+            }
+            input_position += 1;
+            byte
+        };
+        let Some(expected_byte) = expected.get(expected_position) else {
+            return false;
+        };
+        if !byte.eq_ignore_ascii_case(expected_byte) {
+            return false;
+        }
+        expected_position += 1;
+    }
+    expected_position == expected.len()
+}
+
+fn hex_digit_value(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => unreachable!("hex digit checked by caller"),
+    }
 }
 
 #[inline(always)]

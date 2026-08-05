@@ -134,10 +134,10 @@ fn generic_value_fast_forward_preserves_dependency_candidates() {
             .iter()
             .filter(|dependency| matches!(
                 dependency,
-                Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+                Dependency::ICSSSymbol { name, .. } if *name == "imported"
             ))
             .count(),
-        2
+        1
     );
     assert_eq!(
         dependencies
@@ -148,11 +148,11 @@ fn generic_value_fast_forward_preserves_dependency_candidates() {
     );
     assert!(dependencies.iter().any(|dependency| matches!(
         dependency,
-        Dependency::LocalVar { name, .. } if name.as_ref() == "token"
+        Dependency::LocalVar { name, .. } if *name == "token"
     )));
     assert!(dependencies.iter().any(|dependency| matches!(
         dependency,
-        Dependency::LocalFunction { name, .. } if name.as_ref() == "scale"
+        Dependency::LocalFunction { name, .. } if *name == "scale"
     )));
     assert!(!dependencies
         .iter()
@@ -173,9 +173,7 @@ fn selector_fast_forward_preserves_candidates_and_opaque_ranges() {
     let selector_dependencies = dependencies
         .iter()
         .filter_map(|dependency| match dependency {
-            Dependency::LocalClass { name, .. } | Dependency::LocalId { name, .. } => {
-                Some(name.as_ref())
-            }
+            Dependency::LocalClass { name, .. } | Dependency::LocalId { name, .. } => Some(*name),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -223,7 +221,7 @@ fn at_rule_fast_forward_preserves_boundaries_and_dependency_candidates() {
     let local_classes = dependencies
         .iter()
         .filter_map(|dependency| match dependency {
-            Dependency::LocalClass { name, .. } => Some(name.as_ref()),
+            Dependency::LocalClass { name, .. } => Some(*name),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -232,18 +230,18 @@ fn at_rule_fast_forward_preserves_boundaries_and_dependency_candidates() {
     let urls = dependencies
         .iter()
         .filter_map(|dependency| match dependency {
-            Dependency::Url { request, .. } => Some(request.as_ref()),
+            Dependency::Url { request, .. } => Some(*request),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(urls, ["media.png", "nested.png"]);
     assert!(dependencies.iter().any(|dependency| matches!(
         dependency,
-        Dependency::LocalVar { name, .. } if name.as_ref() == "size"
+        Dependency::LocalVar { name, .. } if *name == "size"
     )));
     assert!(dependencies.iter().any(|dependency| matches!(
         dependency,
-        Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+        Dependency::ICSSSymbol { name, .. } if *name == "imported"
     )));
 }
 
@@ -262,7 +260,7 @@ fn custom_property_token_blocks_do_not_create_selector_dependencies() {
     let local_classes = dependencies
         .iter()
         .filter_map(|dependency| match dependency {
-            Dependency::LocalClass { name, .. } => Some(name.as_ref()),
+            Dependency::LocalClass { name, .. } => Some(*name),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -292,13 +290,13 @@ fn icss_symbols_are_looked_up_only_in_value_contexts() {
             .iter()
             .filter(|dependency| matches!(
                 dependency,
-                Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+                Dependency::ICSSSymbol { name, .. } if *name == "imported"
             ))
             .count(),
         3
     );
     assert!(dependencies.iter().any(|dependency| matches!(
         dependency,
-        Dependency::LocalClass { name, .. } if name.as_ref() == ".imported"
+        Dependency::LocalClass { name, .. } if *name == ".imported"
     )));
 }

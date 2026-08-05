@@ -1,6 +1,5 @@
 //! Public dependency result types and their typed side-table storage.
 
-use std::borrow::Cow;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -109,19 +108,19 @@ impl<'s> ValueAtRuleImportItem<'s> {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
-        request: Cow<'s, str>,
+        request: &'s str,
         range: Range,
         kind: UrlRangeKind,
     },
     Import {
-        request: Cow<'s, str>,
+        request: &'s str,
         range: Range,
         layer: Option<&'s str>,
         supports: Option<&'s str>,
         media: Option<&'s str>,
     },
     ICSSImportUrl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
         name_range: Range,
     },
@@ -130,99 +129,99 @@ pub enum Dependency<'s> {
         range: Range,
     },
     Charset {
-        value: Cow<'s, str>,
+        value: &'s str,
         range: Range,
     },
     LocalClass {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
         explicit: bool,
     },
     LocalId {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
         explicit: bool,
     },
     LocalVar {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
-        from: Option<Cow<'s, str>>,
+        from: Option<&'s str>,
     },
     LocalVarDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalPropertyDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalKeyframes {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalKeyframesDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalCounterStyle {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalCounterStyleDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalFontPalette {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalFontPaletteDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalContainer {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalContainerDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalFunction {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalFunctionDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalGrid {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     LocalGridDecl {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
     Composes {
-        local_classes: DependencyListRange<Cow<'s, str>>,
-        names: DependencyListRange<Cow<'s, str>>,
-        from: Option<Cow<'s, str>>,
+        local_classes: DependencyListRange<&'s str>,
+        names: DependencyListRange<&'s str>,
+        from: Option<&'s str>,
         range: Range,
     },
     ICSSImportFrom {
-        path: Cow<'s, str>,
+        path: &'s str,
     },
     ICSSImportValue {
-        prop: Cow<'s, str>,
-        value: Cow<'s, str>,
+        prop: &'s str,
+        value: &'s str,
     },
     ICSSExportValue {
-        prop: Cow<'s, str>,
-        value: Cow<'s, str>,
+        prop: &'s str,
+        value: &'s str,
     },
     ICSSSymbol {
-        name: Cow<'s, str>,
+        name: &'s str,
         range: Range,
     },
 }
@@ -236,8 +235,8 @@ pub enum Dependency<'s> {
 #[derive(Debug, Clone, Default)]
 pub struct DependencyContext<'s> {
     dependencies: Vec<Dependency<'s>>,
-    composes_local_classes: Vec<Cow<'s, str>>,
-    composes_names: Vec<Cow<'s, str>>,
+    composes_local_classes: Vec<&'s str>,
+    composes_names: Vec<&'s str>,
     value_at_rule_import_items: Vec<ValueAtRuleImportItem<'s>>,
     // Rare side tables reserve lazily on first write so ordinary CSS only
     // pays for the dependency Vec while CSS Modules still avoids growth.
@@ -289,14 +288,11 @@ impl<'s> DependencyContext<'s> {
         &self.dependencies
     }
 
-    pub fn composes_local_classes(
-        &self,
-        range: DependencyListRange<Cow<'s, str>>,
-    ) -> &[Cow<'s, str>] {
+    pub fn composes_local_classes(&self, range: DependencyListRange<&'s str>) -> &[&'s str] {
         &self.composes_local_classes[range.as_usize_range()]
     }
 
-    pub fn composes_names(&self, range: DependencyListRange<Cow<'s, str>>) -> &[Cow<'s, str>] {
+    pub fn composes_names(&self, range: DependencyListRange<&'s str>) -> &[&'s str] {
         &self.composes_names[range.as_usize_range()]
     }
 
@@ -326,9 +322,9 @@ impl<'s> DependencyContext<'s> {
 
     pub(crate) fn push_composes(
         &mut self,
-        local_classes: impl IntoIterator<Item = Cow<'s, str>>,
-        names: impl IntoIterator<Item = Cow<'s, str>>,
-        from: Option<Cow<'s, str>>,
+        local_classes: impl IntoIterator<Item = &'s str>,
+        names: impl IntoIterator<Item = &'s str>,
+        from: Option<&'s str>,
         range: Range,
     ) {
         if self.composes_local_classes.capacity() == 0 {
@@ -341,17 +337,15 @@ impl<'s> DependencyContext<'s> {
         }
         let local_classes_start = self.composes_local_classes.len();
         self.composes_local_classes.extend(local_classes);
-        let local_classes = DependencyListRange::<Cow<'s, str>>::from_bounds(
+        let local_classes = DependencyListRange::<&'s str>::from_bounds(
             local_classes_start,
             self.composes_local_classes.len(),
         );
 
         let names_start = self.composes_names.len();
         self.composes_names.extend(names);
-        let names = DependencyListRange::<Cow<'s, str>>::from_bounds(
-            names_start,
-            self.composes_names.len(),
-        );
+        let names =
+            DependencyListRange::<&'s str>::from_bounds(names_start, self.composes_names.len());
 
         self.dependencies.push(Dependency::Composes {
             local_classes,

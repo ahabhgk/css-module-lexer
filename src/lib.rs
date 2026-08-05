@@ -1,6 +1,5 @@
 mod dependencies;
 mod dependency_types;
-mod escape;
 mod lexer;
 
 pub use dependencies::LexDependencies;
@@ -14,7 +13,6 @@ pub use dependency_types::UrlRangeKind;
 pub use dependency_types::ValueAtRuleImportItem;
 pub use dependency_types::Warning;
 pub use dependency_types::WarningKind;
-pub use escape::unescape;
 pub use lexer::{Lexer, Pos, Token, TokenFlags, TokenKind, TokenWithTrivia, Trivia};
 
 pub trait HandleWarning<'s> {

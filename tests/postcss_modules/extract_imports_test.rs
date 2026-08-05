@@ -147,9 +147,9 @@ impl ExtractImports {
                     let names = dependencies.composes_names(*names);
                     let mut composes_content = String::new();
                     if let Some(from) = from {
-                        if from == "global" {
+                        if *from == "global" {
                             for i in 0..names.len() {
-                                let name = names[i].as_ref();
+                                let name = names[i];
                                 composes_content += "global(";
                                 composes_content += &serialize_identifier(name);
                                 composes_content += ")";
@@ -158,7 +158,7 @@ impl ExtractImports {
                                 }
                             }
                         } else {
-                            let path = from.as_ref().trim_matches(|c| c == '\'' || c == '"');
+                            let path = from.trim_matches(|c| c == '\'' || c == '"');
                             add_import_to_graph(
                                 path,
                                 rule_index,
@@ -168,7 +168,7 @@ impl ExtractImports {
                             );
                             let values = imports.entry(path.to_string()).or_default();
                             for i in 0..names.len() {
-                                let name = names[i].as_ref();
+                                let name = names[i];
                                 if let Some(value) = values.get(name) {
                                     composes_content += value;
                                 } else {
@@ -190,7 +190,7 @@ impl ExtractImports {
                         }
                     } else {
                         for i in 0..names.len() {
-                            let name = names[i].as_ref();
+                            let name = names[i];
                             composes_content += &serialize_identifier(name);
                             if i + 1 != names.len() {
                                 composes_content += " ";
@@ -219,7 +219,7 @@ impl ExtractImports {
                     }
                 }
                 Dependency::ICSSImportFrom { path } => {
-                    let path = path.as_ref().trim_matches(|c| c == '\'' || c == '"');
+                    let path = path.trim_matches(|c| c == '\'' || c == '"');
                     imports.insert(path.to_string(), LinkedHashMap::new());
                     add_import_to_graph(path, rule_index, &mut graph, &mut visited, &mut siblings);
                 }
@@ -840,11 +840,11 @@ fn valid_characters() {
                 i__imported_a__4: a_;
                 i__imported_b__5: b-;
                 i__imported_c___6: c--;
-                i__imported_d__7: d\%;
+                i__imported_d___7: d\\\%;
             }
             :local(.exportName) {
                 composes: i__imported_a_0 i__imported__b_1 i__imported___c_2 i__imported__d_3;
-                composes: i__imported_a__4 i__imported_b__5 i__imported_c___6 i__imported_d__7;
+                composes: i__imported_a__4 i__imported_b__5 i__imported_c___6 i__imported_d___7;
             }
         "#},
     );

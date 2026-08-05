@@ -44,7 +44,7 @@ impl LocalByDefault {
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range } => {
-                    if local_alias.contains(name.as_ref()) {
+                    if local_alias.contains(*name) {
                         continue;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
