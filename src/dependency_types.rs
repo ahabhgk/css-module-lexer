@@ -74,6 +74,46 @@ impl<T> DependencyListRange<T> {
     }
 }
 
+/// A typed index into one of [`DependencyContext`]'s side tables.
+///
+/// `T` identifies the target table without adding runtime storage. Keeping
+/// rare payloads behind an index prevents them from determining the size of
+/// every [`Dependency`] value.
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct DependencyIndex<T> {
+    index: u32,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Copy for DependencyIndex<T> {}
+
+impl<T> Clone for DependencyIndex<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> DependencyIndex<T> {
+    pub(crate) fn from_index(index: usize) -> Self {
+        assert!(
+            index <= u32::MAX as usize,
+            "dependency side table is too large"
+        );
+        Self {
+            index: index as u32,
+            marker: PhantomData,
+        }
+    }
+
+    pub(crate) fn as_usize(self) -> usize {
+        self.index as usize
+    }
+
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Mode {
     Local,
@@ -105,6 +145,39 @@ impl<'s> ValueAtRuleImportItem<'s> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct ImportAttributes<'s> {
+    layer: Option<&'s str>,
+    supports: Option<&'s str>,
+    media: Option<&'s str>,
+}
+
+impl<'s> ImportAttributes<'s> {
+    pub(crate) fn new(
+        layer: Option<&'s str>,
+        supports: Option<&'s str>,
+        media: Option<&'s str>,
+    ) -> Self {
+        Self {
+            layer,
+            supports,
+            media,
+        }
+    }
+
+    pub fn layer(&self) -> Option<&'s str> {
+        self.layer
+    }
+
+    pub fn supports(&self) -> Option<&'s str> {
+        self.supports
+    }
+
+    pub fn media(&self) -> Option<&'s str> {
+        self.media
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Dependency<'s> {
     Url {
@@ -115,9 +188,7 @@ pub enum Dependency<'s> {
     Import {
         request: &'s str,
         range: Range,
-        layer: Option<&'s str>,
-        supports: Option<&'s str>,
-        media: Option<&'s str>,
+        attributes: DependencyIndex<ImportAttributes<'s>>,
     },
     ICSSImportUrl {
         name: &'s str,
@@ -226,20 +297,22 @@ pub enum Dependency<'s> {
     },
 }
 
-/// Owns dependencies and the flat list payloads referenced by them.
+/// Owns dependencies and the side-table payloads referenced by them.
 ///
-/// `Dependency` values are intentionally cheap to move. Variable-length data
-/// is appended to a context vector and referenced through
-/// [`DependencyListRange`]. Consumers should traverse and resolve those ranges
-/// through this type rather than retaining raw list indices independently.
+/// `Dependency` values are intentionally cheap to move. Rare or variable-length
+/// data is appended to context vectors and referenced through [`DependencyIndex`]
+/// or [`DependencyListRange`]. Consumers should resolve those handles through
+/// this type rather than retaining raw indices independently.
 #[derive(Debug, Clone, Default)]
 pub struct DependencyContext<'s> {
     dependencies: Vec<Dependency<'s>>,
+    import_attributes: Vec<ImportAttributes<'s>>,
     composes_local_classes: Vec<&'s str>,
     composes_names: Vec<&'s str>,
     value_at_rule_import_items: Vec<ValueAtRuleImportItem<'s>>,
     // Rare side tables reserve lazily on first write so ordinary CSS only
     // pays for the dependency Vec while CSS Modules still avoids growth.
+    estimated_import_attributes: u16,
     estimated_composes_local_classes: u16,
     estimated_composes_names: u16,
     estimated_value_at_rule_import_items: u16,
@@ -262,6 +335,9 @@ impl<'s> DependencyContext<'s> {
         self.estimated_composes_local_classes = self
             .estimated_composes_local_classes
             .max(estimate.composes_local_classes);
+        self.estimated_import_attributes = self
+            .estimated_import_attributes
+            .max(estimate.import_attributes);
         self.estimated_composes_names = self.estimated_composes_names.max(estimate.composes_names);
         self.estimated_value_at_rule_import_items = self
             .estimated_value_at_rule_import_items
@@ -288,6 +364,13 @@ impl<'s> DependencyContext<'s> {
         &self.dependencies
     }
 
+    pub fn import_attributes(
+        &self,
+        index: DependencyIndex<ImportAttributes<'s>>,
+    ) -> &ImportAttributes<'s> {
+        &self.import_attributes[index.as_usize()]
+    }
+
     pub fn composes_local_classes(&self, range: DependencyListRange<&'s str>) -> &[&'s str] {
         &self.composes_local_classes[range.as_usize_range()]
     }
@@ -302,6 +385,28 @@ impl<'s> DependencyContext<'s> {
 
     pub(crate) fn push_dependency(&mut self, dependency: Dependency<'s>) {
         self.dependencies.push(dependency);
+    }
+
+    pub(crate) fn push_import(
+        &mut self,
+        request: &'s str,
+        range: Range,
+        layer: Option<&'s str>,
+        supports: Option<&'s str>,
+        media: Option<&'s str>,
+    ) {
+        if self.import_attributes.capacity() == 0 {
+            self.import_attributes
+                .reserve(self.estimated_import_attributes as usize);
+        }
+        let attributes = DependencyIndex::from_index(self.import_attributes.len());
+        self.import_attributes
+            .push(ImportAttributes::new(layer, supports, media));
+        self.dependencies.push(Dependency::Import {
+            request,
+            range,
+            attributes,
+        });
     }
 
     pub(crate) fn value_at_rule_import_items_len(&self) -> usize {
@@ -359,6 +464,7 @@ impl<'s> DependencyContext<'s> {
 impl PartialEq for DependencyContext<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.dependencies == other.dependencies
+            && self.import_attributes == other.import_attributes
             && self.composes_local_classes == other.composes_local_classes
             && self.composes_names == other.composes_names
             && self.value_at_rule_import_items == other.value_at_rule_import_items
@@ -370,6 +476,7 @@ impl Eq for DependencyContext<'_> {}
 impl Hash for DependencyContext<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.dependencies.hash(state);
+        self.import_attributes.hash(state);
         self.composes_local_classes.hash(state);
         self.composes_names.hash(state);
         self.value_at_rule_import_items.hash(state);
@@ -379,6 +486,7 @@ impl Hash for DependencyContext<'_> {
 #[derive(Debug, Clone, Copy, Default)]
 struct DependencyContextCapacity {
     dependencies: usize,
+    import_attributes: u16,
     composes_local_classes: u16,
     composes_names: u16,
     value_at_rule_import_items: u16,
@@ -392,6 +500,7 @@ impl DependencyContextCapacity {
             Mode::Css => 4096,
         };
         let dependencies = estimate_capacity(input_len, dependency_denominator, 4, 8192);
+        let import_attributes = estimate_capacity(input_len, 8192, 2, 1024);
         let (composes_local_classes, composes_names, value_at_rule_import_items) = match mode {
             Mode::Local | Mode::Pure => (
                 estimate_capacity(input_len, 640, 2, 4096),
@@ -407,6 +516,7 @@ impl DependencyContextCapacity {
         };
         Self {
             dependencies,
+            import_attributes: import_attributes as u16,
             composes_local_classes: composes_local_classes as u16,
             composes_names: composes_names as u16,
             value_at_rule_import_items: value_at_rule_import_items as u16,
@@ -524,7 +634,9 @@ impl Display for Warning<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::Dependency;
     use super::DependencyContextCapacity;
+    use super::ImportAttributes;
     use super::Mode;
     use crate::collect_dependencies;
 
@@ -536,12 +648,14 @@ mod tests {
         let (bootstrap, _) = collect_dependencies(BOOTSTRAP, Mode::Local);
         assert_eq!(bootstrap.composes_local_classes.capacity(), 0);
         assert_eq!(bootstrap.composes_names.capacity(), 0);
+        assert_eq!(bootstrap.import_attributes.capacity(), 0);
         assert_eq!(bootstrap.value_at_rule_import_items.capacity(), 0);
 
         for mode in [Mode::Local, Mode::Global, Mode::Pure] {
             let estimate = DependencyContextCapacity::estimate(RSPACK.len(), mode);
             let (context, _) = collect_dependencies(RSPACK, mode);
             assert!(context.dependencies.len() <= estimate.dependencies);
+            assert!(context.import_attributes.len() <= estimate.import_attributes as usize);
             assert!(
                 context.composes_local_classes.len() <= estimate.composes_local_classes as usize
             );
@@ -551,5 +665,12 @@ mod tests {
                     <= estimate.value_at_rule_import_items as usize
             );
         }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn dependency_keeps_rare_import_payload_out_of_hot_storage() {
+        assert_eq!(std::mem::size_of::<Dependency<'static>>(), 48);
+        assert_eq!(std::mem::size_of::<ImportAttributes<'static>>(), 48);
     }
 }

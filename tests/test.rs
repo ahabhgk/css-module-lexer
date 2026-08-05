@@ -4,6 +4,7 @@ use css_module_lexer::collect_dependencies;
 use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::DependencyContext;
+use css_module_lexer::ImportAttributes;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::ModeData;
@@ -41,30 +42,37 @@ fn assert_url_dependency(
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
 }
 
+type ResolvedImport<'context, 's> = (&'s str, &'context Range, &'context ImportAttributes<'s>);
+
 fn assert_import_dependency(
     input: &str,
-    dependency: &Dependency,
+    (actual_request, range, attributes): ResolvedImport<'_, '_>,
     request: &str,
     layer: Option<&str>,
     supports: Option<&str>,
     media: Option<&str>,
     range_content: &str,
 ) {
+    assert_eq!(actual_request, request);
+    assert_eq!(attributes.layer(), layer);
+    assert_eq!(attributes.supports(), supports);
+    assert_eq!(attributes.media(), media);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
+fn import_dependency<'context, 's>(
+    context: &'context DependencyContext<'s>,
+    dependency_index: usize,
+) -> ResolvedImport<'context, 's> {
     let Dependency::Import {
-        request: actual_request,
+        request,
         range,
-        layer: actual_layer,
-        supports: actual_supports,
-        media: actual_media,
-    } = dependency
+        attributes,
+    } = &context[dependency_index]
     else {
         panic!("unexpected dependency");
     };
-    assert_eq!(*actual_request, request);
-    assert_eq!(*actual_layer, layer);
-    assert_eq!(*actual_supports, supports);
-    assert_eq!(*actual_media, media);
-    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    (*request, range, context.import_attributes(*attributes))
 }
 
 fn assert_icss_import_url_dependency(
@@ -486,7 +494,7 @@ fn dependency_urls_and_imports_preserve_css_escapes() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         r"theme\20 dark.css",
         None,
         None,
@@ -771,7 +779,7 @@ fn import_url_function_is_not_icss_import_url_value() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "./style.css",
         None,
         None,
@@ -789,7 +797,7 @@ fn selector_after_import_uses_selector_scan_context() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "./style.css",
         None,
         None,
@@ -885,7 +893,7 @@ fn empty_url() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "",
         None,
         None,
@@ -894,7 +902,7 @@ fn empty_url() {
     );
     assert_import_dependency(
         input,
-        &dependencies[1],
+        import_dependency(&dependencies, 1),
         "",
         None,
         None,
@@ -932,7 +940,7 @@ fn import() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         r"https://example\2f4a8f.com\
 /style.css",
         None,
@@ -942,7 +950,7 @@ fn import() {
     );
     assert_import_dependency(
         input,
-        &dependencies[1],
+        import_dependency(&dependencies, 1),
         r"https://example\2f4a8f.com\
 /style.css",
         None,
@@ -952,7 +960,7 @@ fn import() {
     );
     assert_import_dependency(
         input,
-        &dependencies[2],
+        import_dependency(&dependencies, 2),
         r"https://example\2f4a8f.com\
 /style.css",
         None,
@@ -970,7 +978,7 @@ fn unexpected_semicolon_in_supports() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "style.css",
         None,
         None,
@@ -1017,7 +1025,7 @@ fn import_media() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "style.css",
         None,
         None,
@@ -1040,7 +1048,7 @@ fn import_attributes() {
     assert!(warnings.is_empty());
     assert_import_dependency(
         input,
-        &dependencies[0],
+        import_dependency(&dependencies, 0),
         "style.css",
         Some(""),
         None,
@@ -1049,7 +1057,7 @@ fn import_attributes() {
     );
     assert_import_dependency(
         input,
-        &dependencies[1],
+        import_dependency(&dependencies, 1),
         "style.css",
         None,
         Some(""),
@@ -1058,7 +1066,7 @@ fn import_attributes() {
     );
     assert_import_dependency(
         input,
-        &dependencies[2],
+        import_dependency(&dependencies, 2),
         "style.css",
         None,
         None,
@@ -1067,7 +1075,7 @@ fn import_attributes() {
     );
     assert_import_dependency(
         input,
-        &dependencies[3],
+        import_dependency(&dependencies, 3),
         "style.css",
         Some(""),
         Some(""),
@@ -1076,7 +1084,7 @@ fn import_attributes() {
     );
     assert_import_dependency(
         input,
-        &dependencies[4],
+        import_dependency(&dependencies, 4),
         "style.css",
         Some("default"),
         Some("not (display: grid) and (display: flex)"),
@@ -1085,7 +1093,7 @@ fn import_attributes() {
     );
     assert_import_dependency(
         input,
-        &dependencies[5],
+        import_dependency(&dependencies, 5),
         "style.css",
         Some("DEFAULT"),
         Some("DISPLAY: FLEX"),

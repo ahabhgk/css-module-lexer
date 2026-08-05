@@ -3127,13 +3127,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     .unwrap_or(url_range)
                     .end;
                 let media = self.get_media(lexer, last_end, start);
-                self.dependency_context.push_dependency(Dependency::Import {
-                    request: url,
-                    range: Range::new(import_data.start, end),
+                self.dependency_context.push_import(
+                    url,
+                    Range::new(import_data.start, end),
                     layer,
                     supports,
                     media,
-                });
+                );
                 self.scope = Scope::TopLevel;
             }
             Scope::AtImportInvalid | Scope::AtNamespaceInvalid => {
