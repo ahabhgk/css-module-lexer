@@ -1609,6 +1609,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         property: PropertyKind,
     ) {
+        // An animation name may be any top-level identifier, so the raw
+        // scanner usually stops immediately. Continue tokenizing directly.
+        if property == PropertyKind::Animation {
+            return;
+        }
         let preserve_strings = property == PropertyKind::Grid
             || matches!(
                 self.balanced.last(),
@@ -1619,18 +1624,17 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             KEEP_COMMENTS,
             preserve_strings,
             preserve_delimiters,
-            property == PropertyKind::Animation,
             |ident| {
                 if self.contains_icss_symbol(ident) {
                     return true;
                 }
                 match property {
-                    PropertyKind::Animation => true,
                     PropertyKind::ListStyle => ListStyleReserved.check(ident),
                     PropertyKind::FontPalette => ident.starts_with("--"),
                     PropertyKind::Container => ContainerReserved.check(ident),
                     PropertyKind::Grid => !is_reserved_grid_ident(ident),
-                    PropertyKind::Generic
+                    PropertyKind::Animation
+                    | PropertyKind::Generic
                     | PropertyKind::Composes
                     | PropertyKind::CustomProperty => false,
                 }

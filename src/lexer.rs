@@ -1544,7 +1544,6 @@ impl<'a, 's> TokenStream<'a, 's> {
         keep_comments: bool,
         preserve_strings: bool,
         preserve_delimiters: bool,
-        preserve_top_level_comma: bool,
         mut is_candidate: F,
         mut is_comment_candidate: C,
     ) where
@@ -1561,7 +1560,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 preserve_strings,
                 preserve_delimiters,
                 stop_at_top_level_left_curly: false,
-                stop_at_top_level_comma: preserve_top_level_comma,
+                stop_at_top_level_comma: false,
             },
             &mut is_candidate,
             &mut is_comment_candidate,
