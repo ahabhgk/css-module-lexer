@@ -1495,21 +1495,41 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 return;
             }
 
+            if self.scan_context == ScanContext::TopLevel
+                && self.is_next_rule_prelude
+                && token.kind != TokenKind::AtKeyword
+            {
+                self.scan_context = ScanContext::Selector;
+            }
+
             let is_trivia = matches!(token.kind, TokenKind::Comment | TokenKind::BadComment);
             let mut colon_mode_lookahead = None;
             let mut colon_next = None;
             let mut dot_next = None;
-            if HAS_MODE && token.kind == TokenKind::Colon {
+            // Declaration and value contexts must not pre-tokenize their
+            // contents: doing so fills the lookahead buffer and disables value
+            // fast-forwarding.
+            let is_pseudo_context = matches!(
+                self.scan_context,
+                ScanContext::Selector | ScanContext::TopLevel
+            );
+            if HAS_MODE && is_pseudo_context && token.kind == TokenKind::Colon {
                 let first = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
                 if first.token.kind != TokenKind::Eof {
                     colon_next = Some(first);
                     if first.token.kind == TokenKind::Ident {
-                        let (second, has_whitespace) =
-                            stream.peek_after_non_comment::<KEEP_COMMENTS>();
-                        colon_mode_lookahead = Some((first, second, has_whitespace));
+                        let name =
+                            stream.slice_trusted(first.token.range.start, first.token.range.end);
+                        if name.eq_ignore_ascii_case("local") || name.eq_ignore_ascii_case("global")
+                        {
+                            let (second, has_whitespace) =
+                                stream.peek_after_non_comment::<KEEP_COMMENTS>();
+                            colon_mode_lookahead = Some((first, second, has_whitespace));
+                        }
                     }
                 }
             } else if HAS_MODE
+                && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Delim
                 && stream.lexer().byte_at(token.range.start) == Some(b'.')
             {
@@ -1537,7 +1557,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     .unwrap_or(false);
                 dot_selector = Some(selector);
             }
-            if !is_trivia && token.kind == TokenKind::Colon {
+            if !is_trivia && is_pseudo_context && token.kind == TokenKind::Colon {
                 let skipped_trivia_has_whitespace = stream
                     .slice(self.stream_previous_end, token.range.start)
                     .is_some_and(|input| {
@@ -1657,47 +1677,52 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         history_sync_end = class_end;
                     }
                 }
+                TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
+                    // A declaration colon cannot start a selector pseudo. Do
+                    // not look ahead; switch contexts and let the value fast
+                    // path start immediately with an empty token buffer.
+                    self.set_value_scan_context();
+                }
                 TokenKind::Colon if !HAS_MODE => {}
                 TokenKind::Colon => {
-                    let Some(next) = colon_next else {
-                        if self.scan_context == ScanContext::DeclarationName {
-                            self.set_value_scan_context();
-                        }
-                        self.update_stream_history(stream.lexer(), token, token.range.end);
-                        continue;
-                    };
-                    let (end, function) =
-                        (next.token.range.end, next.token.kind == TokenKind::Function);
-                    if !colon_selector.unwrap_or(false) {
-                        if self.scan_context == ScanContext::DeclarationName {
-                            self.set_value_scan_context();
-                        }
-                        self.update_stream_history(stream.lexer(), token, token.range.end);
-                        continue;
+                    if colon_selector.unwrap_or(false) {
+                        let next = colon_next.expect("selector colon lookahead");
+                        let (end, function) =
+                            (next.token.range.end, next.token.kind == TokenKind::Function);
+                        self.stream_pseudo_should_have_after = Some(
+                            self.stream_previous_kind.is_none()
+                                || self.stream_previous_kind.is_some_and(|previous| {
+                                    matches!(
+                                        previous,
+                                        TokenKind::Function
+                                            | TokenKind::LeftParenthesis
+                                            | TokenKind::Comma
+                                            | TokenKind::Semicolon
+                                            | TokenKind::LeftCurlyBracket
+                                            | TokenKind::RightCurlyBracket
+                                    )
+                                })
+                                || self.stream_previous_ends_with_separator
+                                || self.stream_current_has_whitespace,
+                        );
+                        stream.next::<KEEP_COMMENTS>();
+                        result = if function {
+                            self.handle_pseudo_function(
+                                stream,
+                                token.range.start,
+                                end,
+                                next.token.flags,
+                            )
+                        } else {
+                            self.handle_pseudo_class(
+                                stream,
+                                token.range.start,
+                                end,
+                                next.token.flags,
+                            )
+                        };
+                        history_sync_end = stream.consumed_pos();
                     }
-                    self.stream_pseudo_should_have_after = Some(
-                        self.stream_previous_kind.is_none()
-                            || self.stream_previous_kind.is_some_and(|previous| {
-                                matches!(
-                                    previous,
-                                    TokenKind::Function
-                                        | TokenKind::LeftParenthesis
-                                        | TokenKind::Comma
-                                        | TokenKind::Semicolon
-                                        | TokenKind::LeftCurlyBracket
-                                        | TokenKind::RightCurlyBracket
-                                )
-                            })
-                            || self.stream_previous_ends_with_separator
-                            || self.stream_current_has_whitespace,
-                    );
-                    stream.next::<KEEP_COMMENTS>();
-                    result = if function {
-                        self.handle_pseudo_function(stream, token.range.start, end, next.token.flags)
-                    } else {
-                        self.handle_pseudo_class(stream, token.range.start, end, next.token.flags)
-                    };
-                    history_sync_end = stream.consumed_pos();
                 }
                 TokenKind::LeftParenthesis => {
                     result = self.handle_left_parenthesis(
@@ -1743,6 +1768,10 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
             if result.is_none() {
                 return;
+            }
+            if token.kind == TokenKind::Semicolon && matches!(self.scope, Scope::TopLevel) {
+                self.scan_context = ScanContext::TopLevel;
+                self.is_next_rule_prelude = true;
             }
             if !is_trivia {
                 self.update_stream_history(stream.lexer(), token, history_sync_end);
@@ -3168,11 +3197,15 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             self.scope = Scope::InAtImport(ImportData::new(start));
         } else if name.eq_ignore_ascii_case("@charset") {
             self.lex_charset_at_rule(stream, start)?;
+            self.scan_context = ScanContext::TopLevel;
+            self.is_next_rule_prelude = true;
         } else if self.mode_data.is_some() {
             let mut can_contain_rules = true;
             if name.eq_ignore_ascii_case("@value") {
                 self.lex_value_at_rule(stream, start)?;
                 can_contain_rules = false;
+                self.scan_context = ScanContext::TopLevel;
+                self.is_next_rule_prelude = true;
             } else if name.eq_ignore_ascii_case("@keyframes")
                 || with_vendor_prefixed_eq(name, "keyframes", true)
             {
@@ -3219,6 +3252,9 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 )?;
             } else {
                 self.is_next_rule_prelude = name.eq_ignore_ascii_case("@scope");
+                if self.is_next_rule_prelude {
+                    self.scan_context = ScanContext::Selector;
+                }
             }
 
             let mode_data = self.mode_data.as_mut().unwrap();

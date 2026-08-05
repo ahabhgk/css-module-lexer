@@ -766,6 +766,25 @@ fn import_url_function_is_not_icss_import_url_value() {
 }
 
 #[test]
+fn selector_after_import_uses_selector_scan_context() {
+    let input = r#"@import "./style.css"; .after {}"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "./style.css",
+        None,
+        None,
+        None,
+        r#"@import "./style.css";"#,
+    );
+    assert_local_class_dependency(input, &dependencies[1], ".after", false);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
 fn not_preceded_at_import() {
     let input = indoc! {r#"
         body {}
@@ -1203,7 +1222,7 @@ const RSPACK_NESTED_COMMENT_SEPARATED_MODES: &str = r#"
 "#;
 
 #[test]
-fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
+fn rspack_nested_comment_separated_modes_only_scan_selector_context() {
     let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
     let (dependencies, _) = collect_dependencies(input, Mode::Local);
 
@@ -1215,15 +1234,7 @@ fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        local_dependencies,
-        [
-            (".no-space", false),
-            (".class", true),
-            (".class", true),
-            ("#hash", true),
-        ]
-    );
+    assert_eq!(local_dependencies, [(".no-space", false)]);
 
     let replacements = dependencies
         .iter()
@@ -1232,34 +1243,24 @@ fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        replacements,
-        [":global", ":global", ":local", ":local", ":local", ":local",]
-    );
+    assert_eq!(replacements, [":global"]);
 }
 
 #[test]
-fn rspack_nested_comment_separated_modes_warn_in_source_order() {
+fn rspack_nested_comment_separated_modes_only_warn_in_selector_context() {
     let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
     let (_, warnings) = collect_dependencies(input, Mode::Local);
 
     assert_eq!(
         warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        [
-            "Missing trailing whitespace",
-            "Missing trailing whitespace",
-            "Missing trailing whitespace",
-            "Missing trailing whitespace",
-            "Missing trailing whitespace",
-            "Missing trailing whitespace",
-        ]
+        ["Missing trailing whitespace"]
     );
     assert_eq!(
         warnings
             .iter()
             .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
             .collect::<Vec<_>>(),
-        [":global", ":global", ":local", ":local", ":local", ":local"]
+        [":global"]
     );
 }
 
@@ -1281,21 +1282,29 @@ fn missing_whitespace_mode_dependencies_are_emitted_by_the_main_lexer() {
 }
 
 #[test]
-fn missing_whitespace_mode_dependencies_preserve_token_order() {
+fn mode_pseudo_syntax_in_declaration_value_is_not_scanned_as_selector() {
     for input in [
         ".before { custom: :local/** comment **/.value; } .after {}",
         ".before { custom: :local/** comment **/.value } .after {}",
     ] {
         let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
 
-        assert_eq!(warnings.len(), 1);
-        assert_warning(input, &warnings[0], ":local");
+        assert!(warnings.is_empty());
         assert_local_class_dependency(input, &dependencies[0], ".before", false);
-        assert_replace_dependency(input, &dependencies[1], "", ":local");
-        assert_local_class_dependency(input, &dependencies[2], ".value", true);
-        assert_local_class_dependency(input, &dependencies[3], ".after", false);
-        assert_eq!(dependencies.len(), 4);
+        assert_local_class_dependency(input, &dependencies[1], ".after", false);
+        assert_eq!(dependencies.len(), 2);
     }
+}
+
+#[test]
+fn comment_separated_declaration_value_is_not_scanned_as_selector() {
+    let input = ".before { color: /* comment */ red; } .after {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".before", false);
+    assert_local_class_dependency(input, &dependencies[1], ".after", false);
+    assert_eq!(dependencies.len(), 2);
 }
 
 #[test]
