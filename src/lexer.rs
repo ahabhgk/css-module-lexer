@@ -233,12 +233,14 @@ impl<'s> Lexer<'s> {
         options: GenericValueScanOptions,
         mut is_candidate: F,
         mut is_comment_candidate: C,
-    ) where
+    ) -> Option<PrescannedIdent>
+    where
         F: FnMut(&str) -> bool,
         C: FnMut(&str) -> bool,
     {
         let mut position = self.scan_pos as usize;
         let scan_start = position;
+        let mut candidate_token = None;
         while position < self.value.len() {
             let byte = self.value[position];
             if is_white_space(byte) {
@@ -284,11 +286,20 @@ impl<'s> Lexer<'s> {
                 }
                 let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
                 let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
+                let is_candidate = !flags.has_escape() && is_candidate(name);
                 if flags.has_escape()
-                    || is_candidate(name)
+                    || is_candidate
                     || (is_function && is_dependency_value_function(name))
                     || (is_function && options.preserve_delimiters)
                 {
+                    if is_candidate && !is_function && flags.is_ascii() && !flags.has_null() {
+                        candidate_token = Some(PrescannedIdent {
+                            start: position as Pos,
+                            end: end as Pos,
+                            flags,
+                        });
+                        position = end;
+                    }
                     break;
                 }
                 if is_function {
@@ -374,6 +385,7 @@ impl<'s> Lexer<'s> {
             self.scan_pos >= scan_start as Pos,
             "fast_forward moved scan_pos backward from {scan_start} to {position}"
         );
+        candidate_token
     }
 
     /// Skip selector text that cannot produce a CSS Modules dependency.
@@ -1306,6 +1318,13 @@ struct GenericValueScanOptions {
     preserve_delimiters: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PrescannedIdent {
+    start: Pos,
+    end: Pos,
+    flags: TokenFlags,
+}
+
 impl GenericValueScanState {
     #[inline]
     fn is_nested(&self) -> bool {
@@ -1490,7 +1509,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
             &mut self.generic_value_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1500,7 +1519,7 @@ impl<'a, 's> TokenStream<'a, 's> {
             &mut is_candidate,
             &mut is_comment_candidate,
         );
-        self.consumed = self.lexer.scan_pos();
+        self.finish_value_fast_forward(candidate);
     }
 
     #[inline]
@@ -1512,7 +1531,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
             &mut self.generic_value_state,
             GenericValueScanOptions {
                 keep_comments: false,
@@ -1522,7 +1541,7 @@ impl<'a, 's> TokenStream<'a, 's> {
             never_fast_forward_candidate,
             never_fast_forward_candidate,
         );
-        self.consumed = self.lexer.scan_pos();
+        self.finish_value_fast_forward(candidate);
     }
 
     #[inline]
@@ -1540,7 +1559,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value::<true, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value::<true, _, _>(
             &mut self.at_rule_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1550,7 +1569,7 @@ impl<'a, 's> TokenStream<'a, 's> {
             &mut is_candidate,
             &mut is_comment_candidate,
         );
-        self.consumed = self.lexer.scan_pos();
+        self.finish_value_fast_forward(candidate);
     }
 
     #[inline]
@@ -1573,7 +1592,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
             &mut self.special_value_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1583,7 +1602,27 @@ impl<'a, 's> TokenStream<'a, 's> {
             &mut is_candidate,
             &mut is_comment_candidate,
         );
-        self.consumed = self.lexer.scan_pos();
+        self.finish_value_fast_forward(candidate);
+    }
+
+    #[inline]
+    fn finish_value_fast_forward(&mut self, candidate: Option<PrescannedIdent>) {
+        let Some(candidate) = candidate else {
+            self.consumed = self.lexer.scan_pos();
+            return;
+        };
+        debug_assert_eq!(candidate.end, self.lexer.scan_pos());
+        self.consumed = candidate.start;
+        let range = Range::new(candidate.start, candidate.end);
+        self.buffered.push_back(TokenWithTrivia {
+            token: Token::with_flags(TokenKind::Ident, range, range, candidate.flags),
+            leading: Trivia {
+                range: Range::new(candidate.start, candidate.start),
+                end: candidate.start,
+                first_comment_start: None,
+                has_white_space: false,
+            },
+        });
     }
 
     #[inline]
@@ -2072,5 +2111,29 @@ mod tests {
         assert_eq!(stream.byte_at(stream.consumed_pos()), Some(b';'));
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Semicolon);
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn generic_value_fast_forward_buffers_plain_ascii_candidate_once() {
+        let input = "red imported blue;";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+
+        assert_eq!(stream.consumed_pos(), stream.lexer().scan_pos());
+        stream.fast_forward_if_buffer_empty(
+            false,
+            false,
+            false,
+            |ident| ident == "imported",
+            |_| false,
+        );
+        assert_eq!(stream.consumed_pos(), 4);
+        assert_eq!(stream.lexer().scan_pos(), 12);
+
+        let candidate = stream.next::<false>().token;
+        assert_eq!(candidate.kind, TokenKind::Ident);
+        assert_eq!(candidate.range, Range::new(4, 12));
+        assert_eq!(stream.consumed_pos(), 12);
+        assert_eq!(stream.lexer().scan_pos(), 12);
     }
 }
