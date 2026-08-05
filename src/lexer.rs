@@ -227,12 +227,10 @@ impl<'s> Lexer<'s> {
     /// manufacturing tokens, and the scanner stops before dependency-bearing
     /// functions, ICSS symbols, selector-independent magic comments, or a
     /// declaration boundary.
-    pub(crate) fn fast_forward_generic_value<F, C>(
+    fn fast_forward_generic_value<F, C>(
         &mut self,
         state: &mut GenericValueScanState,
-        keep_comments: bool,
-        preserve_strings: bool,
-        preserve_delimiters: bool,
+        options: GenericValueScanOptions,
         mut is_candidate: F,
         mut is_comment_candidate: C,
     ) where
@@ -250,7 +248,7 @@ impl<'s> Lexer<'s> {
 
             if byte == C_SOLIDUS && self.value.get(position + 1) == Some(&C_ASTERISK) {
                 let (kind, end, _, _, _) = self.scan_comment(position);
-                if keep_comments && kind == TokenKind::Comment {
+                if options.keep_comments && kind == TokenKind::Comment {
                     let content = &self.value[position + 2..end.saturating_sub(2)];
                     let mut first = 0usize;
                     while content.get(first).is_some_and(|byte| is_white_space(*byte)) {
@@ -268,7 +266,7 @@ impl<'s> Lexer<'s> {
             }
 
             if matches!(byte, C_QUOTATION_MARK | C_APOSTROPHE) {
-                if preserve_strings {
+                if options.preserve_strings {
                     break;
                 }
                 position = self.scan_string(position, byte).1;
@@ -289,7 +287,7 @@ impl<'s> Lexer<'s> {
                 if flags.has_escape()
                     || is_candidate(name)
                     || (is_function && is_dependency_value_function(name))
-                    || (is_function && preserve_delimiters)
+                    || (is_function && options.preserve_delimiters)
                 {
                     break;
                 }
@@ -327,45 +325,47 @@ impl<'s> Lexer<'s> {
                     };
                 }
                 C_LEFT_PARENTHESIS => {
-                    if preserve_delimiters {
+                    if options.preserve_delimiters {
                         break;
                     }
                     state.parentheses += 1;
                     position += 1;
                 }
                 C_RIGHT_PARENTHESIS => {
-                    if preserve_delimiters {
+                    if options.preserve_delimiters {
                         break;
                     }
                     state.parentheses = state.parentheses.saturating_sub(1);
                     position += 1;
                 }
                 C_LEFT_SQUARE => {
-                    if preserve_delimiters {
+                    if options.preserve_delimiters {
                         break;
                     }
                     state.squares += 1;
                     position += 1;
                 }
                 C_RIGHT_SQUARE => {
-                    if preserve_delimiters {
+                    if options.preserve_delimiters {
                         break;
                     }
                     state.squares = state.squares.saturating_sub(1);
                     position += 1;
                 }
+                C_LEFT_CURLY if options.stop_at_top_level_left_curly && !state.is_nested() => break,
                 C_LEFT_CURLY => {
-                    if preserve_delimiters {
+                    if options.preserve_delimiters {
                         break;
                     }
                     state.curlies += 1;
                     position += 1;
                 }
-                C_RIGHT_CURLY if state.curlies > 0 && !preserve_delimiters => {
+                C_RIGHT_CURLY if state.curlies > 0 && !options.preserve_delimiters => {
                     state.curlies -= 1;
                     position += 1;
                 }
                 C_RIGHT_CURLY => break,
+                C_COMMA if options.stop_at_top_level_comma && !state.is_nested() => break,
                 C_SEMICOLON if !state.is_nested() => break,
                 _ => position += 1,
             }
@@ -375,6 +375,152 @@ impl<'s> Lexer<'s> {
             self.scan_pos >= scan_start as Pos,
             "fast_forward moved scan_pos backward from {scan_start} to {position}"
         );
+    }
+
+    /// Skip selector text that cannot produce a CSS Modules dependency.
+    /// Attribute selectors remain opaque across calls through `square_depth`;
+    /// the scanner stops before dependency candidates and structural tokens so
+    /// the normal token stream remains the sole owner of parser state changes.
+    pub(crate) fn fast_forward_selector<C>(
+        &mut self,
+        square_depth: &mut u32,
+        keep_comments: bool,
+        has_mode: bool,
+        mut is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
+        let mut position = self.scan_pos as usize;
+        let scan_start = position;
+        let mut invalidates_composes = false;
+        let mut trivia_start = None;
+
+        while position < self.value.len() {
+            let byte = self.value[position];
+
+            if is_white_space(byte) {
+                trivia_start.get_or_insert(position);
+                position += 1;
+                continue;
+            }
+
+            if byte == C_SOLIDUS && self.value.get(position + 1) == Some(&C_ASTERISK) {
+                let (kind, end, _, _, _) = self.scan_comment(position);
+                if keep_comments && kind == TokenKind::Comment {
+                    let content = &self.value[position + 2..end.saturating_sub(2)];
+                    // SAFETY: comments are slices of the original UTF-8 input.
+                    let content = unsafe { str::from_utf8_unchecked(content) };
+                    if is_comment_candidate(content) {
+                        break;
+                    }
+                }
+                trivia_start.get_or_insert(position);
+                position = end;
+                continue;
+            }
+
+            if *square_depth > 0 {
+                match byte {
+                    C_QUOTATION_MARK | C_APOSTROPHE => {
+                        position = self.scan_string(position, byte).1;
+                    }
+                    C_LEFT_SQUARE => {
+                        *square_depth += 1;
+                        position += 1;
+                    }
+                    C_RIGHT_SQUARE => {
+                        *square_depth -= 1;
+                        position += 1;
+                    }
+                    _ => position += 1,
+                }
+                trivia_start = None;
+                continue;
+            }
+
+            let starts_ident = match byte {
+                C_HYPHEN_MINUS | C_REVERSE_SOLIDUS => self.starts_ident_at(position),
+                _ => is_name_start_byte(byte),
+            };
+            if starts_ident {
+                let end = self.scan_name(position);
+                if end == position {
+                    break;
+                }
+                // Functions own balanced-stack state in the dependency
+                // scanner. In particular, `url()` and `image-set()` can
+                // produce dependencies even when invalid CSS made them
+                // appear while recovering from a selector. Leave the name
+                // to the regular tokenizer so it can emit `Function`.
+                if self.value.get(end) == Some(&C_LEFT_PARENTHESIS) {
+                    break;
+                }
+                invalidates_composes = true;
+                trivia_start = None;
+                position = end;
+                continue;
+            }
+
+            let starts_number = match byte {
+                b'0'..=b'9' => true,
+                C_PLUS_SIGN | C_HYPHEN_MINUS | C_FULL_STOP => self.starts_number_at(position),
+                _ => false,
+            };
+            if starts_number {
+                invalidates_composes = true;
+                trivia_start = None;
+                position = self.scan_numeric(position).1;
+                continue;
+            }
+
+            match byte {
+                C_LEFT_SQUARE => {
+                    invalidates_composes = true;
+                    *square_depth = 1;
+                    trivia_start = None;
+                    position += 1;
+                }
+                // Outside an attribute selector a string may belong to
+                // `url()` or `image-set()`, whose balanced-stack kind decides
+                // whether it creates a dependency.
+                C_QUOTATION_MARK | C_APOSTROPHE => break,
+                C_FULL_STOP | C_NUMBER_SIGN | C_COLON if has_mode => break,
+                C_NUMBER_SIGN => {
+                    let name_start = position + 1;
+                    position = if self.starts_ident_at(name_start)
+                        || self
+                            .value
+                            .get(name_start)
+                            .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                    {
+                        self.scan_name(name_start)
+                    } else {
+                        name_start
+                    };
+                    invalidates_composes = true;
+                    trivia_start = None;
+                }
+                C_RIGHT_PARENTHESIS => {
+                    position = trivia_start.unwrap_or(position);
+                    break;
+                }
+                C_LEFT_PARENTHESIS | C_LEFT_CURLY | C_RIGHT_CURLY | C_COMMA | C_SEMICOLON
+                | C_AT_SIGN => break,
+                _ => {
+                    invalidates_composes = true;
+                    trivia_start = None;
+                    position += 1;
+                }
+            }
+        }
+
+        self.scan_pos = position as Pos;
+        debug_assert!(
+            self.scan_pos >= scan_start as Pos,
+            "selector fast-forward moved scan_pos backward from {scan_start} to {position}"
+        );
+        invalidates_composes
     }
 
     pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
@@ -975,19 +1121,25 @@ impl<'s> Lexer<'s> {
 
     #[inline]
     fn scan_name(&self, position: usize) -> usize {
-        self.scan_name_with_flags(position).0
+        self.scan_name_impl::<false>(position).0
     }
 
     #[inline]
-    fn scan_name_with_flags(&self, mut position: usize) -> (usize, TokenFlags) {
+    fn scan_name_with_flags(&self, position: usize) -> (usize, TokenFlags) {
+        self.scan_name_impl::<true>(position)
+    }
+
+    #[inline]
+    fn scan_name_impl<const TRACK_FLAGS: bool>(&self, mut position: usize) -> (usize, TokenFlags) {
         let bytes = self.value;
         let mut flags = TokenFlags::ascii();
         while position < bytes.len() {
-            let ascii_start = position;
             while position < bytes.len() {
                 let byte = bytes[position];
                 if byte == 0 {
-                    flags.mark_null();
+                    if TRACK_FLAGS {
+                        flags.mark_null();
+                    }
                     position += 1;
                 } else if byte.is_ascii_alphanumeric()
                     || matches!(byte, C_LOW_LINE | C_HYPHEN_MINUS)
@@ -997,16 +1149,18 @@ impl<'s> Lexer<'s> {
                     break;
                 }
             }
-            if position != ascii_start {
-                continue;
+            if position == bytes.len() {
+                break;
             }
 
             let byte = bytes[position];
             if byte == C_REVERSE_SOLIDUS {
                 if self.is_valid_escape_at(position) {
-                    flags.mark_escape();
-                    if bytes.get(position + 1).is_some_and(|next| !next.is_ascii()) {
-                        flags.mark_non_ascii();
+                    if TRACK_FLAGS {
+                        flags.mark_escape();
+                        if bytes.get(position + 1).is_some_and(|next| !next.is_ascii()) {
+                            flags.mark_non_ascii();
+                        }
                     }
                     position = self.scan_escape(position);
                 } else {
@@ -1015,7 +1169,9 @@ impl<'s> Lexer<'s> {
             } else if byte.is_ascii() {
                 break;
             } else {
-                flags.mark_non_ascii();
+                if TRACK_FLAGS {
+                    flags.mark_non_ascii();
+                }
                 position += self.utf8_width_at(position);
             }
         }
@@ -1133,6 +1289,8 @@ pub(crate) struct TokenStream<'a, 's> {
     consumed: Pos,
     buffered: VecDeque<TokenWithTrivia>,
     generic_value_state: GenericValueScanState,
+    at_rule_state: GenericValueScanState,
+    special_value_state: GenericValueScanState,
 }
 
 #[derive(Debug, Default)]
@@ -1140,6 +1298,15 @@ pub(crate) struct GenericValueScanState {
     parentheses: u32,
     squares: u32,
     curlies: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GenericValueScanOptions {
+    keep_comments: bool,
+    preserve_strings: bool,
+    preserve_delimiters: bool,
+    stop_at_top_level_left_curly: bool,
+    stop_at_top_level_comma: bool,
 }
 
 impl GenericValueScanState {
@@ -1170,6 +1337,8 @@ impl<'a, 's> TokenStream<'a, 's> {
             consumed: 0,
             buffered: VecDeque::new(),
             generic_value_state: GenericValueScanState::default(),
+            at_rule_state: GenericValueScanState::default(),
+            special_value_state: GenericValueScanState::default(),
         }
     }
 
@@ -1321,13 +1490,148 @@ impl<'a, 's> TokenStream<'a, 's> {
         }
         self.lexer.fast_forward_generic_value(
             &mut self.generic_value_state,
-            keep_comments,
-            preserve_strings,
-            preserve_delimiters,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                stop_at_top_level_left_curly: false,
+                stop_at_top_level_comma: false,
+            },
             &mut is_candidate,
             &mut is_comment_candidate,
         );
         self.consumed = self.lexer.scan_pos();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_at_rule_if_buffer_empty<F, C>(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        self.lexer.fast_forward_generic_value(
+            &mut self.at_rule_state,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                stop_at_top_level_left_curly: true,
+                stop_at_top_level_comma: false,
+            },
+            &mut is_candidate,
+            &mut is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
+    }
+
+    #[inline]
+    pub(crate) fn reset_at_rule_scan_state(&mut self) {
+        self.at_rule_state = GenericValueScanState::default();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_special_value_if_buffer_empty<F, C>(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        preserve_top_level_comma: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        self.lexer.fast_forward_generic_value(
+            &mut self.special_value_state,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                stop_at_top_level_left_curly: false,
+                stop_at_top_level_comma: preserve_top_level_comma,
+            },
+            &mut is_candidate,
+            &mut is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
+    }
+
+    #[inline]
+    pub(crate) fn reset_special_value_scan_state(&mut self) {
+        self.special_value_state = GenericValueScanState::default();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_selector_if_buffer_empty<C>(
+        &mut self,
+        square_depth: &mut u32,
+        keep_comments: bool,
+        has_mode: bool,
+        is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return false;
+        }
+        if *square_depth == 0 {
+            let scan_pos = self.lexer.scan_pos();
+            let Some(next) = self.lexer.byte_at(scan_pos) else {
+                return false;
+            };
+            if matches!(
+                next,
+                b'"' | b'\'' | b'(' | b')' | b'{' | b'}' | b',' | b';' | b'@'
+            ) || (has_mode && matches!(next, b'.' | b'#' | b':'))
+            {
+                return false;
+            }
+
+            // A raw scan has a fixed call/setup cost. Keep short, dense
+            // selector fragments on the regular tokenizer path and only
+            // enter the scanner when it can skip a useful run. Comments and
+            // attributes are exceptions because their contents are opaque.
+            let mut probe = scan_pos;
+            while probe - scan_pos < 4 {
+                let Some(byte) = self.lexer.byte_at(probe) else {
+                    return false;
+                };
+                if matches!(byte, b'/' | b'[') {
+                    break;
+                }
+                if probe != scan_pos
+                    && (matches!(
+                        byte,
+                        b'"' | b'\'' | b'(' | b')' | b'{' | b'}' | b',' | b';' | b'@'
+                    ) || (has_mode && matches!(byte, b'.' | b'#' | b':')))
+                {
+                    return false;
+                }
+                probe += 1;
+            }
+        }
+        let invalidates_composes = self.lexer.fast_forward_selector(
+            square_depth,
+            keep_comments,
+            has_mode,
+            is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
+        invalidates_composes
     }
 
     /// The farthest position consumed by `next`. This is the current semantic

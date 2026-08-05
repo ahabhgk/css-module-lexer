@@ -80,6 +80,22 @@ enum PropertyKind {
     CustomProperty,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtRuleKind {
+    Namespace,
+    Import,
+    Charset,
+    Value,
+    Keyframes,
+    Container,
+    Function,
+    Property,
+    CounterStyle,
+    FontPaletteValues,
+    Scope,
+    Other,
+}
+
 impl ScanContext {
     fn for_property(property: PropertyKind) -> Self {
         if property == PropertyKind::Generic {
@@ -1171,6 +1187,8 @@ pub struct LexDependencies<'s, W> {
     balanced: BalancedStack,
     is_next_rule_prelude: bool,
     scan_context: ScanContext,
+    selector_square_depth: u32,
+    selector_fast_forward_enabled: bool,
     property_kind: PropertyKind,
     in_animation_property: Option<InProperty<AnimationReserved>>,
     in_list_style_property: Option<InProperty<ListStyleReserved>>,
@@ -1209,6 +1227,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             balanced: Default::default(),
             is_next_rule_prelude: true,
             scan_context: ScanContext::TopLevel,
+            selector_square_depth: 0,
+            selector_fast_forward_enabled: false,
             property_kind: PropertyKind::Generic,
             in_animation_property: None,
             in_list_style_property: None,
@@ -1235,6 +1255,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     /// Drive dependency extraction from the forward token stream.
     pub fn lex_streaming(&mut self, source: &mut Lexer<'s>) {
+        self.selector_fast_forward_enabled = source.source_end() >= 256;
         let mode = self
             .mode_data
             .as_ref()
@@ -1403,6 +1424,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         stream.next::<KEEP_COMMENTS>();
                     }
                 }
+                TokenKind::Delim if self.scan_context == ScanContext::Selector => {
+                    if self.block_nesting_level == 0 {
+                        if let Some(mode_data) = &mut self.mode_data {
+                            mode_data.composes_local_classes.invalidate();
+                        }
+                    }
+                }
                 TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
                     result = self.enter_property_value(stream.lexer());
                 }
@@ -1431,6 +1459,17 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                             )
                         };
                     }
+                }
+                TokenKind::LeftSquareBracket if self.scan_context == ScanContext::Selector => {
+                    self.selector_square_depth += 1;
+                    if self.block_nesting_level == 0 {
+                        if let Some(mode_data) = &mut self.mode_data {
+                            mode_data.composes_local_classes.invalidate();
+                        }
+                    }
+                }
+                TokenKind::RightSquareBracket if self.scan_context == ScanContext::Selector => {
+                    self.selector_square_depth = self.selector_square_depth.saturating_sub(1);
                 }
                 TokenKind::LeftParenthesis => {
                     result = self.handle_left_parenthesis(
@@ -1482,8 +1521,49 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 self.scan_context = ScanContext::TopLevel;
                 self.is_next_rule_prelude = true;
             }
-            if !is_trivia && self.scan_context == ScanContext::GenericValue {
-                self.fast_forward_generic_value::<KEEP_COMMENTS>(stream);
+            if self.scan_context != ScanContext::Selector {
+                self.selector_square_depth = 0;
+            }
+            match self.scan_context {
+                ScanContext::Selector if self.selector_fast_forward_enabled => {
+                    self.fast_forward_selector::<KEEP_COMMENTS, HAS_MODE>(stream);
+                }
+                ScanContext::AtRule
+                    if !matches!(self.scope, Scope::InAtImport(_) | Scope::AtImportInvalid) =>
+                {
+                    self.fast_forward_at_rule::<KEEP_COMMENTS>(stream);
+                }
+                ScanContext::SpecialValue(property) => {
+                    self.fast_forward_special_value::<KEEP_COMMENTS>(stream, property);
+                }
+                ScanContext::GenericValue if !is_trivia => {
+                    self.fast_forward_generic_value::<KEEP_COMMENTS>(stream);
+                }
+                _ => {}
+            }
+            if self.scan_context != ScanContext::AtRule {
+                stream.reset_at_rule_scan_state();
+            }
+            if !matches!(self.scan_context, ScanContext::SpecialValue(_)) {
+                stream.reset_special_value_scan_state();
+            }
+        }
+    }
+
+    #[inline]
+    fn fast_forward_selector<const KEEP_COMMENTS: bool, const HAS_MODE: bool>(
+        &mut self,
+        stream: &mut TokenStream<'_, 's>,
+    ) {
+        let invalidates_composes = stream.fast_forward_selector_if_buffer_empty(
+            &mut self.selector_square_depth,
+            KEEP_COMMENTS,
+            HAS_MODE,
+            is_css_modules_pure_magic_comment,
+        );
+        if invalidates_composes && self.block_nesting_level == 0 {
+            if let Some(mode_data) = &mut self.mode_data {
+                mode_data.composes_local_classes.invalidate();
             }
         }
     }
@@ -1503,6 +1583,58 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             preserve_strings,
             preserve_delimiters,
             |ident| self.contains_icss_symbol(ident),
+            is_css_modules_pure_magic_comment,
+        );
+    }
+
+    #[inline]
+    fn fast_forward_at_rule<const KEEP_COMMENTS: bool>(&self, stream: &mut TokenStream<'_, 's>) {
+        let preserve_strings = matches!(
+            self.balanced.last(),
+            Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
+        );
+        let preserve_delimiters = !self.balanced.is_empty();
+        stream.fast_forward_at_rule_if_buffer_empty(
+            KEEP_COMMENTS,
+            preserve_strings,
+            preserve_delimiters,
+            |ident| self.contains_icss_symbol(ident),
+            is_css_modules_pure_magic_comment,
+        );
+    }
+
+    #[inline]
+    fn fast_forward_special_value<const KEEP_COMMENTS: bool>(
+        &self,
+        stream: &mut TokenStream<'_, 's>,
+        property: PropertyKind,
+    ) {
+        let preserve_strings = property == PropertyKind::Grid
+            || matches!(
+                self.balanced.last(),
+                Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
+            );
+        let preserve_delimiters = !self.balanced.is_empty();
+        stream.fast_forward_special_value_if_buffer_empty(
+            KEEP_COMMENTS,
+            preserve_strings,
+            preserve_delimiters,
+            property == PropertyKind::Animation,
+            |ident| {
+                if self.contains_icss_symbol(ident) {
+                    return true;
+                }
+                match property {
+                    PropertyKind::Animation => true,
+                    PropertyKind::ListStyle => ListStyleReserved.check(ident),
+                    PropertyKind::FontPalette => ident.starts_with("--"),
+                    PropertyKind::Container => ContainerReserved.check(ident),
+                    PropertyKind::Grid => !is_reserved_grid_ident(ident),
+                    PropertyKind::Generic
+                    | PropertyKind::Composes
+                    | PropertyKind::CustomProperty => false,
+                }
+            },
             is_css_modules_pure_magic_comment,
         );
     }
@@ -1579,33 +1711,59 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn classify_property(name: &str) -> PropertyKind {
-        if name.starts_with("--") {
-            return PropertyKind::CustomProperty;
-        }
+    fn classify_property(
+        name: &str,
+        property_local_mode: bool,
+    ) -> (PropertyKind, Option<GridPropertyKind>) {
         if name.eq_ignore_ascii_case("composes") || name.eq_ignore_ascii_case("compose-with") {
-            return PropertyKind::Composes;
+            return (PropertyKind::Composes, None);
+        }
+        if !property_local_mode {
+            return (PropertyKind::Generic, None);
+        }
+        if name.starts_with("--") {
+            return (PropertyKind::CustomProperty, None);
         }
         if name.eq_ignore_ascii_case("animation")
             || name.eq_ignore_ascii_case("animation-name")
             || with_vendor_prefixed_eq(name, "animation", false)
             || with_vendor_prefixed_eq(name, "animation-name", false)
         {
-            return PropertyKind::Animation;
+            return (PropertyKind::Animation, None);
         }
         if name.eq_ignore_ascii_case("list-style") || name.eq_ignore_ascii_case("list-style-type") {
-            return PropertyKind::ListStyle;
+            return (PropertyKind::ListStyle, None);
         }
         if name.eq_ignore_ascii_case("font-palette") {
-            return PropertyKind::FontPalette;
+            return (PropertyKind::FontPalette, None);
         }
         if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("container-name") {
-            return PropertyKind::Container;
+            return (PropertyKind::Container, None);
         }
-        if grid_property_kind(name).is_some() {
-            return PropertyKind::Grid;
+        if let Some(grid) = grid_property_kind(name) {
+            return (PropertyKind::Grid, Some(grid));
         }
-        PropertyKind::Generic
+        (PropertyKind::Generic, None)
+    }
+
+    fn classify_at_rule(name: &str) -> AtRuleKind {
+        match name.len() {
+            6 if name.eq_ignore_ascii_case("@value") => AtRuleKind::Value,
+            6 if name.eq_ignore_ascii_case("@scope") => AtRuleKind::Scope,
+            7 if name.eq_ignore_ascii_case("@import") => AtRuleKind::Import,
+            8 if name.eq_ignore_ascii_case("@charset") => AtRuleKind::Charset,
+            9 if name.eq_ignore_ascii_case("@function") => AtRuleKind::Function,
+            9 if name.eq_ignore_ascii_case("@property") => AtRuleKind::Property,
+            10 if name.eq_ignore_ascii_case("@namespace") => AtRuleKind::Namespace,
+            10 if name.eq_ignore_ascii_case("@keyframes") => AtRuleKind::Keyframes,
+            10 if name.eq_ignore_ascii_case("@container") => AtRuleKind::Container,
+            14 if name.eq_ignore_ascii_case("@counter-style") => AtRuleKind::CounterStyle,
+            20 if name.eq_ignore_ascii_case("@font-palette-values") => {
+                AtRuleKind::FontPaletteValues
+            }
+            _ if with_vendor_prefixed_eq(name, "keyframes", true) => AtRuleKind::Keyframes,
+            _ => AtRuleKind::Other,
+        }
     }
 
     fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
@@ -2813,15 +2971,17 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         end: Pos,
         _flags: TokenFlags,
     ) -> Option<()> {
+        stream.reset_at_rule_scan_state();
         let name = stream.slice_trusted(start, end);
+        let kind = Self::classify_at_rule(name);
         self.scan_context = ScanContext::AtRule;
-        if name.eq_ignore_ascii_case("@namespace") {
+        if kind == AtRuleKind::Namespace {
             self.scope = Scope::AtNamespaceInvalid;
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(start, end),
                 kind: WarningKind::NamespaceNotSupportedInBundledCss,
             });
-        } else if name.eq_ignore_ascii_case("@import") {
+        } else if kind == AtRuleKind::Import {
             if !self.allow_import_at_rule {
                 self.scope = Scope::AtImportInvalid;
                 self.handle_warning.handle_warning(Warning {
@@ -2831,26 +2991,24 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 return Some(());
             }
             self.scope = Scope::InAtImport(ImportData::new(start));
-        } else if name.eq_ignore_ascii_case("@charset") {
+        } else if kind == AtRuleKind::Charset {
             self.lex_charset_at_rule(stream, start)?;
             self.scan_context = ScanContext::TopLevel;
             self.is_next_rule_prelude = true;
         } else if self.mode_data.is_some() {
             let mut can_contain_rules = true;
-            if name.eq_ignore_ascii_case("@value") {
+            if kind == AtRuleKind::Value {
                 self.lex_value_at_rule(stream, start)?;
                 can_contain_rules = false;
                 self.scan_context = ScanContext::TopLevel;
                 self.is_next_rule_prelude = true;
-            } else if name.eq_ignore_ascii_case("@keyframes")
-                || with_vendor_prefixed_eq(name, "keyframes", true)
-            {
+            } else if kind == AtRuleKind::Keyframes {
                 self.lex_local_keyframes_decl(stream)?;
-            } else if name.eq_ignore_ascii_case("@container") {
+            } else if kind == AtRuleKind::Container {
                 self.lex_local_container_at_rule(stream)?;
-            } else if name.eq_ignore_ascii_case("@function") {
+            } else if kind == AtRuleKind::Function {
                 self.lex_local_function_decl(stream)?;
-            } else if name.eq_ignore_ascii_case("@property") {
+            } else if kind == AtRuleKind::Property {
                 self.lex_local_dashed_ident_decl(
                     stream,
                     |name, range| Dependency::LocalPropertyDecl { name, range },
@@ -2867,9 +3025,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         },
                     },
                 )?;
-            } else if name.eq_ignore_ascii_case("@counter-style") {
+            } else if kind == AtRuleKind::CounterStyle {
                 self.lex_local_counter_style_decl(stream)?;
-            } else if name.eq_ignore_ascii_case("@font-palette-values") {
+            } else if kind == AtRuleKind::FontPaletteValues {
                 self.lex_local_dashed_ident_decl(
                     stream,
                     |name, range| Dependency::LocalFontPaletteDecl { name, range },
@@ -2887,7 +3045,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     },
                 )?;
             } else {
-                self.is_next_rule_prelude = name.eq_ignore_ascii_case("@scope");
+                self.is_next_rule_prelude = kind == AtRuleKind::Scope;
                 if self.is_next_rule_prelude {
                     self.scan_context = ScanContext::Selector;
                 }
@@ -3195,23 +3353,21 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 let ident = stream.slice_trusted(start, end);
                 let is_declaration_name = self.scan_context == ScanContext::DeclarationName;
                 if is_declaration_name {
-                    let classified = Self::classify_property(ident);
-                    self.property_kind = if classified == PropertyKind::Composes
-                        || self
-                            .mode_data
-                            .as_ref()
-                            .is_some_and(ModeData::is_property_local_mode)
-                    {
-                        classified
-                    } else {
-                        PropertyKind::Generic
-                    };
+                    let property_local_mode = self
+                        .mode_data
+                        .as_ref()
+                        .is_some_and(ModeData::is_property_local_mode);
+                    (self.property_kind, self.pending_grid_property) =
+                        Self::classify_property(ident, property_local_mode);
                     self.pending_custom_property = (self.property_kind
                         == PropertyKind::CustomProperty)
                         .then_some((Range::new(start, end), flags));
-                    self.pending_grid_property = grid_property_kind(ident);
                 }
-                if !is_declaration_name && !self.icss_symbols.is_empty() {
+                let can_reference_icss = matches!(
+                    self.scan_context,
+                    ScanContext::GenericValue | ScanContext::SpecialValue(_) | ScanContext::AtRule
+                );
+                if can_reference_icss && !self.icss_symbols.is_empty() {
                     let unescaped_ident = unescape_token(ident, flags);
                     if self.contains_icss_symbol(unescaped_ident.as_ref()) {
                         self.dependency_context

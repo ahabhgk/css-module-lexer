@@ -158,3 +158,147 @@ fn generic_value_fast_forward_preserves_dependency_candidates() {
         .iter()
         .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
 }
+
+#[test]
+fn selector_fast_forward_preserves_candidates_and_opaque_ranges() {
+    let input = r##"
+        /* selector-fast-forward-padding-selector-fast-forward-padding-selector-fast-forward-padding-selector-fast-forward-padding-selector-fast-forward-padding-selector-fast-forward-padding */
+        element:is(.one, #two):not([data-value=".fake:#fake:local"]) > :global(.global) {}
+        .local[data-value="#fake.local:global"] {}
+        :local/**/.commented {}
+    "##;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+
+    let selector_dependencies = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, .. } | Dependency::LocalId { name, .. } => {
+                Some(name.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selector_dependencies,
+        [".one", "#two", ".local", ".commented"]
+    );
+}
+
+#[test]
+fn selector_fast_forward_keeps_composes_validation() {
+    for selector in ["element.local", "[data-kind].local", "*.local"] {
+        let input = format!(
+            "{} {selector} {{ composes: base; }}",
+            "long-element-name".repeat(16)
+        );
+        let (dependencies, _) = collect_dependencies(&input, Mode::Local);
+        assert!(
+            !dependencies
+                .iter()
+                .any(|dependency| matches!(dependency, Dependency::Composes { .. })),
+            "complex selector unexpectedly allowed composes: {selector}"
+        );
+    }
+}
+
+#[test]
+fn at_rule_fast_forward_preserves_boundaries_and_dependency_candidates() {
+    let input = r#"
+        @value imported: 1px;
+        @media screen and (min-width: 1px) {
+            .media { background: url("media.png"); }
+        }
+        @supports selector(.prelude-only) {
+            .supports { width: var(--size); }
+        }
+        .root {
+            @unknown wrapper(foo; "literal;{") imported url("nested.png");
+            color: red;
+        }
+    "#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+
+    let local_classes = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, .. } => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_classes, [".media", ".supports", ".root"]);
+
+    let urls = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::Url { request, .. } => Some(request.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(urls, ["media.png", "nested.png"]);
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalVar { name, .. } if name.as_ref() == "size"
+    )));
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+    )));
+}
+
+#[test]
+fn custom_property_token_blocks_do_not_create_selector_dependencies() {
+    let input = r##"
+        .owner {
+            --braces: { 1, "string", .not-a-selector, #f1f1f1, #not-an-id };
+            --brackets: [ 1, "string", .not-a-selector, #f1f1f1, #not-an-id ];
+            --parentheses: ( 1, "string", .not-a-selector, #f1f1f1, #not-an-id );
+        }
+    "##;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+
+    let local_classes = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, .. } => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_classes, [".owner"]);
+    assert!(!dependencies
+        .iter()
+        .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
+}
+
+#[test]
+fn icss_symbols_are_looked_up_only_in_value_contexts() {
+    let input = r#"
+        @value imported: red;
+        .imported {
+            imported: imported;
+            animation: imported;
+            @media (min-width: imported) {
+                .inside { color: red; }
+            }
+        }
+    "#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+
+    assert_eq!(
+        dependencies
+            .iter()
+            .filter(|dependency| matches!(
+                dependency,
+                Dependency::ICSSSymbol { name, .. } if name.as_ref() == "imported"
+            ))
+            .count(),
+        3
+    );
+    assert!(dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalClass { name, .. } if name.as_ref() == ".imported"
+    )));
+}
