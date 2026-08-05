@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
 
+use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
-use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::Range;
@@ -128,9 +128,7 @@ impl ExtractImports {
     pub fn transform<'s>(&self, input: &'s str) -> (String, Vec<Warning<'s>>) {
         let mut imported = String::new();
         let mut result = String::new();
-        let mut warnings = Vec::new();
         let mut index = 0;
-        let mut lexer = Lexer::new(input);
         let mut composes_contents = Vec::new();
         let mut postfix = 0;
         let mut imports: LinkedHashMap<String, LinkedHashMap<String, String>> =
@@ -139,12 +137,14 @@ impl ExtractImports {
         let mut graph: LinkedHashMap<String, Vec<String>> = LinkedHashMap::new();
         let mut visited = HashSet::new();
         let mut siblings = HashMap::new();
-        let mut visitor = LexDependencies::new(
-            |dependency| match dependency {
+        let (dependencies, mut warnings) = collect_dependencies(input, Mode::Local);
+        for dependency in &dependencies {
+            match dependency {
                 Dependency::LocalClass { .. } | Dependency::LocalId { .. } => {
                     rule_index += 1;
                 }
                 Dependency::Composes { names, from, .. } => {
+                    let names = dependencies.composes_names(*names);
                     let mut composes_content = String::new();
                     if let Some(from) = from {
                         if from == "global" {
@@ -209,7 +209,7 @@ impl ExtractImports {
                         result += ";";
                         index = range.end;
                     } else {
-                        let original = Lexer::slice_range(input, &range).unwrap();
+                        let original = Lexer::slice_range(input, range).unwrap();
                         if original.starts_with(":export") || original.starts_with(":import(") {
                             result +=
                                 Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
@@ -225,14 +225,11 @@ impl ExtractImports {
                 }
                 Dependency::ICSSImportValue { prop, value } => {
                     let (_, values) = imports.iter_mut().last().unwrap();
-                    values.insert(value.into_owned(), prop.into_owned());
+                    values.insert(value.to_string(), prop.to_string());
                 }
                 _ => {}
-            },
-            |warning| warnings.push(warning),
-            Mode::Local,
-        );
-        visitor.lex_streaming(&mut lexer);
+            }
+        }
         let len = input.len() as u32;
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();

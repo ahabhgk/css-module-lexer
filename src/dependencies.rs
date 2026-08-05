@@ -1,16 +1,19 @@
+//! Dependency parser and lexer visitor implementation.
+
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::fmt::Display;
 
-use smallvec::smallvec;
 use smallvec::SmallVec;
 
+use crate::dependency_types::{
+    Dependency, DependencyContext, DependencyListRange, Mode, Range, UrlRangeKind,
+    ValueAtRuleImportItem, Warning, WarningKind,
+};
 use crate::escape::unescape;
 use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
-use crate::HandleDependency;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
@@ -374,19 +377,13 @@ impl BalancedItemKind {
 enum ValueAtRule<'s> {
     Import {
         from: &'s str,
-        items: SmallVec<[ValueAtRuleImportItem<'s>; 2]>,
+        items: DependencyListRange<ValueAtRuleImportItem<'s>>,
     },
     Value {
         local_name: &'s str,
         value: &'s str,
         has_colon: bool,
     },
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ValueAtRuleImportItem<'s> {
-    local_name: &'s str,
-    import_name: &'s str,
 }
 
 fn is_css_space_byte(byte: u8) -> bool {
@@ -541,10 +538,7 @@ fn parse_value_at_rule_import_item<'s>(
     end: usize,
 ) -> ValueAtRuleImportItem<'s> {
     if start >= end {
-        return ValueAtRuleImportItem {
-            local_name: "",
-            import_name: "",
-        };
+        return ValueAtRuleImportItem::new("", "");
     }
     let mut depth = 0u32;
     let mut colon_index = None;
@@ -569,27 +563,21 @@ fn parse_value_at_rule_import_item<'s>(
     }
 
     if let Some(index) = colon_index {
-        return ValueAtRuleImportItem {
-            local_name: token_span(input, tokens, start, index),
-            import_name: token_span(input, tokens, index + 1, end),
-        };
+        return ValueAtRuleImportItem::new(
+            token_span(input, tokens, start, index),
+            token_span(input, tokens, index + 1, end),
+        );
     }
     if let Some(index) = as_index {
         let import_name = token_span(input, tokens, start, index);
         let local_name = token_span(input, tokens, index + 1, end);
         if !import_name.is_empty() && !local_name.is_empty() {
-            return ValueAtRuleImportItem {
-                local_name,
-                import_name,
-            };
+            return ValueAtRuleImportItem::new(local_name, import_name);
         }
     }
 
     let value = token_span(input, tokens, start, end);
-    ValueAtRuleImportItem {
-        local_name: value,
-        import_name: value,
-    }
+    ValueAtRuleImportItem::new(value, value)
 }
 
 fn parse_value_at_rule_value(input: &str, start: Pos, has_tokens: bool) -> &str {
@@ -604,7 +592,11 @@ fn parse_value_at_rule_value(input: &str, start: Pos, has_tokens: bool) -> &str 
     }
 }
 
-fn parse_value_at_rule<'s>(input: &'s str, tokens: &[Token]) -> ValueAtRule<'s> {
+fn parse_value_at_rule<'s>(
+    input: &'s str,
+    tokens: &[Token],
+    dependency_context: &mut DependencyContext<'s>,
+) -> ValueAtRule<'s> {
     let mut from_index = None;
     let mut depth = 0u32;
     let mut colon_index = None;
@@ -645,7 +637,7 @@ fn parse_value_at_rule<'s>(input: &'s str, tokens: &[Token]) -> ValueAtRule<'s> 
                 item_end -= 1;
             }
 
-            let mut items = SmallVec::new();
+            let items_start = dependency_context.value_at_rule_import_items_len();
             let mut start = item_start;
             let mut item_depth = 0u32;
             for index in item_start..item_end {
@@ -655,8 +647,8 @@ fn parse_value_at_rule<'s>(input: &'s str, tokens: &[Token]) -> ValueAtRule<'s> 
                 }
                 if token.kind == TokenKind::Comma && item_depth == 0 {
                     let item = parse_value_at_rule_import_item(input, tokens, start, index);
-                    if !item.local_name.is_empty() || !item.import_name.is_empty() {
-                        items.push(item);
+                    if !item.local_name().is_empty() || !item.import_name().is_empty() {
+                        dependency_context.push_value_at_rule_import_item(item);
                     }
                     start = index + 1;
                 }
@@ -665,9 +657,13 @@ fn parse_value_at_rule<'s>(input: &'s str, tokens: &[Token]) -> ValueAtRule<'s> 
                 }
             }
             let item = parse_value_at_rule_import_item(input, tokens, start, item_end);
-            if !item.local_name.is_empty() || !item.import_name.is_empty() {
-                items.push(item);
+            if !item.local_name().is_empty() || !item.import_name().is_empty() {
+                dependency_context.push_value_at_rule_import_item(item);
             }
+            let items = DependencyListRange::<ValueAtRuleImportItem<'s>>::from_bounds(
+                items_start,
+                dependency_context.value_at_rule_import_items_len(),
+            );
             return ValueAtRule::Import { from, items };
         }
     }
@@ -711,26 +707,6 @@ fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
         || matches!(left.strip_prefix("-moz-"), Some(left) if left.eq_ignore_ascii_case(right))
         || matches!(left.strip_prefix("-ms-"), Some(left) if left.eq_ignore_ascii_case(right))
         || matches!(left.strip_prefix("-o-"), Some(left) if left.eq_ignore_ascii_case(right))
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Range {
-    pub start: Pos,
-    pub end: Pos,
-}
-
-impl Range {
-    pub fn new(start: Pos, end: Pos) -> Self {
-        Self { start, end }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub enum Mode {
-    Local,
-    Global,
-    Pure,
-    Css,
 }
 
 #[derive(Debug)]
@@ -1214,208 +1190,9 @@ fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> SmallVec<[Range;
     result
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum Dependency<'s> {
-    Url {
-        request: Cow<'s, str>,
-        range: Range,
-        kind: UrlRangeKind,
-    },
-    Import {
-        request: Cow<'s, str>,
-        range: Range,
-        layer: Option<&'s str>,
-        supports: Option<&'s str>,
-        media: Option<&'s str>,
-    },
-    ICSSImportUrl {
-        name: Cow<'s, str>,
-        range: Range,
-        name_range: Range,
-    },
-    Replace {
-        content: &'s str,
-        range: Range,
-    },
-    Charset {
-        value: Cow<'s, str>,
-        range: Range,
-    },
-    LocalClass {
-        name: Cow<'s, str>,
-        range: Range,
-        explicit: bool,
-    },
-    LocalId {
-        name: Cow<'s, str>,
-        range: Range,
-        explicit: bool,
-    },
-    LocalVar {
-        name: Cow<'s, str>,
-        range: Range,
-        from: Option<Cow<'s, str>>,
-    },
-    LocalVarDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalPropertyDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalKeyframes {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalKeyframesDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalCounterStyle {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalCounterStyleDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalFontPalette {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalFontPaletteDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalContainer {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalContainerDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalFunction {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalFunctionDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalGrid {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    LocalGridDecl {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-    Composes {
-        local_classes: SmallVec<[Cow<'s, str>; 2]>,
-        names: SmallVec<[Cow<'s, str>; 2]>,
-        from: Option<Cow<'s, str>>,
-        range: Range,
-    },
-    ICSSImportFrom {
-        path: Cow<'s, str>,
-    },
-    ICSSImportValue {
-        prop: Cow<'s, str>,
-        value: Cow<'s, str>,
-    },
-    ICSSExportValue {
-        prop: Cow<'s, str>,
-        value: Cow<'s, str>,
-    },
-    ICSSSymbol {
-        name: Cow<'s, str>,
-        range: Range,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub enum UrlRangeKind {
-    Function,
-    String,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Warning<'s> {
-    range: Range,
-    kind: WarningKind<'s>,
-}
-
-impl<'s> Warning<'s> {
-    pub fn new(range: Range, kind: WarningKind<'s>) -> Self {
-        Self { range, kind }
-    }
-
-    pub fn range(&self) -> &Range {
-        &self.range
-    }
-
-    pub fn kind(&self) -> &WarningKind<'s> {
-        &self.kind
-    }
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum WarningKind<'s> {
-    Unexpected { message: &'s str },
-    DuplicateUrl { when: &'s str },
-    NamespaceNotSupportedInBundledCss,
-    NotPrecededAtImport,
-    ExpectedUrl { when: &'s str },
-    ExpectedUrlBefore { when: &'s str },
-    ExpectedLayerBefore { when: &'s str },
-    InconsistentModeResult,
-    ExpectedNotInside { pseudo: &'s str },
-    NotPure { message: &'s str },
-    UnexpectedComposition { message: &'s str },
-}
-
-impl Display for Warning<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            WarningKind::Unexpected { message, .. } => write!(f, "{message}"),
-            WarningKind::DuplicateUrl { when, .. } => write!(
-                f,
-                "Duplicate of 'url(...)' in '{when}'"
-            ),
-            WarningKind::NamespaceNotSupportedInBundledCss { .. } => write!(
-                f,
-                "'@namespace' is not supported in bundled CSS"
-            ),
-            WarningKind::NotPrecededAtImport { .. } => {
-                write!(f, "Any '@import' rules must precede all other rules")
-            }
-            WarningKind::ExpectedUrl { when, .. } => write!(f, "Expected URL in '{when}'"),
-            WarningKind::ExpectedUrlBefore { when, .. } => write!(
-                f,
-                "An URL in '{when}' should be before 'layer(...)' or 'supports(...)'"
-            ),
-            WarningKind::ExpectedLayerBefore { when, .. } => write!(
-                f,
-                "The 'layer(...)' in '{when}' should be before 'supports(...)'"
-            ),
-            WarningKind::InconsistentModeResult { .. } => write!(
-                f,
-                "Inconsistent rule global/local (multiple selectors must result in the same mode for the rule)"
-            ),
-            WarningKind::ExpectedNotInside { pseudo, .. } => write!(
-                f,
-                "A '{pseudo}' is not allowed inside of a ':local()' or ':global()'"
-            ),
-            WarningKind::NotPure { message, .. } => write!(f, "Pure globals is not allowed in pure mode, {message}"),
-            WarningKind::UnexpectedComposition {  message, .. } => write!(f, "Composition is {message}"),
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct LexDependencies<'s, D, W> {
+pub struct LexDependencies<'s, W> {
+    dependency_context: DependencyContext<'s>,
     mode_data: Option<ModeData<'s>>,
     scope: Scope<'s>,
     block_nesting_level: u32,
@@ -1435,13 +1212,21 @@ pub struct LexDependencies<'s, D, W> {
     icss_symbol_max_len: usize,
     pending_custom_property: Option<(Range, TokenFlags)>,
     pending_grid_property: Option<GridPropertyKind>,
-    handle_dependency: D,
     handle_warning: W,
 }
 
-impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W> {
-    pub fn new(handle_dependency: D, handle_warning: W, mode: Mode) -> Self {
+impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
+    pub fn new(handle_warning: W, mode: Mode) -> Self {
+        Self::with_context(DependencyContext::new(), handle_warning, mode)
+    }
+
+    pub(crate) fn with_context(
+        dependency_context: DependencyContext<'s>,
+        handle_warning: W,
+        mode: Mode,
+    ) -> Self {
         Self {
+            dependency_context,
             mode_data: if mode == Mode::Css {
                 None
             } else {
@@ -1465,14 +1250,21 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             icss_symbol_max_len: 0,
             pending_custom_property: None,
             pending_grid_property: None,
-            handle_dependency,
             handle_warning,
         }
     }
 
+    pub fn dependency_context(&self) -> &DependencyContext<'s> {
+        &self.dependency_context
+    }
+
+    pub fn into_dependency_context(self) -> DependencyContext<'s> {
+        self.dependency_context
+    }
+
     /// Drive dependency extraction from the forward token stream.
     pub fn lex_streaming(&mut self, source: &mut Lexer<'s>) {
-        let mut stream = crate::lexer::TokenStream::from_lexer(source);
+        let mut stream = TokenStream::from_lexer(source);
         let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
         let has_mode = self.mode_data.is_some();
         match (keep_comments, has_mode) {
@@ -1791,8 +1583,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     .is_some_and(ModeData::is_property_local_mode)
                 {
                     if let Some((range, flags)) = self.pending_custom_property.take() {
-                        self.handle_dependency
-                            .handle_dependency(Dependency::LocalVarDecl {
+                        self.dependency_context
+                            .push_dependency(Dependency::LocalVarDecl {
                                 name: unescape_token(
                                     lexer.slice(range.start + 2, range.end)?,
                                     flags,
@@ -1871,8 +1663,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
         let next = stream.next_parser_token().token;
         if next.kind == TokenKind::Semicolon {
-            self.handle_dependency
-                .handle_dependency(Dependency::Charset {
+            self.dependency_context
+                .push_dependency(Dependency::Charset {
                     value: unescape_token(
                         stream.slice(string.value_range.start, string.value_range.end)?,
                         string.flags,
@@ -1939,8 +1731,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             });
             return Some(());
         }
-        self.handle_dependency
-            .handle_dependency(Dependency::ICSSImportFrom {
+        self.dependency_context
+            .push_dependency(Dependency::ICSSImportFrom {
                 path: unescape(stream.slice(start, end)?),
             });
         let left_curly = stream.next_parser_token().token;
@@ -1981,8 +1773,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             let value_start = value_start_token.range.start;
             let (value_end, _) = self.consume_icss_export_value(stream, value_start_token)?;
             let delimiter = stream.next_parser_token().token;
-            self.handle_dependency
-                .handle_dependency(Dependency::ICSSImportValue {
+            self.dependency_context
+                .push_dependency(Dependency::ICSSImportValue {
                     prop: unescape(
                         stream
                             .slice(prop_start, prop_end)?
@@ -2133,7 +1925,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let (params_start, params_end, tokens) = self.consume_value_at_rule_params(stream)?;
         let at_rule_end = params_end.max(stream.consumed_pos());
         let params = stream.slice(params_start, params_end)?;
-        match parse_value_at_rule(params, &tokens) {
+        match parse_value_at_rule(params, &tokens, &mut self.dependency_context) {
             ValueAtRule::Import { from, items } => {
                 if from.is_empty() || items.is_empty() {
                     self.handle_warning.handle_warning(Warning {
@@ -2143,21 +1935,22 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         },
                     });
                 } else {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::ICSSImportFrom {
+                    self.dependency_context
+                        .push_dependency(Dependency::ICSSImportFrom {
                             path: unescape(from),
                         });
-                    for item in items {
-                        self.handle_dependency
-                            .handle_dependency(Dependency::ICSSImportValue {
-                                prop: unescape(item.local_name),
-                                value: unescape(item.import_name),
+                    for index in items.as_usize_range() {
+                        let item = self.dependency_context.value_at_rule_import_item(index);
+                        self.dependency_context
+                            .push_dependency(Dependency::ICSSImportValue {
+                                prop: unescape(item.local_name()),
+                                value: unescape(item.import_name()),
                             });
-                        self.insert_icss_symbol(unescape(item.local_name));
-                        self.handle_dependency
-                            .handle_dependency(Dependency::ICSSExportValue {
-                                prop: unescape(item.local_name),
-                                value: unescape(item.local_name),
+                        self.insert_icss_symbol(unescape(item.local_name()));
+                        self.dependency_context
+                            .push_dependency(Dependency::ICSSExportValue {
+                                prop: unescape(item.local_name()),
+                                value: unescape(item.local_name()),
                             });
                     }
                 }
@@ -2176,8 +1969,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     });
                 }
                 if !local_name.is_empty() {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::ICSSExportValue {
+                    self.dependency_context
+                        .push_dependency(Dependency::ICSSExportValue {
                             prop: unescape(local_name),
                             value: Cow::Borrowed(value),
                         });
@@ -2185,8 +1978,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 }
             }
         }
-        self.handle_dependency
-            .handle_dependency(Dependency::Replace {
+        self.dependency_context
+            .push_dependency(Dependency::Replace {
                 content: "",
                 range: Range::new(start, at_rule_end),
             });
@@ -2237,8 +2030,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 .slice(value_start, value_end)?
                 .trim_end_matches(is_css_white_space_char);
             let trimmed_value_end = value_start + value.len() as Pos;
-            self.handle_dependency
-                .handle_dependency(Dependency::ICSSExportValue {
+            self.dependency_context
+                .push_dependency(Dependency::ICSSExportValue {
                     prop: unescape(
                         stream
                             .slice(prop_start, prop_end)?
@@ -2303,8 +2096,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         } else {
             None
         };
-        self.handle_dependency
-            .handle_dependency(Dependency::LocalVar {
+        self.dependency_context
+            .push_dependency(Dependency::LocalVar {
                 name: unescape_token(stream.slice(start + 2, end)?, name_token.flags),
                 range: Range::new(start, end),
                 from,
@@ -2332,8 +2125,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         let end = name_token.range.end;
-        self.handle_dependency
-            .handle_dependency(local_decl_dependency(
+        self.dependency_context
+            .push_dependency(local_decl_dependency(
                 unescape_token(stream.slice(start + 2, end)?, name_token.flags),
                 Range::new(start, end),
             ));
@@ -2411,8 +2204,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         let end = name_token.range.end;
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
             let name = stream.slice(start, end)?;
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalKeyframesDecl {
+            self.dependency_context
+                .push_dependency(Dependency::LocalKeyframesDecl {
                     name: unescape_token(name, name_token.flags),
                     range: Range::new(start, end),
                 });
@@ -2429,8 +2222,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 return Some(());
             }
             stream.next_parser_token();
-            self.handle_dependency
-                .handle_dependency(Dependency::Replace {
+            self.dependency_context
+                .push_dependency(Dependency::Replace {
                     content: "",
                     range: Range::new(right_parenthesis.range.start, right_parenthesis.range.end),
                 });
@@ -2454,8 +2247,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let animation = self.in_animation_property.as_mut().unwrap();
         if let Some((range, flags)) = animation.take_rename(self.balanced.len()) {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalKeyframes {
+            self.dependency_context
+                .push_dependency(Dependency::LocalKeyframes {
                     name: unescape_token(lexer.slice(range.start, range.end)?, flags),
                     range,
                 });
@@ -2477,8 +2270,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         let end = name_token.range.end;
-        self.handle_dependency
-            .handle_dependency(Dependency::LocalCounterStyleDecl {
+        self.dependency_context
+            .push_dependency(Dependency::LocalCounterStyleDecl {
                 name: unescape_token(stream.slice(start, end)?, name_token.flags),
                 range: Range::new(start, end),
             });
@@ -2510,8 +2303,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalContainer {
+            self.dependency_context
+                .push_dependency(Dependency::LocalContainer {
                     name: unescape_token(ident, name_token.flags),
                     range: Range::new(start, end),
                 });
@@ -2589,8 +2382,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalFunctionDecl {
+            self.dependency_context
+                .push_dependency(Dependency::LocalFunctionDecl {
                     name: unescape_token(stream.slice(start + 2, end)?, name_token.flags),
                     range: Range::new(start, end),
                 });
@@ -2612,8 +2405,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 return Some(());
             }
             stream.next_parser_token();
-            self.handle_dependency
-                .handle_dependency(Dependency::Replace {
+            self.dependency_context
+                .push_dependency(Dependency::Replace {
                     content: "",
                     range: Range::new(right_parenthesis.range.start, right_parenthesis.range.end),
                 });
@@ -2640,8 +2433,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn handle_local_counter_style_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let list_style = self.in_list_style_property.as_mut().unwrap();
         if let Some((range, flags)) = list_style.take_rename(self.balanced.len()) {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalCounterStyle {
+            self.dependency_context
+                .push_dependency(Dependency::LocalCounterStyle {
                     name: unescape_token(lexer.slice(range.start, range.end)?, flags),
                     range,
                 });
@@ -2652,8 +2445,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     fn handle_local_font_palette_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
         let font_palette = self.in_font_palette_property.as_mut().unwrap();
         if let Some((range, flags)) = font_palette.take_rename(self.balanced.len()) {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalFontPalette {
+            self.dependency_context
+                .push_dependency(Dependency::LocalFontPalette {
                     name: unescape_token(lexer.slice(range.start + 2, range.end)?, flags),
                     range,
                 });
@@ -2738,15 +2531,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     }
                     stream.next_parser_token();
                     item_end = right_parenthesis.range.end;
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: unescape_names(local_classes.clone()),
-                            names: smallvec![unescape(
-                                stream.slice(name_range.start, name_range.end,)?
-                            )],
-                            from: Some(Cow::Borrowed("global")),
-                            range: Range::new(global_start, item_end),
-                        });
+                    self.dependency_context.push_composes(
+                        unescape_names(local_classes.clone()),
+                        std::iter::once(unescape(stream.slice(name_range.start, name_range.end)?)),
+                        Some(Cow::Borrowed("global")),
+                        Range::new(global_start, item_end),
+                    );
                     delimiter = stream.peek_significant_skipping_comments::<true>().token;
                     continue;
                 }
@@ -2778,15 +2568,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                             path.range
                         };
                         item_end = path_range.end;
-                        self.handle_dependency
-                            .handle_dependency(Dependency::Composes {
-                                local_classes: unescape_names(local_classes.clone()),
-                                names: unescape_names(std::mem::take(&mut names)),
-                                from: Some(unescape(
-                                    stream.slice(path_range.start, path_range.end)?,
-                                )),
-                                range: Range::new(item_start, item_end),
-                            });
+                        self.dependency_context.push_composes(
+                            unescape_names(local_classes.clone()),
+                            unescape_names(std::mem::take(&mut names)),
+                            Some(unescape(stream.slice(path_range.start, path_range.end)?)),
+                            Range::new(item_start, item_end),
+                        );
                         has_from = true;
                         stream.next_parser_token();
                         delimiter = stream.peek_significant_skipping_comments::<true>().token;
@@ -2824,13 +2611,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
             if delimiter.kind == TokenKind::Comma {
                 if !names.is_empty() {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: unescape_names(local_classes.clone()),
-                            names: unescape_names(names),
-                            from: None,
-                            range: Range::new(item_start, item_end),
-                        });
+                    self.dependency_context.push_composes(
+                        unescape_names(local_classes.clone()),
+                        unescape_names(names),
+                        None,
+                        Range::new(item_start, item_end),
+                    );
                 }
                 stream.next_parser_token();
                 replacement_end = delimiter.range.end;
@@ -2839,13 +2625,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
             if delimiter.kind == TokenKind::Semicolon {
                 if !names.is_empty() {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: unescape_names(local_classes.clone()),
-                            names: unescape_names(names),
-                            from: None,
-                            range: Range::new(item_start, item_end),
-                        });
+                    self.dependency_context.push_composes(
+                        unescape_names(local_classes.clone()),
+                        unescape_names(names),
+                        None,
+                        Range::new(item_start, item_end),
+                    );
                 }
                 stream.next_parser_token();
                 replacement_end = delimiter.range.end;
@@ -2854,13 +2639,12 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
             if delimiter.kind == TokenKind::RightCurlyBracket {
                 if !names.is_empty() {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::Composes {
-                            local_classes: unescape_names(local_classes.clone()),
-                            names: unescape_names(names),
-                            from: None,
-                            range: Range::new(item_start, item_end),
-                        });
+                    self.dependency_context.push_composes(
+                        unescape_names(local_classes.clone()),
+                        unescape_names(names),
+                        None,
+                        Range::new(item_start, item_end),
+                    );
                 }
                 replacement_end = item_end;
                 break;
@@ -2884,8 +2668,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             });
             return Some(());
         }
-        self.handle_dependency
-            .handle_dependency(Dependency::Replace {
+        self.dependency_context
+            .push_dependency(Dependency::Replace {
                 content: "",
                 range: Range::new(start, replacement_end),
             });
@@ -2893,7 +2677,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
     }
 }
 
-impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W> {
+impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     fn handle_comment(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
@@ -2945,7 +2729,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 import_data.url_flags = flags;
                 import_data.url_range = Some(Range::new(start, end));
             }
-            Scope::InBlock => self.handle_dependency.handle_dependency(Dependency::Url {
+            Scope::InBlock => self.dependency_context.push_dependency(Dependency::Url {
                 request: unescape_token(value, flags),
                 range: Range::new(start, end),
                 kind: UrlRangeKind::Function,
@@ -3007,8 +2791,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                             lexer.slice(start + 1, end - 1)?,
                             start + 1,
                         ) {
-                            self.handle_dependency
-                                .handle_dependency(Dependency::LocalGridDecl {
+                            self.dependency_context
+                                .push_dependency(Dependency::LocalGridDecl {
                                     name: unescape_token(
                                         lexer.slice(range.start, range.end)?,
                                         flags,
@@ -3027,7 +2811,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     _ => return Some(()),
                 };
                 let value = lexer.slice(start + 1, end - 1)?;
-                self.handle_dependency.handle_dependency(Dependency::Url {
+                self.dependency_context.push_dependency(Dependency::Url {
                     request: unescape_token(value, flags),
                     range: Range::new(start, end),
                     kind,
@@ -3142,8 +2926,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
                     if let Some((name, name_range)) = import_data.prelude.icss_import_url() {
-                        self.handle_dependency
-                            .handle_dependency(Dependency::ICSSImportUrl {
+                        self.dependency_context
+                            .push_dependency(Dependency::ICSSImportUrl {
                                 name: unescape(name),
                                 range: Range::new(import_data.start, end),
                                 name_range: *name_range,
@@ -3241,14 +3025,13 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     .unwrap_or(url_range)
                     .end;
                 let media = self.get_media(lexer, last_end, start);
-                self.handle_dependency
-                    .handle_dependency(Dependency::Import {
-                        request: unescape_token(url, import_data.url_flags),
-                        range: Range::new(import_data.start, end),
-                        layer,
-                        supports,
-                        media,
-                    });
+                self.dependency_context.push_dependency(Dependency::Import {
+                    request: unescape_token(url, import_data.url_flags),
+                    range: Range::new(import_data.start, end),
+                    layer,
+                    supports,
+                    media,
+                });
                 self.scope = Scope::TopLevel;
             }
             Scope::AtImportInvalid | Scope::AtNamespaceInvalid => {
@@ -3332,8 +3115,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         };
         if mode_data.is_current_local_mode() && name.starts_with("--") && end > start + 1 {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalFunction {
+            self.dependency_context
+                .push_dependency(Dependency::LocalFunction {
                     name: unescape_token(stream.slice(start + 2, end - 1)?, flags),
                     range: Range::new(start, end - 1),
                 });
@@ -3390,8 +3173,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                         },
                     });
                 }
-                self.handle_dependency
-                    .handle_dependency(Dependency::Replace {
+                self.dependency_context
+                    .push_dependency(Dependency::Replace {
                         content: "",
                         range: Range::new(replacement_start, end),
                     });
@@ -3447,8 +3230,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 if !is_declaration_name && !self.icss_symbols.is_empty() {
                     let unescaped_ident = unescape_token(ident, flags);
                     if self.contains_icss_symbol(unescaped_ident.as_ref()) {
-                        self.handle_dependency
-                            .handle_dependency(Dependency::ICSSSymbol {
+                        self.dependency_context
+                            .push_dependency(Dependency::ICSSSymbol {
                                 name: unescaped_ident,
                                 range: Range::new(start, end),
                             });
@@ -3467,8 +3250,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                     && ident.starts_with("--")
                     && stream.peek_parser_token().token.kind == TokenKind::RightParenthesis
                 {
-                    self.handle_dependency
-                        .handle_dependency(Dependency::LocalFunction {
+                    self.dependency_context
+                        .push_dependency(Dependency::LocalFunction {
                             name: unescape_token(stream.slice(start + 2, end)?, flags),
                             range: Range::new(start, end),
                         });
@@ -3520,7 +3303,7 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                             container.set_rename(ident, Range::new(start, end), flags);
                             if let Some((range, flags)) = container.take_rename(self.balanced.len())
                             {
-                                self.handle_dependency.handle_dependency(
+                                self.dependency_context.push_dependency(
                                     Dependency::LocalContainerDecl {
                                         name: unescape_token(
                                             stream.slice(range.start, range.end)?,
@@ -3536,8 +3319,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
 
                     if self.in_grid_property.is_some() {
                         if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
-                            self.handle_dependency
-                                .handle_dependency(Dependency::LocalGrid {
+                            self.dependency_context
+                                .push_dependency(Dependency::LocalGrid {
                                     name: unescape_token(ident, flags),
                                     range: Range::new(start, end),
                                 });
@@ -3631,8 +3414,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         if mode_data.is_current_local_mode() {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalClass {
+            self.dependency_context
+                .push_dependency(Dependency::LocalClass {
                     name: unescape_token(name, flags),
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
@@ -3671,8 +3454,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             return Some(());
         }
         if mode_data.is_current_local_mode() {
-            self.handle_dependency
-                .handle_dependency(Dependency::LocalId {
+            self.dependency_context
+                .push_dependency(Dependency::LocalId {
                     name: unescape_token(name, flags),
                     range: Range::new(start, end),
                     explicit: mode_data.is_mode_explicit(),
@@ -3859,8 +3642,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         if let Some(mode_data) = &mut self.mode_data {
             if name.eq_ignore_ascii_case(":import(") {
                 self.lex_icss_import(stream);
-                self.handle_dependency
-                    .handle_dependency(Dependency::Replace {
+                self.dependency_context
+                    .push_dependency(Dependency::Replace {
                         content: "",
                         range: Range::new(start, stream.consumed_pos()),
                     });
@@ -3880,8 +3663,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
                 if next.token.kind == TokenKind::Eof {
                     return None;
                 }
-                self.handle_dependency
-                    .handle_dependency(Dependency::Replace {
+                self.dependency_context
+                    .push_dependency(Dependency::Replace {
                         content: "",
                         range: Range::new(start, next.token.range.start),
                     });
@@ -3921,8 +3704,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
             }
             self.balanced
                 .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
-            self.handle_dependency
-                .handle_dependency(Dependency::Replace {
+            self.dependency_context
+                .push_dependency(Dependency::Replace {
                     content: "",
                     range: Range::new(
                         start,
@@ -3933,8 +3716,8 @@ impl<'s, D: HandleDependency<'s>, W: HandleWarning<'s>> LexDependencies<'s, D, W
         }
         if matches!(self.scope, Scope::TopLevel) && name.eq_ignore_ascii_case(":export") {
             self.lex_icss_export(stream)?;
-            self.handle_dependency
-                .handle_dependency(Dependency::Replace {
+            self.dependency_context
+                .push_dependency(Dependency::Replace {
                     content: "",
                     range: Range::new(start, stream.consumed_pos()),
                 });

@@ -3,6 +3,7 @@ mod postcss_modules;
 use css_module_lexer::collect_dependencies;
 use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
+use css_module_lexer::DependencyContext;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::ModeData;
@@ -327,6 +328,7 @@ fn assert_local_grid_decl_dependency(input: &str, dependency: &Dependency, name:
 
 fn assert_composes_dependency(
     input: &str,
+    context: &DependencyContext,
     dependency: &Dependency,
     local_classes: &str,
     names: &str,
@@ -343,14 +345,16 @@ fn assert_composes_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(
-        actual_local_classes
+        context
+            .composes_local_classes(*actual_local_classes)
             .iter()
             .map(AsRef::as_ref)
             .collect::<SmallVec<[&str; 2]>>(),
         SmallVec::<[&str; 2]>::from_iter(local_classes.split(' '))
     );
     assert_eq!(
-        actual_names
+        context
+            .composes_names(*actual_names)
             .iter()
             .map(AsRef::as_ref)
             .collect::<SmallVec<[&str; 2]>>(),
@@ -571,6 +575,7 @@ fn dependency_composes_and_icss_strings_are_css_unescaped() {
         .unwrap();
     assert_composes_dependency(
         input,
+        &dependencies,
         composes,
         "foo",
         "bar",
@@ -1224,12 +1229,11 @@ fn rspack_nested_comment_separated_modes_do_not_keep_spacing_warnings() {
 
 #[test]
 fn missing_whitespace_mode_dependencies_are_emitted_by_the_main_lexer() {
-    let mut dependencies = Vec::new();
     let mut warnings = Vec::new();
-    lex_dependencies(
+    let dependencies = lex_dependencies(
         RSPACK_NESTED_COMMENT_SEPARATED_MODES,
         Mode::Local,
-        |dependency| dependencies.push(dependency),
+        |_| {},
         |warning| warnings.push(warning),
     );
 
@@ -2102,6 +2106,7 @@ fn css_modules_composes_1() {
     assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[1],
         "exportName",
         "importName",
@@ -2110,6 +2115,7 @@ fn css_modules_composes_1() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[2],
         "exportName",
         "beforeName",
@@ -2118,6 +2124,7 @@ fn css_modules_composes_1() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[3],
         "exportName",
         "importName secondImport",
@@ -2126,6 +2133,7 @@ fn css_modules_composes_1() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[4],
         "exportName",
         "firstImport secondImport",
@@ -2153,6 +2161,7 @@ fn css_modules_composes_2() {
     assert_local_class_dependency(input, &dependencies[0], ".duplicate", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[1],
         "duplicate",
         "a",
@@ -2161,6 +2170,7 @@ fn css_modules_composes_2() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[2],
         "duplicate",
         "b",
@@ -2169,6 +2179,7 @@ fn css_modules_composes_2() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[3],
         "duplicate",
         "c",
@@ -2177,6 +2188,7 @@ fn css_modules_composes_2() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[4],
         "duplicate",
         "a",
@@ -2185,6 +2197,7 @@ fn css_modules_composes_2() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[5],
         "duplicate",
         "c",
@@ -2212,6 +2225,7 @@ fn css_modules_composes_3() {
     assert_local_class_dependency(input, &dependencies[0], ".spaces", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[1],
         "spaces",
         "importName importName2",
@@ -2220,6 +2234,7 @@ fn css_modules_composes_3() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[2],
         "spaces",
         "importName3 importName4",
@@ -2247,13 +2262,22 @@ fn css_modules_composes_4() {
     assert_local_class_dependency(input, &dependencies[0], ".unknown", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[1],
         "unknown",
         "foo bar",
         None,
         "foo bar",
     );
-    assert_composes_dependency(input, &dependencies[2], "unknown", "baz", None, "baz");
+    assert_composes_dependency(
+        input,
+        &dependencies,
+        &dependencies[2],
+        "unknown",
+        "baz",
+        None,
+        "baz",
+    );
     assert_replace_dependency(input, &dependencies[3], "", r#"composes: foo bar, baz;"#);
     assert_eq!(dependencies.len(), 4);
 }
@@ -2268,10 +2292,27 @@ fn css_modules_composes_5() {
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_local_class_dependency(input, &dependencies[0], ".mixed", false);
-    assert_composes_dependency(input, &dependencies[1], "mixed", "foo bar", None, "foo bar");
-    assert_composes_dependency(input, &dependencies[2], "mixed", "baz", None, "baz");
     assert_composes_dependency(
         input,
+        &dependencies,
+        &dependencies[1],
+        "mixed",
+        "foo bar",
+        None,
+        "foo bar",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies,
+        &dependencies[2],
+        "mixed",
+        "baz",
+        None,
+        "baz",
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies,
         &dependencies[3],
         "mixed",
         "importName importName2",
@@ -2302,7 +2343,15 @@ fn css_modules_composes_6() {
     assert_local_class_dependency(input, &dependencies[0], ".a", false);
     assert_local_class_dependency(input, &dependencies[1], ".b", false);
     assert_local_class_dependency(input, &dependencies[2], ".c", false);
-    assert_composes_dependency(input, &dependencies[3], "a b c", "foo", None, "foo");
+    assert_composes_dependency(
+        input,
+        &dependencies,
+        &dependencies[3],
+        "a b c",
+        "foo",
+        None,
+        "foo",
+    );
     assert_replace_dependency(input, &dependencies[4], "", "composes: foo");
     // a, .b, .c
     assert_warning(input, &warnings[0], "composes");
@@ -2323,6 +2372,7 @@ fn css_modules_composes_from_does_not_leak_between_items() {
     assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[1],
         "exportName",
         "imported",
@@ -2331,6 +2381,7 @@ fn css_modules_composes_from_does_not_leak_between_items() {
     );
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[2],
         "exportName",
         "localName",
@@ -2360,6 +2411,7 @@ fn css_modules_composes_7() {
     assert_local_class_dependency(input, &dependencies[1], ".bar", false);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[2],
         "foo",
         "a",
@@ -2392,7 +2444,15 @@ fn css_modules_composes_8() {
     assert_local_class_dependency(input, &dependencies[1], ".second", false);
     assert_local_class_dependency(input, &dependencies[2], ".base", false);
     assert_local_class_dependency(input, &dependencies[3], ".third", false);
-    assert_composes_dependency(input, &dependencies[4], "third", "base", None, "base");
+    assert_composes_dependency(
+        input,
+        &dependencies,
+        &dependencies[4],
+        "third",
+        "base",
+        None,
+        "base",
+    );
     assert_replace_dependency(input, &dependencies[5], "", "composes: base;");
     assert_eq!(dependencies.len(), 6);
 }
@@ -2428,6 +2488,7 @@ fn css_modules_composes_after_value_import_from_node_modules() {
     assert_icss_symbol_dependency(input, &dependencies[5], "color-grey", "color-grey");
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[6],
         "copyright",
         "type-heading",
@@ -2825,6 +2886,21 @@ fn value_at_rule_import() {
     assert_icss_symbol_dependency(input, &dependencies[19], "green", "green");
     assert_icss_symbol_dependency(input, &dependencies[20], "ink", "ink");
     assert_icss_symbol_dependency(input, &dependencies[21], "white", "white");
+    let value_import_items = dependencies
+        .value_at_rule_import_items()
+        .iter()
+        .map(|item| (item.local_name(), item.import_name()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        value_import_items,
+        [
+            ("red", "red"),
+            ("sky", "blue"),
+            ("green", "green"),
+            ("ink", "black"),
+            ("white", "white"),
+        ]
+    );
     assert_eq!(dependencies.len(), 22);
 }
 
@@ -2841,6 +2917,7 @@ fn weird_composes() {
     assert_local_class_dependency(input, &dependencies[1], ".exportName31", true);
     assert_composes_dependency(
         input,
+        &dependencies,
         &dependencies[3],
         "exportName31",
         "from from",

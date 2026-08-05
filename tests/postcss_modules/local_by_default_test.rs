@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
-use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::Range;
@@ -16,17 +16,16 @@ struct LocalByDefault {
 impl LocalByDefault {
     pub fn transform<'s>(&self, input: &'s str) -> (String, Vec<Warning<'s>>) {
         let mut result = String::new();
-        let mut warnings = Vec::new();
         let mut index = 0;
-        let mut lexer = Lexer::new(input);
         let mut local_alias: HashSet<String> = HashSet::new();
         let add_local = |result: &mut String, name: &str| {
             *result += ":local(";
             *result += name;
             *result += ")";
         };
-        let mut visitor = LexDependencies::new(
-            |dependency| match dependency {
+        let (dependencies, warnings) = collect_dependencies(input, self.mode);
+        for dependency in &dependencies {
+            match dependency {
                 Dependency::LocalClass {
                     name,
                     range,
@@ -38,43 +37,40 @@ impl LocalByDefault {
                     explicit,
                 } => {
                     if !explicit && local_alias.contains(&name[1..]) {
-                        return;
+                        continue;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
+                    add_local(&mut result, Lexer::slice_range(input, range).unwrap());
                     index = range.end;
                 }
                 Dependency::LocalKeyframes { name, range } => {
                     if local_alias.contains(name.as_ref()) {
-                        return;
+                        continue;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
+                    add_local(&mut result, Lexer::slice_range(input, range).unwrap());
                     index = range.end;
                 }
                 Dependency::LocalKeyframesDecl { range, .. } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
-                    add_local(&mut result, Lexer::slice_range(input, &range).unwrap());
+                    add_local(&mut result, Lexer::slice_range(input, range).unwrap());
                     index = range.end;
                 }
                 Dependency::Replace { content, range } => {
-                    let original = Lexer::slice_range(input, &range).unwrap();
+                    let original = Lexer::slice_range(input, range).unwrap();
                     if original.starts_with(":export") || original.starts_with(":import(") {
-                        return;
+                        continue;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
                     result += content;
                     index = range.end;
                 }
                 Dependency::ICSSImportValue { prop, .. } => {
-                    local_alias.insert(prop.into_owned());
+                    local_alias.insert(prop.to_string());
                 }
                 _ => {}
-            },
-            |warning| warnings.push(warning),
-            self.mode,
-        );
-        visitor.lex_streaming(&mut lexer);
+            }
+        }
         let len = input.len() as u32;
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();

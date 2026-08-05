@@ -1,30 +1,24 @@
 mod dependencies;
+mod dependency_types;
 mod escape;
 mod lexer;
 
-pub use dependencies::Dependency;
 pub use dependencies::LexDependencies;
-pub use dependencies::Mode;
 pub use dependencies::ModeData;
-pub use dependencies::Range;
-pub use dependencies::UrlRangeKind;
-pub use dependencies::Warning;
-pub use dependencies::WarningKind;
+pub use dependency_types::Dependency;
+pub use dependency_types::DependencyContext;
+pub use dependency_types::DependencyListRange;
+pub use dependency_types::Mode;
+pub use dependency_types::Range;
+pub use dependency_types::UrlRangeKind;
+pub use dependency_types::ValueAtRuleImportItem;
+pub use dependency_types::Warning;
+pub use dependency_types::WarningKind;
 pub use escape::unescape;
 pub use lexer::{Lexer, Pos, Token, TokenFlags, TokenKind, TokenWithTrivia, Trivia};
 
-pub trait HandleDependency<'s> {
-    fn handle_dependency(&mut self, dependency: Dependency<'s>);
-}
-
 pub trait HandleWarning<'s> {
     fn handle_warning(&mut self, warning: Warning<'s>);
-}
-
-impl<'s, F: FnMut(Dependency<'s>)> HandleDependency<'s> for F {
-    fn handle_dependency(&mut self, dependency: Dependency<'s>) {
-        self(dependency);
-    }
 }
 
 impl<'s, F: FnMut(Warning<'s>)> HandleWarning<'s> for F {
@@ -36,20 +30,29 @@ impl<'s, F: FnMut(Warning<'s>)> HandleWarning<'s> for F {
 pub fn lex_dependencies<'s>(
     input: &'s str,
     mode: Mode,
-    handle_dependency: impl HandleDependency<'s>,
+    mut handle_dependency: impl FnMut(&Dependency<'s>),
     handle_warning: impl HandleWarning<'s>,
-) {
+) -> DependencyContext<'s> {
+    let capacity = estimate_result_capacity(input.len(), mode);
     let mut lexer = Lexer::new(input);
-    let mut visitor = LexDependencies::new(handle_dependency, handle_warning, mode);
+    let dependency_context = DependencyContext::with_dependency_capacity(capacity.dependencies);
+    let mut visitor = LexDependencies::with_context(dependency_context, handle_warning, mode);
     visitor.lex_streaming(&mut lexer);
+    let dependency_context = visitor.into_dependency_context();
+    for dependency in dependency_context.iter() {
+        handle_dependency(dependency);
+    }
+    dependency_context
 }
 
-pub fn collect_dependencies(input: &str, mode: Mode) -> (Vec<Dependency<'_>>, Vec<Warning<'_>>) {
+pub fn collect_dependencies(input: &str, mode: Mode) -> (DependencyContext<'_>, Vec<Warning<'_>>) {
     let capacity = estimate_result_capacity(input.len(), mode);
-    let mut dependencies = Vec::with_capacity(capacity.dependencies);
     let mut warnings = Vec::with_capacity(capacity.warnings);
-    lex_dependencies(input, mode, |v| dependencies.push(v), |v| warnings.push(v));
-    (dependencies, warnings)
+    let dependency_context = DependencyContext::with_dependency_capacity(capacity.dependencies);
+    let mut lexer = Lexer::new(input);
+    let mut visitor = LexDependencies::with_context(dependency_context, |v| warnings.push(v), mode);
+    visitor.lex_streaming(&mut lexer);
+    (visitor.into_dependency_context(), warnings)
 }
 
 struct CapacityEstimate {

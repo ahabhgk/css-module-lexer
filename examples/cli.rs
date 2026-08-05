@@ -14,7 +14,7 @@ fn main() {
         println!("No dependencies found");
     } else {
         println!("Dependencies:");
-        for dependency in dependencies {
+        for dependency in &dependencies {
             println!("{:?}", dependency);
         }
     }
