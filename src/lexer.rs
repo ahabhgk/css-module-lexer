@@ -1,4 +1,7 @@
+use crate::dependencies::special_value_is_candidate;
+use crate::dependencies::PropertyKind;
 use crate::Range;
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::str;
@@ -257,6 +260,7 @@ impl<'s> Lexer<'s> {
         options: GenericValueScanOptions,
         mut is_candidate: F,
         mut is_comment_candidate: C,
+        icss_symbols: Option<&FxHashSet<&str>>,
     ) -> Option<PrescannedIdent>
     where
         F: FnMut(&str) -> bool,
@@ -311,7 +315,11 @@ impl<'s> Lexer<'s> {
                 let flags = TokenFlags::ascii();
                 let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
                 let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
-                let is_candidate = !flags.has_escape() && is_candidate(name);
+                let is_candidate = !flags.has_escape()
+                    && (is_candidate(name)
+                        || options.property.is_some_and(|property| {
+                            special_value_is_candidate(property, name, icss_symbols)
+                        }));
                 if flags.has_escape()
                     || is_candidate
                     || (is_function && is_dependency_value_function(name))
@@ -1505,6 +1513,7 @@ struct GenericValueScanOptions {
     keep_comments: bool,
     preserve_strings: bool,
     preserve_delimiters: bool,
+    property: Option<PropertyKind>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1611,6 +1620,35 @@ fn hex_digit_value(byte: u8) -> u8 {
 #[inline(always)]
 fn never_fast_forward_candidate(_: &str) -> bool {
     false
+}
+
+fn is_css_modules_pure_magic_comment(input: &str) -> bool {
+    let input = trim_slice(input);
+    let Some(keyword) = input.strip_prefix("cssmodules-pure-") else {
+        return false;
+    };
+    ["ignore", "no-check"].into_iter().any(|expected| {
+        keyword.strip_prefix(expected).is_some_and(|rest| {
+            rest.is_empty()
+                || rest
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| is_white_space(*byte))
+        })
+    })
+}
+
+fn trim_slice(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && is_white_space(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_white_space(bytes[end - 1]) {
+        end -= 1;
+    }
+    &input[start..end]
 }
 
 impl<'a, 's> TokenStream<'a, 's> {
@@ -1777,9 +1815,11 @@ impl<'a, 's> TokenStream<'a, 's> {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
+                property: None,
             },
             &mut is_candidate,
             &mut is_comment_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
@@ -1799,9 +1839,11 @@ impl<'a, 's> TokenStream<'a, 's> {
                 keep_comments: false,
                 preserve_strings,
                 preserve_delimiters,
+                property: None,
             },
             never_fast_forward_candidate,
             never_fast_forward_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
@@ -1827,9 +1869,11 @@ impl<'a, 's> TokenStream<'a, 's> {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
+                property: None,
             },
             &mut is_candidate,
             &mut is_comment_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
@@ -1840,17 +1884,14 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn fast_forward_special_value_if_buffer_empty<F, C>(
+    pub(crate) fn fast_forward_special_value_if_buffer_empty(
         &mut self,
         keep_comments: bool,
         preserve_strings: bool,
         preserve_delimiters: bool,
-        mut is_candidate: F,
-        mut is_comment_candidate: C,
-    ) where
-        F: FnMut(&str) -> bool,
-        C: FnMut(&str) -> bool,
-    {
+        property: PropertyKind,
+        icss_symbols: Option<&FxHashSet<&str>>,
+    ) {
         if !self.buffered.is_empty() {
             return;
         }
@@ -1860,9 +1901,11 @@ impl<'a, 's> TokenStream<'a, 's> {
                 keep_comments,
                 preserve_strings,
                 preserve_delimiters,
+                property: Some(property),
             },
-            &mut is_candidate,
-            &mut is_comment_candidate,
+            never_fast_forward_candidate,
+            is_css_modules_pure_magic_comment,
+            icss_symbols,
         );
         self.finish_value_fast_forward(candidate);
     }

@@ -57,7 +57,7 @@ enum ScanContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PropertyKind {
+pub(crate) enum PropertyKind {
     Generic,
     Animation,
     ListStyle,
@@ -1133,6 +1133,33 @@ fn is_reserved_grid_ident(ident: &str) -> bool {
     })
 }
 
+/// Decide whether a raw-scanned ident inside a special property value must be
+/// handed back to the regular tokenizer. The check applies to plain idents and
+/// function names alike: `url`/`var`/`image-set` and `--`-prefixed functions
+/// are stopped by the caller's generic dependency-function rule, while any
+/// other non-reserved function name also stops the scan so the tokenizer can
+/// push it onto the balanced stack. `icss_symbols` is only consulted for the
+/// property kinds whose values can reference ICSS symbols.
+pub(crate) fn special_value_is_candidate(
+    property: PropertyKind,
+    ident: &str,
+    icss_symbols: Option<&FxHashSet<&str>>,
+) -> bool {
+    if icss_symbols.is_some_and(|symbols| symbols.contains(ident)) {
+        return true;
+    }
+    match property {
+        PropertyKind::ListStyle => ListStyleReserved.check(ident),
+        PropertyKind::FontPalette => ident.starts_with("--"),
+        PropertyKind::Container => ContainerReserved.check(ident),
+        PropertyKind::Grid => !is_reserved_grid_ident(ident),
+        PropertyKind::Animation
+        | PropertyKind::Generic
+        | PropertyKind::Composes
+        | PropertyKind::CustomProperty => false,
+    }
+}
+
 fn is_reserved_container_query_ident(ident: &str) -> bool {
     match_ignore_ascii_case!(ident, {
         "none" | "and" | "or" | "not" => true,
@@ -1619,26 +1646,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
             );
         let preserve_delimiters = !self.balanced.is_empty();
+        let icss_symbols = (!self.icss_symbols.is_empty()).then_some(&self.icss_symbols);
         stream.fast_forward_special_value_if_buffer_empty(
             KEEP_COMMENTS,
             preserve_strings,
             preserve_delimiters,
-            |ident| {
-                if !self.icss_symbols.is_empty() && self.contains_icss_symbol(ident) {
-                    return true;
-                }
-                match property {
-                    PropertyKind::ListStyle => ListStyleReserved.check(ident),
-                    PropertyKind::FontPalette => ident.starts_with("--"),
-                    PropertyKind::Container => ContainerReserved.check(ident),
-                    PropertyKind::Grid => !is_reserved_grid_ident(ident),
-                    PropertyKind::Animation
-                    | PropertyKind::Generic
-                    | PropertyKind::Composes
-                    | PropertyKind::CustomProperty => false,
-                }
-            },
-            is_css_modules_pure_magic_comment,
+            property,
+            icss_symbols,
         );
     }
 
