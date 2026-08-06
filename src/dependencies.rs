@@ -4,8 +4,8 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::dependency_types::{
-    Dependency, DependencyContext, DependencyListRange, Mode, Range, UrlRangeKind,
-    ValueAtRuleImportItem, Warning, WarningKind,
+    Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
+    WarningKind,
 };
 use crate::lexer::Token;
 use crate::lexer::TokenFlags;
@@ -377,19 +377,6 @@ impl BalancedItemKind {
     }
 }
 
-#[derive(Debug)]
-enum ValueAtRule<'s> {
-    Import {
-        from: &'s str,
-        items: DependencyListRange<ValueAtRuleImportItem<'s>>,
-    },
-    Value {
-        local_name: &'s str,
-        value: &'s str,
-        has_colon: bool,
-    },
-}
-
 fn is_css_space_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
 }
@@ -472,15 +459,6 @@ fn token_text(input: &str, token: Token) -> &str {
     Lexer::slice_range(input, &token.range).unwrap_or("")
 }
 
-fn token_span<'s>(input: &'s str, tokens: &[Token], start: usize, end: usize) -> &'s str {
-    if start >= end {
-        return "";
-    }
-    let start = tokens[start].range.start as usize;
-    let end = tokens[end - 1].range.end as usize;
-    &input[start..end]
-}
-
 fn is_open_token(kind: TokenKind) -> bool {
     matches!(
         kind,
@@ -506,165 +484,300 @@ fn ident_like_range(token: Token) -> Option<Range> {
     }
 }
 
-fn parse_value_at_rule_import_item<'s>(
-    input: &'s str,
-    tokens: &[Token],
-    start: usize,
-    end: usize,
-) -> ValueAtRuleImportItem<'s> {
-    if start >= end {
-        return ValueAtRuleImportItem::new("", "");
-    }
-    let mut depth = 0u32;
-    let mut colon_index = None;
-    let mut as_index = None;
-    for (index, token) in tokens[start..end].iter().copied().enumerate() {
-        let index = start + index;
-        if is_close_token(token.kind) {
-            depth = depth.saturating_sub(1);
-        }
-        if depth == 0 {
-            if token.kind == TokenKind::Colon && colon_index.is_none() {
-                colon_index = Some(index);
-            }
-            if token.kind == TokenKind::Ident && token_text(input, token).eq_ignore_ascii_case("as")
-            {
-                as_index = Some(index);
-            }
-        }
-        if is_open_token(token.kind) {
-            depth += 1;
-        }
-    }
-
-    if let Some(index) = colon_index {
-        return ValueAtRuleImportItem::new(
-            token_span(input, tokens, start, index),
-            token_span(input, tokens, index + 1, end),
-        );
-    }
-    if let Some(index) = as_index {
-        let import_name = token_span(input, tokens, start, index);
-        let local_name = token_span(input, tokens, index + 1, end);
-        if !import_name.is_empty() && !local_name.is_empty() {
-            return ValueAtRuleImportItem::new(local_name, import_name);
-        }
-    }
-
-    let value = token_span(input, tokens, start, end);
-    ValueAtRuleImportItem::new(value, value)
+/// Token-aligned split of an import item by a top-level colon or `as` ident.
+/// Names are delimited by the surrounding significant tokens, so comments and
+/// whitespace at the split points stay out of the names.
+#[derive(Debug, Clone, Copy)]
+struct ValueAtRuleSplit {
+    split: Pos,
+    end: Pos,
+    prev_end: Pos,
+    next_start: Option<Pos>,
 }
 
-fn parse_value_at_rule_value(input: &str, start: Pos, has_tokens: bool) -> &str {
-    let value = &input[start as usize..];
-    if has_tokens {
-        // A comment is part of a non-empty ICSS value. Only ordinary CSS
-        // whitespace is trimmed, matching the legacy aligned-slice behavior
-        // without manufacturing an equal-sized comment mask.
-        trim_slice(value)
-    } else {
-        value
-    }
+/// Streaming state for a single `@value` at-rule. Tokens are consumed one at a
+/// time; completed import items are written into the [`DependencyContext`] side
+/// table immediately instead of collecting a token buffer first.
+struct ValueAtRuleStream<'s> {
+    input: &'s str,
+    depth: u32,
+    params_end: Pos,
+    first_significant: Option<(Pos, Pos)>,
+    significant_count: u32,
+    first_colon: Option<ValueAtRuleSplit>,
+    first_colon_tokens_after: u32,
+    item_start: Option<Pos>,
+    item_end: Pos,
+    item_colon: Option<ValueAtRuleSplit>,
+    item_as: Option<ValueAtRuleSplit>,
+    last_significant: Option<Token>,
+    penultimate_significant: Option<Token>,
+    from_pos: Option<Pos>,
+    from_prev_end: Option<Pos>,
 }
 
-fn parse_value_at_rule<'s>(
-    input: &'s str,
-    tokens: &[Token],
-    dependency_context: &mut DependencyContext<'s>,
-) -> ValueAtRule<'s> {
-    let mut from_index = None;
-    let mut depth = 0u32;
-    let mut colon_index = None;
-    for (index, token) in tokens.iter().copied().enumerate() {
-        if is_close_token(token.kind) {
-            depth = depth.saturating_sub(1);
-        }
-        if depth == 0
-            && token.kind == TokenKind::Ident
-            && token_text(input, token).eq_ignore_ascii_case("from")
-            && index > 0
-            && index + 1 < tokens.len()
-            && trivia_only(&input[tokens[index - 1].range.end as usize..token.range.start as usize])
-            && trivia_only(&input[token.range.end as usize..tokens[index + 1].range.start as usize])
-        {
-            from_index = Some(index);
-        }
-        if depth == 0 && token.kind == TokenKind::Colon && colon_index.is_none() {
-            colon_index = Some(index);
-        }
-        if is_open_token(token.kind) {
-            depth += 1;
+impl<'s> ValueAtRuleStream<'s> {
+    fn new(input: &'s str) -> Self {
+        Self {
+            input,
+            depth: 0,
+            params_end: 0,
+            first_significant: None,
+            significant_count: 0,
+            first_colon: None,
+            first_colon_tokens_after: 0,
+            item_start: None,
+            item_end: 0,
+            item_colon: None,
+            item_as: None,
+            last_significant: None,
+            penultimate_significant: None,
+            from_pos: None,
+            from_prev_end: None,
         }
     }
 
-    if let Some(from_index) = from_index {
-        let path_index = from_index + 1;
-        let before_from = token_span(input, tokens, 0, from_index);
-        let from = token_span(input, tokens, path_index, path_index + 1);
-        if path_index + 1 == tokens.len() && !before_from.is_empty() && !from.is_empty() {
-            let mut item_start = 0;
-            let mut item_end = from_index;
-            if item_end >= 2
-                && tokens[item_start].kind == TokenKind::LeftParenthesis
-                && tokens[item_end - 1].kind == TokenKind::RightParenthesis
-            {
-                item_start += 1;
-                item_end -= 1;
-            }
-
-            let items_start = dependency_context.value_at_rule_import_items_len();
-            let mut start = item_start;
-            let mut item_depth = 0u32;
-            for index in item_start..item_end {
-                let token = tokens[index];
-                if is_close_token(token.kind) {
-                    item_depth = item_depth.saturating_sub(1);
-                }
-                if token.kind == TokenKind::Comma && item_depth == 0 {
-                    let item = parse_value_at_rule_import_item(input, tokens, start, index);
-                    if !item.local_name().is_empty() || !item.import_name().is_empty() {
-                        dependency_context.push_value_at_rule_import_item(item);
-                    }
-                    start = index + 1;
-                }
-                if is_open_token(token.kind) {
-                    item_depth += 1;
-                }
-            }
-            let item = parse_value_at_rule_import_item(input, tokens, start, item_end);
-            if !item.local_name().is_empty() || !item.import_name().is_empty() {
-                dependency_context.push_value_at_rule_import_item(item);
-            }
-            let items = DependencyListRange::<ValueAtRuleImportItem<'s>>::from_bounds(
-                items_start,
-                dependency_context.value_at_rule_import_items_len(),
-            );
-            return ValueAtRule::Import { from, items };
+    fn push(&mut self, context: &mut DependencyContext<'s>, token: Token) {
+        if matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
+            self.params_end = token.range.end;
+            return;
         }
-    }
+        self.params_end = token.range.end;
+        if self.first_significant.is_none() {
+            self.first_significant = Some((token.range.start, token.range.end));
+        }
+        self.significant_count += 1;
+        let had_first_colon = self.first_colon.is_some();
 
-    if let Some(index) = colon_index {
-        return ValueAtRule::Value {
-            local_name: token_span(input, tokens, 0, index),
-            value: parse_value_at_rule_value(
-                input,
-                tokens[index].range.end,
-                index + 1 < tokens.len(),
-            ),
-            has_colon: true,
+        self.depth = (self.depth + u32::from(is_open_token(token.kind)))
+            .saturating_sub(u32::from(is_close_token(token.kind)));
+        let at_top = self.depth == 0;
+        let is_ident = token.kind == TokenKind::Ident;
+        let text = if is_ident {
+            self.input
+                .get(token.range.start as usize..token.range.end as usize)
+                .unwrap_or("")
+        } else {
+            ""
         };
+        if at_top {
+            if token.kind == TokenKind::Colon {
+                let split = ValueAtRuleSplit {
+                    split: token.range.start,
+                    end: token.range.end,
+                    prev_end: self
+                        .last_significant
+                        .map_or(token.range.start, |previous| previous.range.end),
+                    next_start: None,
+                };
+                if self.first_colon.is_none() {
+                    self.first_colon = Some(split);
+                }
+                if self.item_colon.is_none() {
+                    self.item_colon = Some(split);
+                }
+            }
+            if is_ident && text.eq_ignore_ascii_case("as") {
+                self.item_as = Some(ValueAtRuleSplit {
+                    split: token.range.start,
+                    end: token.range.end,
+                    prev_end: self
+                        .last_significant
+                        .map_or(token.range.start, |previous| previous.range.end),
+                    next_start: None,
+                });
+            }
+            if is_ident && text.eq_ignore_ascii_case("from") {
+                if let Some(previous) = self.last_significant {
+                    let gap = self
+                        .input
+                        .get(previous.range.end as usize..token.range.start as usize)
+                        .unwrap_or("");
+                    if trivia_only(gap) {
+                        self.from_pos = Some(token.range.start);
+                        self.from_prev_end = Some(previous.range.end);
+                    }
+                }
+            }
+            self.penultimate_significant = self.last_significant;
+            self.last_significant = Some(token);
+        }
+        if had_first_colon {
+            self.first_colon_tokens_after += 1;
+        }
+
+        if token.kind == TokenKind::Comma && at_top {
+            self.finish_item(context, self.item_end);
+            self.item_start = None;
+            self.item_colon = None;
+            self.item_as = None;
+        } else {
+            if self.item_start.is_none() {
+                self.item_start = Some(token.range.start);
+            }
+            self.item_end = token.range.end;
+            if let Some(split) = self.item_colon.as_mut() {
+                if split.next_start.is_none() && split.split != token.range.start {
+                    split.next_start = Some(token.range.start);
+                }
+            }
+            if let Some(split) = self.item_as.as_mut() {
+                if split.next_start.is_none() && split.split != token.range.start {
+                    split.next_start = Some(token.range.start);
+                }
+            }
+        }
     }
 
-    let local_name = token_span(input, tokens, 0, usize::from(!tokens.is_empty()));
-    let value = if tokens.len() > 1 {
-        parse_value_at_rule_value(input, tokens[0].range.end, true)
-    } else {
-        ""
-    };
-    ValueAtRule::Value {
-        local_name,
-        value,
-        has_colon: false,
+    fn finish_item(&mut self, context: &mut DependencyContext<'s>, end: Pos) {
+        let Some(item_start) = self.item_start else {
+            return;
+        };
+        if end.saturating_sub(item_start) >= 2
+            && self.input.as_bytes()[item_start as usize] == b'('
+            && self.input.as_bytes()[end as usize - 1] == b')'
+        {
+            self.parse_paren_items(context, item_start + 1, end - 1);
+        } else {
+            let item = self.build_item(item_start, end, self.item_colon, self.item_as);
+            if !item.local_name().is_empty() || !item.import_name().is_empty() {
+                context.push_value_at_rule_import_item(item);
+            }
+        }
+    }
+
+    fn build_item(
+        &self,
+        start: Pos,
+        end: Pos,
+        colon: Option<ValueAtRuleSplit>,
+        as_split: Option<ValueAtRuleSplit>,
+    ) -> ValueAtRuleImportItem<'s> {
+        let slice = |a: Pos, b: Pos| -> &'s str {
+            if a >= b {
+                ""
+            } else {
+                &self.input[a as usize..b as usize]
+            }
+        };
+        if let Some(split) = colon {
+            return ValueAtRuleImportItem::new(
+                slice(start, split.prev_end),
+                split
+                    .next_start
+                    .map_or("", |next_start| slice(next_start, end)),
+            );
+        }
+        if let Some(split) = as_split {
+            let import_name = slice(start, split.prev_end);
+            let local_name = split
+                .next_start
+                .map_or("", |next_start| slice(next_start, end));
+            if !import_name.is_empty() && !local_name.is_empty() {
+                return ValueAtRuleImportItem::new(local_name, import_name);
+            }
+        }
+        let value = slice(start, end);
+        ValueAtRuleImportItem::new(value, value)
+    }
+
+    /// Re-parses a parenthesized item: the inner content was not streamed
+    /// token-by-token, so it is tokenized once more and split at depth-zero
+    /// commas, mirroring the legacy aligned-token behavior.
+    fn parse_paren_items(&mut self, context: &mut DependencyContext<'s>, start: Pos, end: Pos) {
+        let slice = &self.input[start as usize..end as usize];
+        let mut lexer = Lexer::new(slice);
+        let mut tokens: SmallVec<[Token; 8]> = SmallVec::new();
+        loop {
+            let token = lexer.next_token();
+            if token.kind == TokenKind::Eof {
+                break;
+            }
+            if matches!(
+                token.kind,
+                TokenKind::Comment | TokenKind::BadComment | TokenKind::WhiteSpace
+            ) {
+                continue;
+            }
+            tokens.push(token);
+        }
+        let mut item_start = 0;
+        let mut item_depth = 0u32;
+        for (index, token) in tokens.iter().copied().enumerate() {
+            if is_close_token(token.kind) {
+                item_depth = item_depth.saturating_sub(1);
+            }
+            if token.kind == TokenKind::Comma && item_depth == 0 {
+                self.push_parsed_item(context, &tokens, item_start, index, slice);
+                item_start = index + 1;
+            }
+            if is_open_token(token.kind) {
+                item_depth += 1;
+            }
+        }
+        self.push_parsed_item(context, &tokens, item_start, tokens.len(), slice);
+    }
+
+    fn push_parsed_item(
+        &mut self,
+        context: &mut DependencyContext<'s>,
+        tokens: &[Token],
+        start: usize,
+        end: usize,
+        slice: &'s str,
+    ) {
+        let mut depth = 0u32;
+        let mut colon_index = None;
+        let mut as_index = None;
+        for (index, token) in tokens[start..end].iter().copied().enumerate() {
+            let index = start + index;
+            if is_close_token(token.kind) {
+                depth = depth.saturating_sub(1);
+            }
+            if depth == 0 {
+                if token.kind == TokenKind::Colon && colon_index.is_none() {
+                    colon_index = Some(index);
+                }
+                if token.kind == TokenKind::Ident
+                    && token_text(slice, token).eq_ignore_ascii_case("as")
+                {
+                    as_index = Some(index);
+                }
+            }
+            if is_open_token(token.kind) {
+                depth += 1;
+            }
+        }
+        let span = |a: usize, b: usize| -> &'s str {
+            if a >= b {
+                ""
+            } else {
+                &slice[tokens[a].range.start as usize..tokens[b - 1].range.end as usize]
+            }
+        };
+        let item = if let Some(index) = colon_index {
+            ValueAtRuleImportItem::new(span(start, index), span(index + 1, end))
+        } else if let Some(index) = as_index {
+            let import_name = span(start, index);
+            let local_name = span(index + 1, end);
+            if !import_name.is_empty() && !local_name.is_empty() {
+                ValueAtRuleImportItem::new(local_name, import_name)
+            } else {
+                ValueAtRuleImportItem::new("", "")
+            }
+        } else {
+            let value = span(start, end);
+            ValueAtRuleImportItem::new(value, value)
+        };
+        if !item.local_name().is_empty() || !item.import_name().is_empty() {
+            context.push_value_at_rule_import_item(item);
+        }
+    }
+
+    /// Returns the last two significant tokens, or `None` if there are fewer
+    /// than two.
+    fn last_two(&self) -> Option<(Token, Token)> {
+        Some((self.penultimate_significant?, self.last_significant?))
     }
 }
 
@@ -2017,97 +2130,125 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn consume_value_at_rule_params(
-        &self,
-        stream: &mut TokenStream<'_, 's>,
-    ) -> Option<(Pos, Pos, SmallVec<[Token; 16]>)> {
-        let start = stream.consumed_pos();
-        let mut tokens = SmallVec::new();
-        let mut depth = 0u32;
+    fn lex_value_at_rule(&mut self, stream: &mut TokenStream<'_, 's>, start: Pos) -> Option<()> {
+        let input = stream.slice_trusted(0, stream.source_end());
+        let checkpoint = self
+            .dependency_context
+            .value_at_rule_import_items_checkpoint();
+        let mut parser = ValueAtRuleStream::new(input);
         loop {
-            let token = stream.peek_significant_skipping_comments::<true>().token;
-            if token.kind == TokenKind::Eof {
-                return None;
-            }
-            if is_close_token(token.kind) {
-                depth = depth.saturating_sub(1);
-            }
-            if depth == 0 && token.kind == TokenKind::Semicolon {
-                stream.next_parser_token();
-                return Some((start, token.range.start, tokens));
-            }
-            if depth == 0 && token.kind == TokenKind::RightCurlyBracket {
-                return Some((start, token.range.start, tokens));
-            }
             let token = stream.next_parser_token().token;
-            tokens.push(Token::with_flags(
-                token.kind,
-                Range::new(token.range.start - start, token.range.end - start),
-                Range::new(
-                    token.value_range.start - start,
-                    token.value_range.end - start,
-                ),
-                token.flags,
-            ));
-            if is_open_token(token.kind) {
-                depth += 1;
+            match token.kind {
+                TokenKind::Eof => return None,
+                _ => {
+                    if token.kind == TokenKind::Semicolon && parser.depth == 0 {
+                        parser.params_end = token.range.start;
+                        break;
+                    }
+                    let depth_after = (parser.depth + u32::from(is_open_token(token.kind)))
+                        .saturating_sub(u32::from(is_close_token(token.kind)));
+                    if token.kind == TokenKind::RightCurlyBracket && depth_after == 0 {
+                        parser.params_end = token.range.start;
+                        break;
+                    }
+                    parser.push(&mut self.dependency_context, token);
+                }
             }
         }
-    }
-
-    fn lex_value_at_rule(&mut self, stream: &mut TokenStream<'_, 's>, start: Pos) -> Option<()> {
-        let (params_start, params_end, tokens) = self.consume_value_at_rule_params(stream)?;
-        let at_rule_end = params_end.max(stream.consumed_pos());
-        let params = stream.slice(params_start, params_end)?;
-        match parse_value_at_rule(params, &tokens, &mut self.dependency_context) {
-            ValueAtRule::Import { from, items } => {
-                if from.is_empty() || items.is_empty() {
-                    self.handle_warning.handle_warning(Warning {
-                        range: Range::new(start, at_rule_end),
-                        kind: WarningKind::Unexpected {
-                            message: "Broken '@value' at-rule",
-                        },
-                    });
-                } else {
+        let at_rule_end = parser.params_end.max(stream.consumed_pos());
+        let import = parser.last_two().is_some_and(|(penultimate, last)| {
+            penultimate.kind == TokenKind::Ident
+                && parser
+                    .input
+                    .get(penultimate.range.start as usize..penultimate.range.end as usize)
+                    .is_some_and(|text| text.eq_ignore_ascii_case("from"))
+                && parser.from_pos == Some(penultimate.range.start)
+                && parser
+                    .input
+                    .get(penultimate.range.end as usize..last.range.start as usize)
+                    .is_some_and(trivia_only)
+        });
+        if import {
+            let (_, last) = parser.last_two().unwrap();
+            let from = &parser.input[last.range.start as usize..last.range.end as usize];
+            let item_end = parser.from_prev_end.unwrap_or(parser.item_end);
+            parser.finish_item(&mut self.dependency_context, item_end);
+            let items = self
+                .dependency_context
+                .finish_value_at_rule_import_items(checkpoint);
+            if items.is_empty() {
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, at_rule_end),
+                    kind: WarningKind::Unexpected {
+                        message: "Broken '@value' at-rule",
+                    },
+                });
+            } else {
+                self.dependency_context
+                    .push_dependency(Dependency::ICSSImportFrom { path: from });
+                for index in items.as_usize_range() {
+                    let item = self.dependency_context.value_at_rule_import_item(index);
                     self.dependency_context
-                        .push_dependency(Dependency::ICSSImportFrom { path: from });
-                    for index in items.as_usize_range() {
-                        let item = self.dependency_context.value_at_rule_import_item(index);
-                        self.dependency_context
-                            .push_dependency(Dependency::ICSSImportValue {
-                                prop: item.local_name(),
-                                value: item.import_name(),
-                            });
-                        self.insert_icss_symbol(item.local_name());
-                        self.dependency_context
-                            .push_dependency(Dependency::ICSSExportValue {
-                                prop: item.local_name(),
-                                value: item.local_name(),
-                            });
-                    }
-                }
-            }
-            ValueAtRule::Value {
-                local_name,
-                value,
-                has_colon,
-            } => {
-                if local_name.is_empty() || (!has_colon && value.is_empty()) {
-                    self.handle_warning.handle_warning(Warning {
-                        range: Range::new(start, at_rule_end),
-                        kind: WarningKind::Unexpected {
-                            message: "Broken '@value' at-rule",
-                        },
-                    });
-                }
-                if !local_name.is_empty() {
+                        .push_dependency(Dependency::ICSSImportValue {
+                            prop: item.local_name(),
+                            value: item.import_name(),
+                        });
+                    self.insert_icss_symbol(item.local_name());
                     self.dependency_context
                         .push_dependency(Dependency::ICSSExportValue {
-                            prop: local_name,
-                            value,
+                            prop: item.local_name(),
+                            value: item.local_name(),
                         });
-                    self.insert_icss_symbol(local_name);
                 }
+            }
+        } else {
+            self.dependency_context
+                .truncate_value_at_rule_import_items(checkpoint);
+            let local_name;
+            let value;
+            let has_colon;
+            if let Some(colon) = parser.first_colon {
+                local_name = &parser.input[parser
+                    .first_significant
+                    .unwrap_or((colon.split, colon.split))
+                    .0 as usize
+                    ..colon.prev_end as usize];
+                let raw = &parser.input[colon.end as usize..parser.params_end as usize];
+                value = if parser.first_colon_tokens_after > 0 {
+                    trim_slice(raw)
+                } else {
+                    raw
+                };
+                has_colon = true;
+            } else if let Some((first_start, first_end)) = parser.first_significant {
+                local_name = &parser.input[first_start as usize..first_end as usize];
+                let raw = &parser.input[first_end as usize..parser.params_end as usize];
+                value = if parser.significant_count > 1 {
+                    trim_slice(raw)
+                } else {
+                    raw
+                };
+                has_colon = false;
+            } else {
+                local_name = "";
+                value = "";
+                has_colon = false;
+            }
+            if local_name.is_empty() || (!has_colon && value.is_empty()) {
+                self.handle_warning.handle_warning(Warning {
+                    range: Range::new(start, at_rule_end),
+                    kind: WarningKind::Unexpected {
+                        message: "Broken '@value' at-rule",
+                    },
+                });
+            }
+            if !local_name.is_empty() {
+                self.dependency_context
+                    .push_dependency(Dependency::ICSSExportValue {
+                        prop: local_name,
+                        value,
+                    });
+                self.insert_icss_symbol(local_name);
             }
         }
         self.dependency_context

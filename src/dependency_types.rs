@@ -396,16 +396,28 @@ impl<'s> DependencyContext<'s> {
         });
     }
 
-    pub(crate) fn value_at_rule_import_items_len(&self) -> usize {
-        self.value_at_rule_import_items.len()
-    }
-
     pub(crate) fn push_value_at_rule_import_item(&mut self, item: ValueAtRuleImportItem<'s>) {
         self.value_at_rule_import_items.push(item);
     }
 
     pub(crate) fn value_at_rule_import_item(&self, index: usize) -> ValueAtRuleImportItem<'s> {
         self.value_at_rule_import_items[index]
+    }
+
+    pub(crate) fn value_at_rule_import_items_checkpoint(&self) -> usize {
+        self.value_at_rule_import_items.len()
+    }
+
+    pub(crate) fn truncate_value_at_rule_import_items(&mut self, checkpoint: usize) {
+        self.value_at_rule_import_items.truncate(checkpoint);
+    }
+
+    pub(crate) fn finish_value_at_rule_import_items(
+        &self,
+        checkpoint: usize,
+    ) -> DependencyListRange<ValueAtRuleImportItem<'s>> {
+        debug_assert!(checkpoint <= self.value_at_rule_import_items.len());
+        DependencyListRange::from_bounds(checkpoint, self.value_at_rule_import_items.len())
     }
 
     pub(crate) fn push_composes(
