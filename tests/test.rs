@@ -1333,7 +1333,7 @@ fn comment_separated_declaration_value_is_not_scanned_as_selector() {
 }
 
 #[test]
-fn rspack_mixed_nested_selector_does_not_gain_recovered_dependencies() {
+fn rspack_mixed_nested_selector_recovers_dependencies() {
     let input = indoc! {r#"
         :global .global-foo, :local .bar {
             :local .local-in-global {
@@ -1348,24 +1348,15 @@ fn rspack_mixed_nested_selector_does_not_gain_recovered_dependencies() {
             }
         }
     "#};
-    let (dependencies, _) = collect_dependencies(input, Mode::Local);
-    assert!(!dependencies.iter().any(|dependency| {
-        matches!(
-            dependency,
-            Dependency::LocalClass { name, .. } if *name == ".my-global-class-again"
-        )
-    }));
-
-    let mixed_selector_start = input.find(":global .my-global-class-again").unwrap() as u32;
-    let mixed_selector_end = input
-        .find(":local .my-global-class-again")
-        .map(|start| start + ":local".len())
-        .unwrap() as u32;
-    assert!(!dependencies.iter().any(|dependency| matches!(
-        dependency,
-        Dependency::Replace { range, .. }
-            if range.start >= mixed_selector_start && range.end <= mixed_selector_end
-    )));
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings
+        .iter()
+        .all(|warning| matches!(warning.kind(), WarningKind::InconsistentModeResult)));
+    assert_replace_dependency(input, &dependencies[5], "", ":global ");
+    assert_replace_dependency(input, &dependencies[6], "", ":local ");
+    assert_local_class_dependency(input, &dependencies[7], ".my-global-class-again", true);
+    assert_eq!(dependencies.len(), 8);
 }
 
 #[test]
@@ -1708,6 +1699,35 @@ fn css_modules_nesting() {
     assert_replace_dependency(input, &dependencies[4], "", ":global ");
     assert_local_class_dependency(input, &dependencies[5], ".nested2-nested", false);
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_nested_mode_pseudo_class_restores_local_mode() {
+    let input = indoc! {r#"
+        .outer {
+            :local .local, :global .global {}
+            :global .foo, .bar {}
+        }
+
+        #id-foo {
+            #id-bar {}
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(warnings.len(), 1);
+    assert!(matches!(
+        warnings[0].kind(),
+        WarningKind::InconsistentModeResult
+    ));
+    assert_local_class_dependency(input, &dependencies[0], ".outer", false);
+    assert_replace_dependency(input, &dependencies[1], "", ":local ");
+    assert_local_class_dependency(input, &dependencies[2], ".local", true);
+    assert_replace_dependency(input, &dependencies[3], "", ":global ");
+    assert_replace_dependency(input, &dependencies[4], "", ":global ");
+    assert_local_class_dependency(input, &dependencies[5], ".bar", false);
+    assert_local_id_dependency(input, &dependencies[6], "#id-foo", false);
+    assert_local_id_dependency(input, &dependencies[7], "#id-bar", false);
+    assert_eq!(dependencies.len(), 8);
 }
 
 #[test]

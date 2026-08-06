@@ -3743,7 +3743,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         start: Pos,
         _: Pos,
     ) -> Option<()> {
-        if matches!(self.scope, Scope::InBlock) && !self.balanced.is_empty() {
+        if matches!(self.scope, Scope::InBlock)
+            && self.scan_context != ScanContext::Selector
+            && !self.balanced.is_empty()
+        {
             self.balanced.push(
                 BalancedItem::new_curly(start, start + 1),
                 self.mode_data.as_mut(),
