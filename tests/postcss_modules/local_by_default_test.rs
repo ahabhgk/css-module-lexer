@@ -613,7 +613,7 @@ fn default_to_local_when_mode_provided() {
 
 #[test]
 fn use_correct_spacing() {
-    test_with_options(
+    test_with_options_warning(
         indoc! {r#"
             .a :local .b {}
             .a:local.b {}
@@ -639,6 +639,7 @@ fn use_correct_spacing() {
             :local(.a) .b {}
         "#},
         LocalByDefault { mode: Mode::Global },
+        "Missing trailing whitespace",
     )
 }
 
@@ -772,7 +773,11 @@ fn throw_on_nested_broad_local() {
 
 #[test]
 fn throw_on_incorrect_spacing_with_broad_global() {
-    test(".foo :global.bar {}", ":local(.foo) .bar {}");
+    test_with_warning(
+        ".foo :global.bar {}",
+        ":local(.foo) .bar {}",
+        "Missing trailing whitespace",
+    );
 }
 
 #[test]

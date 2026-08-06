@@ -3845,6 +3845,16 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 Some(last) if matches!(last.kind, BalancedItemKind::Curly)
             ) {
                 self.balanced.pop(self.mode_data.as_mut());
+                if self.block_nesting_level == 0 {
+                    self.scope = Scope::TopLevel;
+                    self.is_next_rule_prelude = true;
+                    self.set_scan_context(stream, ScanContext::TopLevel);
+                    if let Some(mode_data) = &mut self.mode_data {
+                        mode_data.composes_local_classes.reset_to_initial();
+                    }
+                } else {
+                    self.set_scan_context(stream, ScanContext::BlockItem);
+                }
                 return Some(());
             }
 
@@ -3966,6 +3976,21 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             let next = stream.peek_parser_token();
             if next.token.kind == TokenKind::Eof {
                 return None;
+            }
+            if !next.leading.has_whitespace() {
+                let missing_whitespace = match stream.byte_at(next.token.range.start) {
+                    Some(b'.' | b'#') => true,
+                    Some(b'{') => next.leading.first_comment_start.is_some(),
+                    _ => false,
+                };
+                if missing_whitespace {
+                    self.handle_warning.handle_warning(Warning {
+                        range: Range::new(start, end),
+                        kind: WarningKind::Unexpected {
+                            message: "Missing trailing whitespace",
+                        },
+                    });
+                }
             }
             self.balanced
                 .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());

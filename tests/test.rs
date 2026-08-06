@@ -1136,7 +1136,10 @@ fn css_modules_pseudo_2() {
 fn css_modules_local_class_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/.class {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Missing trailing whitespace"]
+    );
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_class_dependency(input, &dependencies[1], ".class", true);
     assert_eq!(dependencies.len(), 2);
@@ -1157,7 +1160,10 @@ fn css_modules_mode_replace_stops_before_comment_after_white_space() {
 fn css_modules_local_id_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/#id {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Missing trailing whitespace"]
+    );
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_local_id_dependency(input, &dependencies[1], "#id", true);
     assert_eq!(dependencies.len(), 2);
@@ -1167,7 +1173,10 @@ fn css_modules_local_id_after_comment_keeps_dependencies() {
 fn css_modules_global_class_after_comment_keeps_dependencies() {
     let input = ":global/** comment **/.class {}";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Missing trailing whitespace"]
+    );
     assert_replace_dependency(input, &dependencies[0], "", ":global");
     assert_eq!(dependencies.len(), 1);
 }
@@ -1176,7 +1185,10 @@ fn css_modules_global_class_after_comment_keeps_dependencies() {
 fn css_modules_local_block_after_comment_keeps_dependencies() {
     let input = ":local/** comment **/{ color: red; }";
     let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Missing trailing whitespace"]
+    );
     assert_replace_dependency(input, &dependencies[0], "", ":local");
     assert_eq!(dependencies.len(), 1);
 }
@@ -1218,7 +1230,7 @@ const RSPACK_NESTED_COMMENT_SEPARATED_MODES: &str = r#"
 "#;
 
 #[test]
-fn rspack_nested_comment_separated_modes_only_scan_selector_context() {
+fn rspack_nested_comment_separated_modes_recover_selector_dependencies() {
     let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
     let (dependencies, _) = collect_dependencies(input, Mode::Local);
 
@@ -1230,7 +1242,15 @@ fn rspack_nested_comment_separated_modes_only_scan_selector_context() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(local_dependencies, [(".no-space", false)]);
+    assert_eq!(
+        local_dependencies,
+        [
+            (".no-space", false),
+            (".class", true),
+            (".class", true),
+            ("#hash", true),
+        ]
+    );
 
     let replacements = dependencies
         .iter()
@@ -1239,15 +1259,35 @@ fn rspack_nested_comment_separated_modes_only_scan_selector_context() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(replacements, [":global"]);
+    assert_eq!(
+        replacements,
+        [":global", ":global", ":local", ":local", ":local", ":local"]
+    );
 }
 
 #[test]
-fn rspack_nested_comment_separated_modes_do_not_keep_spacing_warnings() {
+fn rspack_nested_comment_separated_modes_warn_in_source_order() {
     let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
     let (_, warnings) = collect_dependencies(input, Mode::Local);
 
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+        ]
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .collect::<Vec<_>>(),
+        [":global", ":global", ":local", ":local", ":local", ":local"]
+    );
 }
 
 #[test]

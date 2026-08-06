@@ -168,7 +168,10 @@ fn selector_fast_forward_preserves_candidates_and_opaque_ranges() {
         :local/**/.commented {}
     "##;
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Missing trailing whitespace"]
+    );
 
     let selector_dependencies = dependencies
         .iter()
