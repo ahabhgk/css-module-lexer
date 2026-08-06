@@ -1,4 +1,5 @@
 use crate::Range;
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::str;
 
@@ -563,6 +564,94 @@ impl<'s> Lexer<'s> {
             "selector fast-forward moved scan_pos backward from {scan_start} to {position}"
         );
         invalidates_composes
+    }
+
+    /// Skip a balanced delimiter run whose opening token has already been
+    /// consumed. Only `RightParenthesis`, `RightSquareBracket`, and
+    /// `RightCurlyBracket` are accepted as `end`.
+    ///
+    /// Returns the range from the opening token through the matching closing
+    /// token on success. The caller is responsible for passing the position
+    /// just past the opening token.
+    ///
+    /// Nested delimiters are tracked on a local stack. Strings, comments,
+    /// escapes, and non-ASCII code points are skipped without tokenizing so
+    /// their content can never close the run. The scan is transactional: on
+    /// failure (EOF or an unbalanced closing token) `scan_pos` is left
+    /// unchanged and `None` is returned so the caller can fall back to the
+    /// regular tokenizer, which remains the sole owner of parser state
+    /// changes.
+    pub(crate) fn fast_forward(&mut self, end: TokenKind) -> Option<Range> {
+        match end {
+            TokenKind::RightParenthesis
+            | TokenKind::RightSquareBracket
+            | TokenKind::RightCurlyBracket => {}
+            _ => unreachable!("fast_forward accepts only closing bracket kinds"),
+        }
+        let open_start = self.scan_pos;
+        let mut stack: SmallVec<[TokenKind; 8]> = SmallVec::new();
+        stack.push(end);
+        let mut position = open_start as usize;
+        let bytes = self.value;
+        while position < bytes.len() {
+            let byte = bytes[position];
+            match byte {
+                C_QUOTATION_MARK | C_APOSTROPHE => {
+                    let (kind, string_end, _, _, _) = self.scan_string(position, byte);
+                    if kind == TokenKind::BadString {
+                        return None;
+                    }
+                    position = string_end;
+                }
+                C_SOLIDUS if bytes.get(position + 1) == Some(&C_ASTERISK) => {
+                    let (kind, comment_end, _, _, _) = self.scan_comment(position);
+                    if kind == TokenKind::BadComment {
+                        return None;
+                    }
+                    position = comment_end;
+                }
+                C_REVERSE_SOLIDUS if self.is_valid_escape_at(position) => {
+                    position = self.scan_escape(position);
+                }
+                C_LEFT_PARENTHESIS => {
+                    stack.push(TokenKind::RightParenthesis);
+                    position += 1;
+                }
+                C_LEFT_SQUARE => {
+                    stack.push(TokenKind::RightSquareBracket);
+                    position += 1;
+                }
+                C_LEFT_CURLY => {
+                    stack.push(TokenKind::RightCurlyBracket);
+                    position += 1;
+                }
+                C_RIGHT_PARENTHESIS | C_RIGHT_SQUARE | C_RIGHT_CURLY => {
+                    if *stack.last().expect("delimiter stack never empties") != kind_to_right(byte)
+                    {
+                        return None;
+                    }
+                    stack.pop();
+                    position += 1;
+                    if stack.is_empty() {
+                        self.scan_pos = position as Pos;
+                        debug_assert!(
+                            self.scan_pos >= open_start as Pos,
+                            "fast_forward moved scan_pos backward from {open_start} to {position}"
+                        );
+                        return Some(Range::new(open_start, position as Pos));
+                    }
+                }
+                // A semicolon ends an at-rule prelude regardless of nesting
+                // depth. Bail so the regular tokenizer resumes and the
+                // dependency scanner completes the at-rule at the semicolon.
+                C_SEMICOLON => return None,
+                _ if byte >= 0x80 => {
+                    position += self.utf8_width_at(position);
+                }
+                _ => position += 1,
+            }
+        }
+        None
     }
 
     pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
@@ -1668,7 +1757,7 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// The position of the next yet-untokenized source byte. The buffer may
     /// still hold tokens; callers must drain `next` before fast-forwarding.
     #[inline]
-    pub(crate) fn fast_forward_if_buffer_empty<F, C>(
+    pub(crate) fn fast_forward_generic_value_if_buffer_empty<F, C>(
         &mut self,
         keep_comments: bool,
         preserve_strings: bool,
@@ -1863,6 +1952,27 @@ impl<'a, 's> TokenStream<'a, 's> {
         invalidates_composes
     }
 
+    /// Skip a balanced delimiter run without manufacturing tokens. The opening
+    /// token must already be consumed, and no further tokens may be buffered.
+    ///
+    /// On success `consumed` is advanced to the end of the closing token and
+    /// the full range is returned. On failure (`None`) the lexer position is
+    /// unchanged so the caller can re-tokenize the region normally.
+    pub(crate) fn fast_forward(&mut self, end: TokenKind) -> Option<Range> {
+        debug_assert!(
+            self.buffered.is_empty(),
+            "fast_forward requires an empty lookahead buffer"
+        );
+        let old_scan_pos = self.lexer.scan_pos();
+        let old_consumed = self.consumed;
+        let range = self.lexer.fast_forward(end)?;
+        self.consumed = range.end;
+        debug_assert!(old_scan_pos <= self.lexer.scan_pos());
+        debug_assert!(old_consumed <= self.consumed);
+        debug_assert!(self.consumed <= self.lexer.scan_pos());
+        Some(range)
+    }
+
     /// The farthest position consumed by `next`. This is the current semantic
     /// position of the dependency scanner.
     #[inline]
@@ -1932,6 +2042,16 @@ impl<'a, 's> TokenStream<'a, 's> {
 
 pub fn is_new_line(c: u8) -> bool {
     c == C_LINE_FEED || c == C_CARRIAGE_RETURN || c == C_FORM_FEED
+}
+
+#[inline]
+fn kind_to_right(byte: u8) -> TokenKind {
+    match byte {
+        C_RIGHT_PARENTHESIS => TokenKind::RightParenthesis,
+        C_RIGHT_SQUARE => TokenKind::RightSquareBracket,
+        C_RIGHT_CURLY => TokenKind::RightCurlyBracket,
+        _ => unreachable!("fast_forward only sees closing bracket bytes"),
+    }
 }
 
 pub fn is_space(c: u8) -> bool {
@@ -2266,7 +2386,7 @@ mod tests {
         let mut lexer = Lexer::new(input);
         let mut stream = TokenStream::from_lexer(&mut lexer);
 
-        stream.fast_forward_if_buffer_empty(
+        stream.fast_forward_generic_value_if_buffer_empty(
             false,
             false,
             false,
@@ -2276,11 +2396,23 @@ mod tests {
         assert_eq!(stream.consumed_pos(), 11);
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Ident);
 
-        stream.fast_forward_if_buffer_empty(false, false, false, |_| false, |_| false);
+        stream.fast_forward_generic_value_if_buffer_empty(
+            false,
+            false,
+            false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(stream.consumed_pos(), 21);
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Url);
 
-        stream.fast_forward_if_buffer_empty(false, false, false, |_| false, |_| false);
+        stream.fast_forward_generic_value_if_buffer_empty(
+            false,
+            false,
+            false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(stream.byte_at(stream.consumed_pos()), Some(b';'));
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Semicolon);
         assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
@@ -2293,7 +2425,7 @@ mod tests {
         let mut stream = TokenStream::from_lexer(&mut lexer);
 
         assert_eq!(stream.consumed_pos(), stream.lexer().scan_pos());
-        stream.fast_forward_if_buffer_empty(
+        stream.fast_forward_generic_value_if_buffer_empty(
             false,
             false,
             false,
@@ -2308,5 +2440,139 @@ mod tests {
         assert_eq!(candidate.range, Range::new(4, 12));
         assert_eq!(stream.consumed_pos(), 12);
         assert_eq!(stream.lexer().scan_pos(), 12);
+    }
+
+    #[test]
+    fn fast_forward_skips_plain_nesting() {
+        let input = "foo(bar())";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        let open = stream.next::<false>().token;
+        assert_eq!(open.kind, TokenKind::Function);
+        assert_eq!(open.range, Range::new(0, 4));
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 10))
+        );
+        assert_eq!(stream.consumed_pos(), 10);
+        assert_eq!(stream.lexer().scan_pos(), 10);
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn fast_forward_skips_mixed_brackets() {
+        let input = "foo([a{b}])";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        let open = stream.next::<false>().token;
+        assert_eq!(open.kind, TokenKind::Function);
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 11))
+        );
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn fast_forward_ignores_brackets_inside_strings_and_comments() {
+        let input = "foo(\")\" /* ) */ )";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 17))
+        );
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn fast_forward_skips_escaped_closing_bracket() {
+        let input = r"foo(a\)b)";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 9))
+        );
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn fast_forward_returns_none_on_unclosed_function() {
+        let input = "foo(bar";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
+        assert_eq!(stream.lexer().scan_pos(), 4);
+        assert_eq!(stream.consumed_pos(), 4);
+        assert_eq!(stream.next::<false>().token.kind, TokenKind::Ident);
+    }
+
+    #[test]
+    fn fast_forward_returns_none_on_unbalanced_closing_bracket() {
+        let input = "foo(]";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
+        assert_eq!(stream.lexer().scan_pos(), 4);
+        assert_eq!(
+            stream.next::<false>().token.kind,
+            TokenKind::RightSquareBracket
+        );
+    }
+
+    #[test]
+    fn fast_forward_tracks_next_token_range() {
+        let input = "foo(bar) baz";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 8))
+        );
+        let next = stream.next::<false>().token;
+        assert_eq!(next.kind, TokenKind::Ident);
+        assert_eq!(next.range, Range::new(9, 12));
+    }
+
+    #[test]
+    fn fast_forward_skips_non_ascii_boundaries() {
+        let input = "foo(中)文)";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(
+            stream.fast_forward(TokenKind::RightParenthesis),
+            Some(Range::new(4, 8))
+        );
+        let next = stream.next::<false>().token;
+        assert_eq!(next.kind, TokenKind::Ident);
+        assert_eq!(next.range, Range::new(8, 11));
+        assert_eq!(
+            stream.next::<false>().token.kind,
+            TokenKind::RightParenthesis
+        );
+    }
+
+    #[test]
+    fn fast_forward_stops_at_top_level_semicolon() {
+        let input = "supports(display: flex; display: grid)";
+        let mut lexer = Lexer::new(input);
+        let mut stream = TokenStream::from_lexer(&mut lexer);
+        stream.next::<false>();
+        assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
+        assert_eq!(stream.lexer().scan_pos(), 9);
+        loop {
+            let token = stream.next::<false>().token;
+            if token.kind == TokenKind::Semicolon {
+                assert_eq!(token.range, Range::new(22, 23));
+                break;
+            }
+        }
     }
 }

@@ -1576,7 +1576,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 preserve_delimiters,
             );
         } else {
-            stream.fast_forward_if_buffer_empty(
+            stream.fast_forward_generic_value_if_buffer_empty(
                 KEEP_COMMENTS,
                 preserve_strings,
                 preserve_delimiters,
@@ -3208,6 +3208,29 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 });
             } else if name.eq_ignore_ascii_case("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
+            }
+        }
+
+        if let Scope::InAtImport(ref mut import_data) = self.scope {
+            let layer_end = at_import_top_level && name.eq_ignore_ascii_case("layer(");
+            let supports_end = name.eq_ignore_ascii_case("supports(");
+            if layer_end || supports_end {
+                let Some(close) = stream.fast_forward(TokenKind::RightParenthesis) else {
+                    return Some(());
+                };
+                self.balanced.pop(self.mode_data.as_mut());
+                if layer_end {
+                    import_data.layer = ImportDataLayer::EndLayer {
+                        value: stream.slice(end, close.end.saturating_sub(1))?,
+                        range: Range::new(start, close.end),
+                    };
+                } else {
+                    import_data.supports = ImportDataSupports::EndSupports {
+                        value: stream.slice(end, close.end.saturating_sub(1))?,
+                        range: Range::new(start, close.end),
+                    };
+                }
+                return Some(());
             }
         }
 
