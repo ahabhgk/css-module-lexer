@@ -2,6 +2,8 @@
 
 Lexes CSS modules returning their dependencies metadata.
 
+See [RELEASE.md](RELEASE.md) for the maintainer release process.
+
 - Blazing fast: no parsing, no AST creation, only lexing, minimal heap allocation.
 - Error tolerant: uninterrupted by bad syntax, no errors, only warnings.
 - Syntax rich: supports CSS, iCSS, and CSS Modules.
