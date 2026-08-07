@@ -2095,8 +2095,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             if token.token.kind == TokenKind::Eof {
                 return None;
             }
-            if token.leading.first_comment_start.is_some() {
-                return Some(token.leading.first_comment_start.unwrap());
+            if let Some(first_comment_start) = token.leading.first_comment_start {
+                return Some(first_comment_start);
             }
             if matches!(
                 token.token.kind,
@@ -3789,11 +3789,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(());
         }
         if let Some(mode_data) = &mut self.mode_data {
-            if mode_data.is_pure_mode()
-                && !pure_check_disabled_for_selector
-                && mode_data.pure_global.is_some()
+            if let Some(pure_global_start) = mode_data
+                .pure_global
+                .filter(|_| mode_data.is_pure_mode() && !pure_check_disabled_for_selector)
             {
-                let pure_global_start = mode_data.pure_global.unwrap();
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(pure_global_start, start),
                     kind: WarningKind::NotPure {
@@ -3806,8 +3805,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 mode_data.enter_block(self.block_nesting_level);
             }
 
-            if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
-                let resulting_global_start = mode_data.resulting_global.unwrap();
+            if let Some(resulting_global_start) = mode_data
+                .resulting_global
+                .filter(|_| mode_data.is_current_local_mode())
+            {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(resulting_global_start, start),
                     kind: WarningKind::InconsistentModeResult,
@@ -4028,11 +4029,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(());
         };
 
-        if mode_data.is_pure_mode()
-            && !mode_data.is_pure_check_disabled()
-            && mode_data.pure_global.is_some()
+        if let Some(pure_global_start) = mode_data
+            .pure_global
+            .filter(|_| mode_data.is_pure_mode() && !mode_data.is_pure_check_disabled())
         {
-            let pure_global_start = mode_data.pure_global.unwrap();
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(pure_global_start, start),
                 kind: WarningKind::NotPure {
@@ -4046,8 +4046,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             mode_data.composes_local_classes.find_comma(lexer)?;
         }
 
-        if mode_data.resulting_global.is_some() && mode_data.is_current_local_mode() {
-            let resulting_global_start = mode_data.resulting_global.unwrap();
+        if let Some(resulting_global_start) = mode_data
+            .resulting_global
+            .filter(|_| mode_data.is_current_local_mode())
+        {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(resulting_global_start, start),
                 kind: WarningKind::InconsistentModeResult,
