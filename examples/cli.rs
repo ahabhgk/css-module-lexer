@@ -1,4 +1,4 @@
-use css_module_lexer::{collect_dependencies, Mode};
+use css_module_lexer::{Mode, collect_dependencies};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {

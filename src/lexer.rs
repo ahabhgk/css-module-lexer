@@ -1,6 +1,6 @@
-use crate::dependencies::special_value_is_candidate;
-use crate::dependencies::PropertyKind;
 use crate::Range;
+use crate::dependencies::PropertyKind;
+use crate::dependencies::special_value_is_candidate;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
@@ -697,8 +697,10 @@ impl<'s> Lexer<'s> {
     }
 
     unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
-        let value = input.get_unchecked(range.start as usize..range.end as usize);
-        str::from_utf8_unchecked(value)
+        unsafe {
+            let value = input.get_unchecked(range.start as usize..range.end as usize);
+            str::from_utf8_unchecked(value)
+        }
     }
 }
 

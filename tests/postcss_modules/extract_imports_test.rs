@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
 
-use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
 use css_module_lexer::WarningKind;
+use css_module_lexer::collect_dependencies;
 use indoc::indoc;
 use linked_hash_map::LinkedHashMap;
 

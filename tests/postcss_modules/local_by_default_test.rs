@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
-use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::Range;
 use css_module_lexer::Warning;
+use css_module_lexer::collect_dependencies;
 use indoc::indoc;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -514,7 +514,7 @@ fn handle_nested_global() {
 #[test]
 fn handle_a_complex_animation_rule() {
     test(
-        ".foo { animation: foo, bar 5s linear 2s infinite alternate, barfoo 1s; }", 
+        ".foo { animation: foo, bar 5s linear 2s infinite alternate, barfoo 1s; }",
         ":local(.foo) { animation: :local(foo), :local(bar) 5s linear 2s infinite alternate, :local(barfoo) 1s; }",
     );
 }
