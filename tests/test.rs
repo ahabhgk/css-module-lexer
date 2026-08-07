@@ -1,11 +1,14 @@
 mod postcss_modules;
 
 use css_module_lexer::collect_dependencies;
+use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
+use css_module_lexer::Range;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
+use css_module_lexer::WarningKind;
 use indoc::indoc;
 use smallvec::SmallVec;
 
@@ -60,6 +63,29 @@ fn assert_import_dependency(
     assert_eq!(*actual_supports, supports);
     assert_eq!(*actual_media, media);
     assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+}
+
+fn assert_icss_import_url_dependency(
+    input: &str,
+    dependency: &Dependency,
+    name: &str,
+    range_content: &str,
+    name_range_content: &str,
+) {
+    let Dependency::ICSSImportUrl {
+        name: actual_name,
+        range,
+        name_range,
+    } = dependency
+    else {
+        panic!("unexpected dependency");
+    };
+    assert_eq!(*actual_name, name);
+    assert_eq!(Lexer::slice_range(input, range).unwrap(), range_content);
+    assert_eq!(
+        Lexer::slice_range(input, name_range).unwrap(),
+        name_range_content
+    );
 }
 
 fn assert_local_class_dependency(input: &str, dependency: &Dependency, name: &str, explicit: bool) {
@@ -399,7 +425,7 @@ fn assert_icss_export_value_dependency(
         panic!("unexpected dependency");
     };
     assert_eq!(*actual_prop, prop);
-    assert_eq!(*actual_value, value);
+    assert_eq!(actual_value.as_ref(), value);
 }
 
 fn assert_icss_symbol_dependency(
@@ -515,6 +541,75 @@ fn duplicate_url() {
         &warnings[3],
         "@import url(\"./a.css\") url(\"./a.css\"",
     );
+}
+
+#[test]
+fn icss_import_url_value() {
+    let input = "@import importPath;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_icss_import_url_dependency(
+        input,
+        &dependencies[0],
+        "importPath",
+        "@import importPath;",
+        "importPath",
+    );
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn icss_import_url_value_with_comments_and_spacing() {
+    let input = "@import/* before */ importPath /* after */;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_icss_import_url_dependency(input, &dependencies[0], "importPath", input, "importPath");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn invalid_icss_import_url_value() {
+    let input = "@import importPath screen;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], "@import importPath screen;");
+}
+
+#[test]
+fn invalid_icss_import_url_value_with_function() {
+    let input = "@import importPath supports(display: grid;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(
+        input,
+        &warnings[0],
+        "@import importPath supports(display: grid;",
+    );
+}
+
+#[test]
+fn invalid_icss_import_url_value_before_string_url() {
+    let input = r#"@import importPath "style.css";"#;
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert_warning(input, &warnings[0], r#""style.css""#);
+}
+
+#[test]
+fn import_url_function_is_not_icss_import_url_value() {
+    let input = "@import url(./style.css);";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(warnings.is_empty());
+    assert_import_dependency(
+        input,
+        &dependencies[0],
+        "./style.css",
+        None,
+        None,
+        None,
+        "@import url(./style.css);",
+    );
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
@@ -835,6 +930,256 @@ fn css_modules_pseudo_2() {
     assert_local_class_dependency(input, &dependencies[4], ".d", false);
     assert_local_id_dependency(input, &dependencies[5], "#e", false);
     assert_eq!(dependencies.len(), 6);
+}
+
+#[test]
+fn css_modules_local_class_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
+    assert_local_class_dependency(input, &dependencies[1], ".class", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_mode_replace_stops_before_comment_after_white_space() {
+    let input = ":local /** first **//** second **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+
+    assert!(warnings.is_empty());
+    assert_replace_dependency(input, &dependencies[0], "", ":local ");
+    assert_local_class_dependency(input, &dependencies[1], ".class", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_local_id_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/#id {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
+    assert_local_id_dependency(input, &dependencies[1], "#id", true);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn css_modules_global_class_after_comment_reports_missing_whitespace() {
+    let input = ":global/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 7),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":global");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn css_modules_local_block_after_comment_reports_missing_whitespace() {
+    let input = ":local/** comment **/{ color: red; }";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 6),
+            WarningKind::MissingWhitespace {
+                surrounding: "trailing",
+            },
+        )]
+    );
+    assert_replace_dependency(input, &dependencies[0], "", ":local");
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
+fn css_mode_does_not_recover_comment_separated_mode_dependencies() {
+    let input = ":local/** comment **/.class {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Css);
+    assert!(dependencies.is_empty());
+    assert!(warnings.is_empty());
+}
+
+const RSPACK_NESTED_COMMENT_SEPARATED_MODES: &str = r#"
+.no-space {
+    :global.class-no-space {
+        color: red;
+    }
+
+    :global/** test **/.class {
+        color: red;
+    }
+
+    :local.class {
+        color: red;
+    }
+
+    :local/** test **/.class {
+        color: red;
+    }
+
+    :local/** test **/#hash {
+        color: red;
+    }
+
+    :local/** test **/{
+        color: red;
+    }
+}
+"#;
+
+#[test]
+fn rspack_nested_comment_separated_modes_emit_dependencies_in_local_mode() {
+    let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
+    let (dependencies, _) = collect_dependencies(input, Mode::Local);
+
+    let local_dependencies = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, explicit, .. }
+            | Dependency::LocalId { name, explicit, .. } => Some((*name, *explicit)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_dependencies,
+        [
+            (".no-space", false),
+            (".class", true),
+            (".class", true),
+            ("#hash", true),
+        ]
+    );
+
+    let replacements = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::Replace { range, .. } => Lexer::slice_range(input, range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replacements,
+        [":global", ":global", ":local", ":local", ":local", ":local",]
+    );
+}
+
+#[test]
+fn rspack_nested_comment_separated_modes_warn_in_source_order() {
+    let input = RSPACK_NESTED_COMMENT_SEPARATED_MODES;
+    let (_, warnings) = collect_dependencies(input, Mode::Local);
+
+    assert_eq!(
+        warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+            "Missing trailing whitespace",
+        ]
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .collect::<Vec<_>>(),
+        [":global", ":global", ":local", ":local", ":local", ":local"]
+    );
+}
+
+#[test]
+fn missing_whitespace_mode_dependencies_are_emitted_by_the_main_lexer() {
+    let mut dependencies = Vec::new();
+    let mut warnings = Vec::new();
+    lex_dependencies(
+        RSPACK_NESTED_COMMENT_SEPARATED_MODES,
+        Mode::Local,
+        |dependency| dependencies.push(dependency),
+        |warning| warnings.push(warning),
+    );
+
+    assert_eq!(
+        (dependencies, warnings),
+        collect_dependencies(RSPACK_NESTED_COMMENT_SEPARATED_MODES, Mode::Local)
+    );
+}
+
+#[test]
+fn missing_whitespace_mode_dependencies_preserve_token_order() {
+    for input in [
+        ".before { custom: :local/** comment **/.value; } .after {}",
+        ".before { custom: :local/** comment **/.value } .after {}",
+    ] {
+        let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+
+        assert_eq!(warnings.len(), 1);
+        assert_warning(input, &warnings[0], ":local");
+        assert_local_class_dependency(input, &dependencies[0], ".before", false);
+        assert_replace_dependency(input, &dependencies[1], "", ":local");
+        assert_local_class_dependency(input, &dependencies[2], ".value", true);
+        assert_local_class_dependency(input, &dependencies[3], ".after", false);
+        assert_eq!(dependencies.len(), 4);
+    }
+}
+
+#[test]
+fn rspack_mixed_nested_selector_does_not_gain_recovered_dependencies() {
+    let input = indoc! {r#"
+        :global .global-foo, :local .bar {
+            :local .local-in-global {
+                color: blue;
+            }
+
+            @media screen {
+                :global .my-global-class-again,
+                :local .my-global-class-again {
+                    color: red;
+                }
+            }
+        }
+    "#};
+    let (dependencies, _) = collect_dependencies(input, Mode::Local);
+    assert!(!dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::LocalClass {
+            name: ".my-global-class-again",
+            ..
+        }
+    )));
+
+    let mixed_selector_start = input.find(":global .my-global-class-again").unwrap() as u32;
+    let mixed_selector_end = input
+        .find(":local .my-global-class-again")
+        .map(|start| start + ":local".len())
+        .unwrap() as u32;
+    assert!(!dependencies.iter().any(|dependency| matches!(
+        dependency,
+        Dependency::Replace { range, .. }
+            if range.start >= mixed_selector_start && range.end <= mixed_selector_end
+    )));
 }
 
 #[test]
@@ -1292,6 +1637,22 @@ fn css_modules_counter_style() {
 }
 
 #[test]
+fn css_modules_reserved_values_are_ascii_case_insensitive() {
+    let input = indoc! {r#"
+        .case-insensitive {
+            animation: LiNeAr 1s;
+            list-style: NoNe;
+            container: NoRmAl;
+            GrId-CoLuMn: SpAn 1;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".case-insensitive", false);
+    assert_eq!(dependencies.len(), 1);
+}
+
+#[test]
 fn css_modules_font_palette() {
     let input = indoc! {r#"
         @font-palette-values --Cooler {
@@ -1484,6 +1845,26 @@ fn css_modules_function() {
 }
 
 #[test]
+fn css_modules_function_with_braced_argument() {
+    let input = indoc! {r#"
+        @function --max-plus-x(--list, --x) {
+            result: calc(max(var(--list)) + var(--x));
+        }
+        .box {
+            width: --max-plus-x({1px, 7px, 2px}, 3px);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_function_decl_dependency(input, &dependencies[0], "max-plus-x");
+    assert_local_var_dependency(input, &dependencies[1], "list", None);
+    assert_local_var_dependency(input, &dependencies[2], "x", None);
+    assert_local_class_dependency(input, &dependencies[3], ".box", false);
+    assert_local_function_dependency(input, &dependencies[4], "max-plus-x");
+    assert_eq!(dependencies.len(), 5);
+}
+
+#[test]
 fn css_modules_function_explicit_local() {
     let input = indoc! {r#"
         @function :local(--transparent-local)(--color, --alpha) {
@@ -1523,6 +1904,15 @@ fn css_modules_grid() {
     assert_local_grid_decl_dependency(input, &dependencies[7], "hero");
     assert_local_grid_decl_dependency(input, &dependencies[8], "hero");
     assert_eq!(dependencies.len(), 9);
+}
+
+#[test]
+fn css_modules_ident_start_includes_u0080() {
+    let input = ".\u{80} {}";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".\u{80}", false);
+    assert_eq!(dependencies.len(), 1);
 }
 
 #[test]
@@ -1804,6 +2194,41 @@ fn css_modules_composes_6() {
 }
 
 #[test]
+fn css_modules_composes_from_does_not_leak_between_items() {
+    let input = indoc! {r#"
+        .exportName {
+            composes: imported from "path/library.css", localName;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".exportName", false);
+    assert_composes_dependency(
+        input,
+        &dependencies[1],
+        "exportName",
+        "imported",
+        Some(r#""path/library.css""#),
+        r#"imported from "path/library.css""#,
+    );
+    assert_composes_dependency(
+        input,
+        &dependencies[2],
+        "exportName",
+        "localName",
+        None,
+        "localName",
+    );
+    assert_replace_dependency(
+        input,
+        &dependencies[3],
+        "",
+        r#"composes: imported from "path/library.css", localName;"#,
+    );
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
 fn css_modules_composes_7() {
     let input = indoc! {r#"
         .foo {
@@ -1980,12 +2405,7 @@ fn icss_export() {
         }"#},
     );
     assert_icss_export_value_dependency(input, &dependencies[2], "abc", "a b c");
-    assert_icss_export_value_dependency(
-        input,
-        &dependencies[3],
-        "comments",
-        "abc/****/   /* hello world *//****/   def",
-    );
+    assert_icss_export_value_dependency(input, &dependencies[3], "comments", "abc      def");
     assert_replace_dependency(
         input,
         &dependencies[4],
@@ -2034,6 +2454,167 @@ fn value_at_rule_export() {
     assert_icss_symbol_dependency(input, &dependencies[5], "primary", "primary");
     assert_icss_symbol_dependency(input, &dependencies[6], "spacing", "spacing");
     assert_eq!(dependencies.len(), 7);
+}
+
+#[test]
+fn value_at_rule_missing_value_warns_and_keeps_dependencies() {
+    let input = "@value test;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings,
+        [Warning::new(
+            Range::new(0, 12),
+            WarningKind::Unexpected {
+                message: "Broken '@value' at-rule",
+            },
+        )]
+    );
+    assert_icss_export_value_dependency(input, &dependencies[0], "test", "");
+    assert_replace_dependency(input, &dependencies[1], "", input);
+    assert_eq!(dependencies.len(), 2);
+}
+
+#[test]
+fn rspack_value_at_rule_only_bare_name_is_newly_broken() {
+    let input = r#"@value v-comment-broken:;
+@value v-comment-broken-v1:/* comment */;
+@value v-empty: ;
+@value v-empty-v2:   ;
+@value v-empty-v3: /* comment */;
+@value multiline-empty: /*
+    multiline
+    comment
+*/;
+@value;
+@value test;"#;
+    let (_, warnings) = collect_dependencies(input, Mode::Local);
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| Lexer::slice_range(input, warning.range()).unwrap())
+            .collect::<Vec<_>>(),
+        ["@value;", "@value test;"]
+    );
+}
+
+#[test]
+fn value_at_rule_comment_separated_from_has_clean_request() {
+    let quoted =
+        r#"@value/* test */test-v2/* test */from/* test */"./colors.module.css"/* test */;"#;
+    let (dependencies, warnings) = collect_dependencies(quoted, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(quoted, &dependencies[0], r#""./colors.module.css""#);
+
+    let identifier = "@value/* test */red/* test */from/* test */colors/* test */;";
+    let (dependencies, warnings) = collect_dependencies(identifier, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_import_from_dependency(identifier, &dependencies[0], "colors");
+}
+
+#[test]
+fn rspack_comment_heavy_value_declarations_are_parsed() {
+    let cases = [
+        (
+            "@value/* test */blue-v5/* test */:/* test */red/* test */;",
+            "blue-v5",
+            "/* test */red/* test */",
+        ),
+        (
+            "@value/* test */blue-v6/* test *//* test */red/* test */;",
+            "blue-v6",
+            "/* test *//* test */red/* test */",
+        ),
+        (
+            "@value   /* test */   coolShadow-v4   /* test */   0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)   ;",
+            "coolShadow-v4",
+            "/* test */   0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
+        ),
+        (
+            "@value/* test */coolShadow-v5/* test */0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14);",
+            "coolShadow-v5",
+            "/* test */0 11px 15px -7px rgba(0,0,0,.2),0 24px 38px 3px rgba(0,0,0,.14)",
+        ),
+    ];
+
+    for (input, target, value) in cases {
+        let (dependencies, _) = collect_dependencies(input, Mode::Local);
+        let export = dependencies
+            .iter()
+            .find(|dependency| {
+                matches!(
+                    dependency,
+                    Dependency::ICSSExportValue { prop, .. } if *prop == target
+                )
+            })
+            .expect("comment-heavy @value declaration should be parsed");
+        assert_icss_export_value_dependency(input, export, target, value);
+    }
+}
+
+#[test]
+fn value_at_rule_preserves_comment_only_value() {
+    let input = "@value v-empty: /* comment */;";
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_icss_export_value_dependency(input, &dependencies[0], "v-empty", " /* comment */");
+}
+
+#[test]
+fn rspack_comment_heavy_value_imports_are_parsed() {
+    let cases = [
+        (
+            "@value /* test */ test-v1 /* test */ from /* test */ \"./colors.module.css\" /* test */;",
+            "test-v1",
+            "test-v1",
+        ),
+        (
+            "@value/* test */test-v2/* test */from/* test */\"./colors.module.css\"/* test */;",
+            "test-v2",
+            "test-v2",
+        ),
+        (
+            "@value/* test */(/* test */blue-v1/* test */as/* test */my-name-q/* test */)/* test */from/* test */\"./colors.module.css\"/* test */;",
+            "my-name-q",
+            "blue-v1",
+        ),
+        (
+            "@value/* test */danger/* test */:/* test */error/* test */from/* test */\"./colors.module.css\"/* test */;",
+            "danger",
+            "error",
+        ),
+        (
+            "@value /*
+    multiline comment
+*/ red-v3 /*
+    multiline comment
+*/ from /*
+    multiline comment
+*/ \"./colors.module.css\" /*
+    multiline comment
+*/;",
+            "red-v3",
+            "red-v3",
+        ),
+    ];
+
+    for (input, local_name, import_name) in cases {
+        let (dependencies, _) = collect_dependencies(input, Mode::Local);
+        let import_from = dependencies
+            .iter()
+            .find(|dependency| matches!(dependency, Dependency::ICSSImportFrom { .. }))
+            .expect("comment-heavy import should retain its import-from dependency");
+        assert_icss_import_from_dependency(input, import_from, r#""./colors.module.css""#);
+        let import_value = dependencies
+            .iter()
+            .find(|dependency| {
+                matches!(
+                    dependency,
+                    Dependency::ICSSImportValue { prop, .. } if *prop == local_name
+                )
+            })
+            .expect("comment-heavy @value import item should be parsed");
+        assert_icss_import_value_dependency(input, import_value, local_name, import_name);
+    }
 }
 
 #[test]
