@@ -3,6 +3,9 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
+use crate::HandleWarning;
+use crate::Lexer;
+use crate::Pos;
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
     WarningKind,
@@ -11,9 +14,6 @@ use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
-use crate::HandleWarning;
-use crate::Lexer;
-use crate::Pos;
 
 macro_rules! match_ignore_ascii_case {
     (
@@ -254,15 +254,15 @@ impl BalancedStack {
 
     pub fn pop_mode_pseudo_class(&mut self, mode_data: &mut ModeData) {
         loop {
-            if let Some(last) = self.0.last() {
-                if matches!(
+            if let Some(last) = self.0.last()
+                && matches!(
                     last.kind,
                     BalancedItemKind::LocalClass | BalancedItemKind::GlobalClass
-                ) {
-                    mode_data.inside_mode_class -= 1;
-                    self.0.pop();
-                    continue;
-                }
+                )
+            {
+                mode_data.inside_mode_class -= 1;
+                self.0.pop();
+                continue;
             }
             break;
         }
@@ -587,16 +587,17 @@ impl<'s> ValueAtRuleStream<'s> {
                     next_start: None,
                 });
             }
-            if is_ident && text.eq_ignore_ascii_case("from") {
-                if let Some(previous) = self.last_significant {
-                    let gap = self
-                        .input
-                        .get(previous.range.end as usize..token.range.start as usize)
-                        .unwrap_or("");
-                    if trivia_only(gap) {
-                        self.from_pos = Some(token.range.start);
-                        self.from_prev_end = Some(previous.range.end);
-                    }
+            if is_ident
+                && text.eq_ignore_ascii_case("from")
+                && let Some(previous) = self.last_significant
+            {
+                let gap = self
+                    .input
+                    .get(previous.range.end as usize..token.range.start as usize)
+                    .unwrap_or("");
+                if trivia_only(gap) {
+                    self.from_pos = Some(token.range.start);
+                    self.from_prev_end = Some(previous.range.end);
                 }
             }
             self.penultimate_significant = self.last_significant;
@@ -616,15 +617,17 @@ impl<'s> ValueAtRuleStream<'s> {
                 self.item_start = Some(token.range.start);
             }
             self.item_end = token.range.end;
-            if let Some(split) = self.item_colon.as_mut() {
-                if split.next_start.is_none() && split.split != token.range.start {
-                    split.next_start = Some(token.range.start);
-                }
+            if let Some(split) = self.item_colon.as_mut()
+                && split.next_start.is_none()
+                && split.split != token.range.start
+            {
+                split.next_start = Some(token.range.start);
             }
-            if let Some(split) = self.item_as.as_mut() {
-                if split.next_start.is_none() && split.split != token.range.start {
-                    split.next_start = Some(token.range.start);
-                }
+            if let Some(split) = self.item_as.as_mut()
+                && split.next_start.is_none()
+                && split.split != token.range.start
+            {
+                split.next_start = Some(token.range.start);
             }
         }
     }
@@ -1284,19 +1287,21 @@ fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> impl Iterator<It
     let bytes = input.as_bytes();
     let mut i = 0usize;
 
-    std::iter::from_fn(move || loop {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let start = i;
-        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if start == i {
-            return None;
-        }
-        if !input[start..i].bytes().all(|c| c == b'.') {
-            return Some(Range::new(offset + start as Pos, offset + i as Pos));
+    std::iter::from_fn(move || {
+        loop {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if start == i {
+                return None;
+            }
+            if !input[start..i].bytes().all(|c| c == b'.') {
+                return Some(Range::new(offset + start as Pos, offset + i as Pos));
+            }
         }
     })
 }
@@ -1429,10 +1434,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     token.kind,
                     TokenKind::Ident | TokenKind::Function | TokenKind::RightCurlyBracket
                 );
-                if self.is_next_rule_prelude && self.block_nesting_level == 0 {
-                    if let Some(mode_data) = &mut self.mode_data {
-                        mode_data.composes_local_classes.reset_to_initial();
-                    }
+                if self.is_next_rule_prelude
+                    && self.block_nesting_level == 0
+                    && let Some(mode_data) = &mut self.mode_data
+                {
+                    mode_data.composes_local_classes.reset_to_initial();
                 }
                 let scan_context = if self.is_next_rule_prelude {
                     ScanContext::Selector
@@ -1546,14 +1552,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     let mut class_end = token.range.end;
                     let mut class_flags = token.flags;
                     let mut consumes_name = false;
-                    if let Some(next) = dot_next {
-                        if next.token.kind == TokenKind::Ident
-                            && next.token.range.start == token.range.end
-                        {
-                            class_end = next.token.range.end;
-                            class_flags = next.token.flags;
-                            consumes_name = true;
-                        }
+                    if let Some(next) = dot_next
+                        && next.token.kind == TokenKind::Ident
+                        && next.token.range.start == token.range.end
+                    {
+                        class_end = next.token.range.end;
+                        class_flags = next.token.flags;
+                        consumes_name = true;
                     }
                     result = self.handle_class(
                         stream.lexer_mut(),
@@ -1566,10 +1571,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }
                 }
                 TokenKind::Delim if self.scan_context == ScanContext::Selector => {
-                    if self.block_nesting_level == 0 {
-                        if let Some(mode_data) = &mut self.mode_data {
-                            mode_data.composes_local_classes.invalidate();
-                        }
+                    if self.block_nesting_level == 0
+                        && let Some(mode_data) = &mut self.mode_data
+                    {
+                        mode_data.composes_local_classes.invalidate();
                     }
                 }
                 TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
@@ -1603,10 +1608,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 }
                 TokenKind::LeftSquareBracket if self.scan_context == ScanContext::Selector => {
                     self.selector_square_depth += 1;
-                    if self.block_nesting_level == 0 {
-                        if let Some(mode_data) = &mut self.mode_data {
-                            mode_data.composes_local_classes.invalidate();
-                        }
+                    if self.block_nesting_level == 0
+                        && let Some(mode_data) = &mut self.mode_data
+                    {
+                        mode_data.composes_local_classes.invalidate();
                     }
                 }
                 TokenKind::RightSquareBracket if self.scan_context == ScanContext::Selector => {
@@ -1693,10 +1698,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             HAS_MODE,
             is_css_modules_pure_magic_comment,
         );
-        if invalidates_composes && self.block_nesting_level == 0 {
-            if let Some(mode_data) = &mut self.mode_data {
-                mode_data.composes_local_classes.invalidate();
-            }
+        if invalidates_composes
+            && self.block_nesting_level == 0
+            && let Some(mode_data) = &mut self.mode_data
+        {
+            mode_data.composes_local_classes.invalidate();
         }
     }
 
@@ -1820,14 +1826,13 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     .mode_data
                     .as_ref()
                     .is_some_and(ModeData::is_property_local_mode)
+                    && let Some(range) = self.pending_custom_property.take()
                 {
-                    if let Some(range) = self.pending_custom_property.take() {
-                        self.dependency_context
-                            .push_dependency(Dependency::LocalVarDecl {
-                                name: stream.lexer().slice(range.start + 2, range.end)?,
-                                range,
-                            });
-                    }
+                    self.dependency_context
+                        .push_dependency(Dependency::LocalVarDecl {
+                            name: stream.lexer().slice(range.start + 2, range.end)?,
+                            range,
+                        });
                 }
             }
             PropertyKind::Generic | PropertyKind::Composes => {}
@@ -3041,23 +3046,21 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 }
             }
             Scope::InBlock => {
-                if let Some(mode_data) = &self.mode_data {
-                    if mode_data.is_property_local_mode()
-                        && matches!(
-                            self.in_grid_property,
-                            Some(GridPropertyKind::TemplateLike | GridPropertyKind::TemplateAreas)
-                        )
+                if let Some(mode_data) = &self.mode_data
+                    && mode_data.is_property_local_mode()
+                    && matches!(
+                        self.in_grid_property,
+                        Some(GridPropertyKind::TemplateLike | GridPropertyKind::TemplateAreas)
+                    )
+                {
+                    for range in
+                        parse_grid_template_area_ranges(lexer.slice(start + 1, end - 1)?, start + 1)
                     {
-                        for range in parse_grid_template_area_ranges(
-                            lexer.slice(start + 1, end - 1)?,
-                            start + 1,
-                        ) {
-                            self.dependency_context
-                                .push_dependency(Dependency::LocalGridDecl {
-                                    name: lexer.slice(range.start, range.end)?,
-                                    range,
-                                });
-                        }
+                        self.dependency_context
+                            .push_dependency(Dependency::LocalGridDecl {
+                                name: lexer.slice(range.start, range.end)?,
+                                range,
+                            });
                     }
                 }
                 let Some(last) = self.balanced.last() else {
@@ -3262,19 +3265,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         Some(*value)
                     }
                 };
-                if let Some(layer_range) = import_data.layer_range() {
-                    if let Some(supports_range) = import_data.supports_range() {
-                        if layer_range.start > supports_range.start {
-                            self.handle_warning.handle_warning(Warning {
-                                range: *layer_range,
-                                kind: WarningKind::ExpectedLayerBefore {
-                                    when: lexer.slice(supports_range.start, layer_range.end)?,
-                                },
-                            });
-                            self.scope = Scope::TopLevel;
-                            return Some(());
-                        }
-                    }
+                if let Some(layer_range) = import_data.layer_range()
+                    && let Some(supports_range) = import_data.supports_range()
+                    && layer_range.start > supports_range.start
+                {
+                    self.handle_warning.handle_warning(Warning {
+                        range: *layer_range,
+                        kind: WarningKind::ExpectedLayerBefore {
+                            when: lexer.slice(supports_range.start, layer_range.end)?,
+                        },
+                    });
+                    self.scope = Scope::TopLevel;
+                    return Some(());
                 }
                 let last_end = import_data
                     .supports_range()

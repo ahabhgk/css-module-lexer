@@ -1,5 +1,5 @@
 use codspeed_criterion_compat::*;
-use css_module_lexer::{collect_dependencies, lex_dependencies, Lexer, Mode, TokenKind};
+use css_module_lexer::{Lexer, Mode, TokenKind, collect_dependencies, lex_dependencies};
 
 const BOOTSTRAP: &str = include_str!("../fixtures/bootstrap.min.css");
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");

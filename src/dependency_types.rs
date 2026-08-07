@@ -602,10 +602,16 @@ impl Display for Warning<'_> {
             }
             WarningKind::ExpectedUrl { when, .. } => write!(f, "Expected URL in '{when}'"),
             WarningKind::ExpectedUrlBefore { when, .. } => {
-                write!(f, "An URL in '{when}' should be before 'layer(...)' or 'supports(...)'")
+                write!(
+                    f,
+                    "An URL in '{when}' should be before 'layer(...)' or 'supports(...)'"
+                )
             }
             WarningKind::ExpectedLayerBefore { when, .. } => {
-                write!(f, "The 'layer(...)' in '{when}' should be before 'supports(...)'")
+                write!(
+                    f,
+                    "The 'layer(...)' in '{when}' should be before 'supports(...)'"
+                )
             }
             WarningKind::InconsistentModeResult { .. } => write!(
                 f,

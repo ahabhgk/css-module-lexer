@@ -1,7 +1,5 @@
 mod postcss_modules;
 
-use css_module_lexer::collect_dependencies;
-use css_module_lexer::lex_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::DependencyContext;
 use css_module_lexer::ImportAttributes;
@@ -12,6 +10,8 @@ use css_module_lexer::Range;
 use css_module_lexer::UrlRangeKind;
 use css_module_lexer::Warning;
 use css_module_lexer::WarningKind;
+use css_module_lexer::collect_dependencies;
+use css_module_lexer::lex_dependencies;
 use indoc::indoc;
 use smallvec::SmallVec;
 
@@ -1350,9 +1350,11 @@ fn rspack_mixed_nested_selector_recovers_dependencies() {
     "#};
     let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
     assert_eq!(warnings.len(), 2);
-    assert!(warnings
-        .iter()
-        .all(|warning| matches!(warning.kind(), WarningKind::InconsistentModeResult)));
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| matches!(warning.kind(), WarningKind::InconsistentModeResult))
+    );
     assert_replace_dependency(input, &dependencies[5], "", ":global ");
     assert_replace_dependency(input, &dependencies[6], "", ":local ");
     assert_local_class_dependency(input, &dependencies[7], ".my-global-class-again", true);
@@ -1494,9 +1496,11 @@ fn pure_mode_ignore_comment_does_not_affect_following_rule() {
     "#};
     let (_, warnings) = collect_dependencies(input, Mode::Pure);
     assert_eq!(warnings.len(), 1);
-    assert!(Lexer::slice_range(input, warnings[0].range())
-        .unwrap()
-        .contains(":global(.not-ignored)"));
+    assert!(
+        Lexer::slice_range(input, warnings[0].range())
+            .unwrap()
+            .contains(":global(.not-ignored)")
+    );
 }
 
 #[test]
@@ -1525,9 +1529,11 @@ fn pure_mode_nested_ignore_comment_does_not_suppress_outer_rule() {
     "#};
     let (_, warnings) = collect_dependencies(input, Mode::Pure);
     assert_eq!(warnings.len(), 1);
-    assert!(Lexer::slice_range(input, warnings[0].range())
-        .unwrap()
-        .contains(":global(.foo)"));
+    assert!(
+        Lexer::slice_range(input, warnings[0].range())
+            .unwrap()
+            .contains(":global(.foo)")
+    );
 }
 
 #[test]

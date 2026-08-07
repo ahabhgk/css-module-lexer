@@ -1,7 +1,7 @@
-use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
 use css_module_lexer::Mode;
 use css_module_lexer::WarningKind;
+use css_module_lexer::collect_dependencies;
 
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");
 
@@ -29,48 +29,76 @@ fn rspack_css_modules() {
     let (local_dependencies, _local_warnings) =
         collect_dependencies(RSPACK_CSS_MODULES, Mode::Local);
     assert!(!local_dependencies.is_empty());
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalClass { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalKeyframesDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalVar { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalPropertyDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalCounterStyleDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalFontPaletteDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalContainerDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalFunctionDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalGridDecl { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::Composes { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::ICSSImportFrom { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::ICSSImportValue { .. })));
-    assert!(local_dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::ICSSExportValue { .. })));
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalClass { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalId { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalKeyframesDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalVar { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalPropertyDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalCounterStyleDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalFontPaletteDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalContainerDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalFunctionDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalGridDecl { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::Composes { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::ICSSImportFrom { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::ICSSImportValue { .. }))
+    );
+    assert!(
+        local_dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::ICSSExportValue { .. }))
+    );
     // Dependency extraction intentionally does not preserve legacy
     // MissingWhitespace diagnostics for mode pseudos.
 
@@ -81,9 +109,11 @@ fn rspack_css_modules() {
 
     let (pure_dependencies, pure_warnings) = collect_dependencies(RSPACK_CSS_MODULES, Mode::Pure);
     assert!(!pure_dependencies.is_empty());
-    assert!(pure_warnings
-        .iter()
-        .any(|warning| matches!(warning.kind(), WarningKind::NotPure { .. })));
+    assert!(
+        pure_warnings
+            .iter()
+            .any(|warning| matches!(warning.kind(), WarningKind::NotPure { .. }))
+    );
 }
 
 #[test]
@@ -154,9 +184,11 @@ fn generic_value_fast_forward_preserves_dependency_candidates() {
         dependency,
         Dependency::LocalFunction { name, .. } if *name == "scale"
     )));
-    assert!(!dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
+    assert!(
+        !dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalId { .. }))
+    );
 }
 
 #[test]
@@ -268,9 +300,11 @@ fn custom_property_token_blocks_do_not_create_selector_dependencies() {
         })
         .collect::<Vec<_>>();
     assert_eq!(local_classes, [".owner"]);
-    assert!(!dependencies
-        .iter()
-        .any(|dependency| matches!(dependency, Dependency::LocalId { .. })));
+    assert!(
+        !dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, Dependency::LocalId { .. }))
+    );
 }
 
 #[test]
