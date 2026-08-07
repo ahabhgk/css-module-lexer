@@ -1,5 +1,5 @@
+use css_module_lexer::collect_dependencies;
 use css_module_lexer::Dependency;
-use css_module_lexer::LexDependencies;
 use css_module_lexer::Lexer;
 use css_module_lexer::Mode;
 use css_module_lexer::Range;
@@ -17,12 +17,11 @@ fn generate_local_name(name: &str) -> String {
 impl Scope {
     pub fn transform<'s>(&self, input: &'s str) -> (String, Vec<Warning<'s>>) {
         let mut result = String::new();
-        let mut warnings = Vec::new();
         let mut index = 0;
-        let mut lexer = Lexer::new(input);
         let mut exports = LinkedHashMap::new();
-        let mut visitor = LexDependencies::new(
-            |dependency| match dependency {
+        let (dependencies, warnings) = collect_dependencies(input, Mode::Global);
+        for dependency in &dependencies {
+            match dependency {
                 Dependency::LocalClass { name, range, .. } => {
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
                     let name = &name[1..];
@@ -61,13 +60,18 @@ impl Scope {
                     from,
                     ..
                 } => {
+                    let is_global = *from == Some("global");
+                    let names = dependencies.composes_names(*names);
+                    let local_classes = dependencies.composes_local_classes(*local_classes);
                     for name in names {
-                        let new_name = if matches!(from, Some("global")) {
+                        let name = *name;
+                        let new_name = if is_global {
                             name.to_string()
                         } else {
                             generate_local_name(name)
                         };
-                        for &local_class in local_classes.iter() {
+                        for local_class in local_classes {
+                            let local_class = *local_class;
                             if let Some(existing) = exports.get(name) {
                                 let existing = existing.clone();
                                 exports.get_mut(local_class).unwrap().extend(existing);
@@ -78,20 +82,17 @@ impl Scope {
                     }
                 }
                 Dependency::Replace { content, range } => {
-                    let original = Lexer::slice_range(input, &range).unwrap();
+                    let original = Lexer::slice_range(input, range).unwrap();
                     if original.starts_with(":export") || original.starts_with(":import(") {
-                        return;
+                        continue;
                     }
                     result += Lexer::slice_range(input, &Range::new(index, range.start)).unwrap();
                     result += content;
                     index = range.end;
                 }
                 _ => {}
-            },
-            |warning| warnings.push(warning),
-            Mode::Global,
-        );
-        lexer.lex(&mut visitor);
+            }
+        }
         let len = input.len() as u32;
         if index != len {
             result += Lexer::slice_range(input, &Range::new(index, len)).unwrap();

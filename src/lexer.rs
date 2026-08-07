@@ -1,1064 +1,2124 @@
-use std::{iter::Rev, str::Chars};
-
+use crate::dependencies::special_value_is_candidate;
+use crate::dependencies::PropertyKind;
 use crate::Range;
+use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
+use std::collections::VecDeque;
+use std::str;
 
-pub const C_LINE_FEED: char = '\n';
-pub const C_CARRIAGE_RETURN: char = '\r';
-pub const C_FORM_FEED: char = '\u{c}';
+const fn build_plain_ascii_name_byte_table() -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut byte = 0usize;
+    while byte < table.len() {
+        table[byte] = (byte >= b'0' as usize && byte <= b'9' as usize)
+            || (byte >= b'A' as usize && byte <= b'Z' as usize)
+            || (byte >= b'a' as usize && byte <= b'z' as usize)
+            || byte == b'_' as usize
+            || byte == b'-' as usize;
+        byte += 1;
+    }
+    table
+}
 
-pub const C_TAB: char = '\t';
-pub const C_SPACE: char = ' ';
+const PLAIN_ASCII_NAME_BYTE: [bool; 256] = build_plain_ascii_name_byte_table();
 
-pub const C_SOLIDUS: char = '/';
-pub const C_REVERSE_SOLIDUS: char = '\\';
-pub const C_ASTERISK: char = '*';
+pub const C_LINE_FEED: u8 = b'\n';
+pub const C_CARRIAGE_RETURN: u8 = b'\r';
+pub const C_FORM_FEED: u8 = b'\x0c';
 
-pub const C_LEFT_PARENTHESIS: char = '(';
-pub const C_RIGHT_PARENTHESIS: char = ')';
-pub const C_LEFT_CURLY: char = '{';
-pub const C_RIGHT_CURLY: char = '}';
-pub const C_LEFT_SQUARE: char = '[';
-pub const C_RIGHT_SQUARE: char = ']';
+pub const C_TAB: u8 = b'\t';
+pub const C_SPACE: u8 = b' ';
 
-pub const C_QUOTATION_MARK: char = '"';
-pub const C_APOSTROPHE: char = '\'';
+pub const C_SOLIDUS: u8 = b'/';
+pub const C_REVERSE_SOLIDUS: u8 = b'\\';
+pub const C_ASTERISK: u8 = b'*';
 
-pub const C_FULL_STOP: char = '.';
-pub const C_COLON: char = ':';
-pub const C_SEMICOLON: char = ';';
-pub const C_COMMA: char = ',';
-pub const C_PERCENTAGE: char = '%';
-pub const C_AT_SIGN: char = '@';
+pub const C_LEFT_PARENTHESIS: u8 = b'(';
+pub const C_RIGHT_PARENTHESIS: u8 = b')';
+pub const C_LEFT_CURLY: u8 = b'{';
+pub const C_RIGHT_CURLY: u8 = b'}';
+pub const C_LEFT_SQUARE: u8 = b'[';
+pub const C_RIGHT_SQUARE: u8 = b']';
 
-pub const C_LOW_LINE: char = '_';
-pub const C_LOWER_A: char = 'a';
-pub const C_LOWER_E: char = 'e';
-pub const C_LOWER_F: char = 'f';
-pub const C_LOWER_Z: char = 'z';
-pub const C_UPPER_A: char = 'A';
-pub const C_UPPER_E: char = 'E';
-pub const C_UPPER_F: char = 'F';
-pub const C_UPPER_Z: char = 'Z';
-pub const C_0: char = '0';
-pub const C_9: char = '9';
+pub const C_QUOTATION_MARK: u8 = b'"';
+pub const C_APOSTROPHE: u8 = b'\'';
 
-pub const C_NUMBER_SIGN: char = '#';
-pub const C_PLUS_SIGN: char = '+';
-pub const C_HYPHEN_MINUS: char = '-';
+pub const C_FULL_STOP: u8 = b'.';
+pub const C_COLON: u8 = b':';
+pub const C_SEMICOLON: u8 = b';';
+pub const C_COMMA: u8 = b',';
+pub const C_PERCENTAGE: u8 = b'%';
+pub const C_AT_SIGN: u8 = b'@';
 
-pub const C_LESS_THAN_SIGN: char = '<';
-pub const C_GREATER_THAN_SIGN: char = '>';
+pub const C_LOW_LINE: u8 = b'_';
+pub const C_LOWER_E: u8 = b'e';
+pub const C_UPPER_E: u8 = b'E';
+
+pub const C_NUMBER_SIGN: u8 = b'#';
+pub const C_PLUS_SIGN: u8 = b'+';
+pub const C_HYPHEN_MINUS: u8 = b'-';
 
 pub type Pos = u32;
 
+/// The lexical kind of a CSS token.
+///
+/// Tokens retain only byte ranges into the original source.  Comments are
+/// emitted deliberately so that CSS Modules magic comments can be interpreted
+/// without a second scan of the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Trivia {
+pub enum TokenKind {
+    Eof,
+    Ident,
+    AtKeyword,
+    Hash,
+    IdHash,
+    QuotedString,
+    Url,
+    Function,
+    Number,
+    Percentage,
+    Dimension,
+    WhiteSpace,
+    Comment,
+    BadComment,
+    BadString,
+    BadUrl,
+    Delim,
+    Colon,
+    Semicolon,
+    Comma,
+    LeftParenthesis,
+    RightParenthesis,
+    LeftSquareBracket,
+    RightSquareBracket,
+    LeftCurlyBracket,
+    RightCurlyBracket,
+    IncludeMatch,
+    DashMatch,
+    PrefixMatch,
+    SuffixMatch,
+    SubstringMatch,
+}
+
+impl TokenKind {
+    #[inline]
+    pub fn is_trivia(self) -> bool {
+        matches!(self, Self::WhiteSpace | Self::Comment)
+    }
+
+    #[inline]
+    pub fn is_scan_error(self) -> bool {
+        matches!(self, Self::BadComment | Self::BadString | Self::BadUrl)
+    }
+}
+
+/// A CSS token represented by ranges into the input string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub range: Range,
+    pub value_range: Range,
+    pub flags: TokenFlags,
+}
+
+impl Token {
+    #[inline]
+    pub const fn new(kind: TokenKind, range: Range, value_range: Range) -> Self {
+        Self::with_flags(kind, range, value_range, TokenFlags::ascii())
+    }
+
+    #[inline]
+    pub const fn with_flags(
+        kind: TokenKind,
+        range: Range,
+        value_range: Range,
+        flags: TokenFlags,
+    ) -> Self {
+        Self {
+            kind,
+            range,
+            value_range,
+            flags,
+        }
+    }
+}
+
+/// Properties collected while scanning a token. They let dependency parsing
+/// skip escape/null checks for the overwhelmingly common plain-ASCII path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenFlags(u8);
+
+impl TokenFlags {
+    pub const HAS_ESCAPE: Self = Self(1 << 0);
+    pub const HAS_NULL: Self = Self(1 << 1);
+    pub const IS_ASCII: Self = Self(1 << 2);
+
+    #[inline]
+    pub const fn ascii() -> Self {
+        Self::IS_ASCII
+    }
+
+    #[inline]
+    pub const fn has_escape(self) -> bool {
+        self.0 & Self::HAS_ESCAPE.0 != 0
+    }
+
+    #[inline]
+    pub const fn has_null(self) -> bool {
+        self.0 & Self::HAS_NULL.0 != 0
+    }
+
+    #[inline]
+    pub const fn is_ascii(self) -> bool {
+        self.0 & Self::IS_ASCII.0 != 0
+    }
+
+    #[inline]
+    fn mark_escape(&mut self) {
+        self.0 |= Self::HAS_ESCAPE.0;
+    }
+
+    #[inline]
+    fn mark_null(&mut self) {
+        self.0 |= Self::HAS_NULL.0;
+    }
+
+    #[inline]
+    fn mark_non_ascii(&mut self) {
+        self.0 &= !Self::IS_ASCII.0;
+    }
+
+    #[inline]
+    fn merge(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trivia {
+    pub range: Range,
     pub end: Pos,
     pub first_comment_start: Option<Pos>,
     pub has_white_space: bool,
 }
 
-pub trait Visitor<'s> {
-    fn comment(&mut self, _: &mut Lexer<'s>, _: Pos, _: Pos) -> Option<()> {
-        Some(())
+impl Trivia {
+    #[inline]
+    pub fn has_whitespace(self) -> bool {
+        self.has_white_space
     }
-    fn function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn ident(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn url(
-        &mut self,
-        lexer: &mut Lexer<'s>,
-        start: Pos,
-        end: Pos,
-        content_start: Pos,
-        content_end: Pos,
-    ) -> Option<()>;
-    fn string(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn is_selector(&mut self, lexer: &mut Lexer<'s>) -> Option<bool>;
-    fn id(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn left_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn right_parenthesis(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn pseudo_function(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn pseudo_class(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn at_keyword(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn left_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
-    fn right_curly_bracket(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()>;
 }
 
-#[derive(Debug, Clone)]
-pub struct Lexer<'s, I: Iterator<Item = char> = Chars<'s>> {
-    value: &'s str,
-    iter: I,
-    cur_pos: Option<Pos>,
-    cur: Option<char>,
-    peek: Option<char>,
-    peek2: Option<char>,
+/// A significant token together with all immediately preceding whitespace and
+/// comments.  The leading trivia is consumed once and never rescanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenWithTrivia {
+    pub token: Token,
+    pub leading: Trivia,
+}
+
+#[derive(Debug)]
+pub struct Lexer<'s> {
+    value: &'s [u8],
+    scan_pos: Pos,
 }
 
 impl<'s> Lexer<'s> {
     pub fn new(value: &'s str) -> Self {
-        let mut iter = value.chars();
-        let peek = iter.next();
-        let peek2 = iter.next();
+        assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
-            value,
-            iter,
-            cur_pos: None,
-            cur: None,
-            peek,
-            peek2,
+            value: value.as_bytes(),
+            scan_pos: 0,
         }
     }
 
-    pub fn turn_back(self, end: Pos) -> Lexer<'s, Rev<Chars<'s>>> {
-        let value = self.slice(0, end).unwrap();
-        let mut iter = value.chars().rev();
-        let peek = iter.next();
-        let peek2 = iter.next();
-        Lexer {
-            value,
-            iter,
-            cur_pos: None,
-            cur: None,
-            peek,
-            peek2,
-        }
+    #[inline]
+    pub(crate) fn source_end(&self) -> Pos {
+        self.value.len() as Pos
     }
 
-    pub fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
-        Self::slice_range(self.value, &Range::new(start, end))
+    #[inline(always)]
+    pub(crate) fn byte_at(&self, position: Pos) -> Option<u8> {
+        self.value.get(position as usize).copied()
+    }
+
+    #[inline(always)]
+    pub(crate) fn could_start_ident_at(&self, position: Pos) -> bool {
+        self.byte_at(position).is_some_and(|byte| {
+            matches!(byte, C_HYPHEN_MINUS | C_REVERSE_SOLIDUS) || is_name_start_byte(byte)
+        })
+    }
+
+    /// Skip value text that cannot produce a dependency or change the block
+    /// structure. Delimiters of ordinary functions are tracked without
+    /// manufacturing tokens, and the scanner stops before dependency-bearing
+    /// functions, ICSS symbols, selector-independent magic comments, or a
+    /// declaration boundary.
+    fn fast_forward_generic_value<const STOP_AT_TOP_LEVEL_LEFT_CURLY: bool, F, C>(
+        &mut self,
+        state: &mut GenericValueScanState,
+        options: GenericValueScanOptions,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+        icss_symbols: Option<&FxHashSet<&str>>,
+    ) -> Option<PrescannedIdent>
+    where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        let mut position = self.scan_pos as usize;
+        let scan_start = position;
+        let mut candidate_token = None;
+        while position < self.value.len() {
+            let byte = self.value[position];
+            if is_white_space(byte) {
+                position += 1;
+                continue;
+            }
+
+            if byte == C_SOLIDUS && self.value.get(position + 1) == Some(&C_ASTERISK) {
+                let (kind, end, _, _, _) = self.scan_comment(position);
+                if options.keep_comments && kind == TokenKind::Comment {
+                    let content = &self.value[position + 2..end.saturating_sub(2)];
+                    let mut first = 0usize;
+                    while content.get(first).is_some_and(|byte| is_white_space(*byte)) {
+                        first += 1;
+                    }
+                    if content.get(first) == Some(&b'c') {
+                        let content = unsafe { str::from_utf8_unchecked(content) };
+                        if is_comment_candidate(content) {
+                            break;
+                        }
+                    }
+                }
+                position = end;
+                continue;
+            }
+
+            if matches!(byte, C_QUOTATION_MARK | C_APOSTROPHE) {
+                if options.preserve_strings {
+                    break;
+                }
+                position = self.scan_string(position, byte).1;
+                continue;
+            }
+
+            let starts_ident = match byte {
+                C_HYPHEN_MINUS | C_REVERSE_SOLIDUS => self.starts_ident_at(position),
+                _ => is_name_start_byte(byte),
+            };
+            if starts_ident {
+                let end = self.scan_plain_ascii_name(position);
+                if end == position || self.raw_name_needs_tokenizer(end) {
+                    break;
+                }
+                let flags = TokenFlags::ascii();
+                let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
+                let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
+                let is_candidate = !flags.has_escape()
+                    && (is_candidate(name)
+                        || options.property.is_some_and(|property| {
+                            special_value_is_candidate(property, name, icss_symbols)
+                        }));
+                if flags.has_escape()
+                    || is_candidate
+                    || (is_function && is_dependency_value_function(name))
+                    || (is_function && options.preserve_delimiters)
+                {
+                    if is_candidate && !is_function && flags.is_ascii() && !flags.has_null() {
+                        candidate_token = Some(PrescannedIdent {
+                            start: position as Pos,
+                            end: end as Pos,
+                            flags,
+                        });
+                        position = end;
+                    }
+                    break;
+                }
+                if is_function {
+                    state.parentheses += 1;
+                    position = end + 1;
+                } else {
+                    position = end;
+                }
+                continue;
+            }
+
+            let starts_number = match byte {
+                b'0'..=b'9' => true,
+                C_PLUS_SIGN | C_HYPHEN_MINUS | C_FULL_STOP => self.starts_number_at(position),
+                _ => false,
+            };
+            if starts_number {
+                let Some(end) = self.scan_raw_numeric_end(position) else {
+                    break;
+                };
+                position = end;
+                continue;
+            }
+
+            match byte {
+                C_NUMBER_SIGN => {
+                    let name_start = position + 1;
+                    if self.starts_ident_at(name_start)
+                        || self
+                            .value
+                            .get(name_start)
+                            .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                    {
+                        let end = self.scan_plain_ascii_name(name_start);
+                        if end == name_start || self.raw_name_needs_tokenizer(end) {
+                            break;
+                        }
+                        position = end;
+                    } else {
+                        position = name_start;
+                    }
+                }
+                C_LEFT_PARENTHESIS => {
+                    if options.preserve_delimiters {
+                        break;
+                    }
+                    state.parentheses += 1;
+                    position += 1;
+                }
+                C_RIGHT_PARENTHESIS => {
+                    if options.preserve_delimiters {
+                        break;
+                    }
+                    state.parentheses = state.parentheses.saturating_sub(1);
+                    position += 1;
+                }
+                C_LEFT_SQUARE => {
+                    if options.preserve_delimiters {
+                        break;
+                    }
+                    state.squares += 1;
+                    position += 1;
+                }
+                C_RIGHT_SQUARE => {
+                    if options.preserve_delimiters {
+                        break;
+                    }
+                    state.squares = state.squares.saturating_sub(1);
+                    position += 1;
+                }
+                C_LEFT_CURLY if STOP_AT_TOP_LEVEL_LEFT_CURLY && !state.is_nested() => break,
+                C_LEFT_CURLY => {
+                    if options.preserve_delimiters {
+                        break;
+                    }
+                    state.curlies += 1;
+                    position += 1;
+                }
+                C_RIGHT_CURLY if state.curlies > 0 && !options.preserve_delimiters => {
+                    state.curlies -= 1;
+                    position += 1;
+                }
+                C_RIGHT_CURLY => break,
+                C_SEMICOLON if !state.is_nested() => break,
+                _ => position += 1,
+            }
+        }
+        self.scan_pos = position as Pos;
+        debug_assert!(
+            self.scan_pos >= scan_start as Pos,
+            "fast_forward moved scan_pos backward from {scan_start} to {position}"
+        );
+        candidate_token
+    }
+
+    /// Skip selector text that cannot produce a CSS Modules dependency.
+    /// Attribute selectors remain opaque across calls through `square_depth`;
+    /// the scanner stops before dependency candidates and structural tokens so
+    /// the normal token stream remains the sole owner of parser state changes.
+    pub(crate) fn fast_forward_selector<C>(
+        &mut self,
+        square_depth: &mut u32,
+        keep_comments: bool,
+        has_mode: bool,
+        mut is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
+        let mut position = self.scan_pos as usize;
+        let scan_start = position;
+        let mut invalidates_composes = false;
+        let mut trivia_start = None;
+
+        while position < self.value.len() {
+            let byte = self.value[position];
+
+            if is_white_space(byte) {
+                trivia_start.get_or_insert(position);
+                position += 1;
+                continue;
+            }
+
+            if byte == C_SOLIDUS && self.value.get(position + 1) == Some(&C_ASTERISK) {
+                let (kind, end, _, _, _) = self.scan_comment(position);
+                if keep_comments && kind == TokenKind::Comment {
+                    let content = &self.value[position + 2..end.saturating_sub(2)];
+                    // SAFETY: comments are slices of the original UTF-8 input.
+                    let content = unsafe { str::from_utf8_unchecked(content) };
+                    if is_comment_candidate(content) {
+                        break;
+                    }
+                }
+                trivia_start.get_or_insert(position);
+                position = end;
+                continue;
+            }
+
+            if *square_depth > 0 {
+                match byte {
+                    C_QUOTATION_MARK | C_APOSTROPHE => {
+                        position = self.scan_string(position, byte).1;
+                    }
+                    C_LEFT_SQUARE => {
+                        *square_depth += 1;
+                        position += 1;
+                    }
+                    C_RIGHT_SQUARE => {
+                        *square_depth -= 1;
+                        position += 1;
+                    }
+                    _ => position += 1,
+                }
+                trivia_start = None;
+                continue;
+            }
+
+            let starts_ident = match byte {
+                C_HYPHEN_MINUS | C_REVERSE_SOLIDUS => self.starts_ident_at(position),
+                _ => is_name_start_byte(byte),
+            };
+            if starts_ident {
+                let end = self.scan_name(position);
+                if end == position {
+                    break;
+                }
+                // Functions own balanced-stack state in the dependency
+                // scanner. In particular, `url()` and `image-set()` can
+                // produce dependencies even when invalid CSS made them
+                // appear while recovering from a selector. Leave the name
+                // to the regular tokenizer so it can emit `Function`.
+                if self.value.get(end) == Some(&C_LEFT_PARENTHESIS) {
+                    break;
+                }
+                invalidates_composes = true;
+                trivia_start = None;
+                position = end;
+                continue;
+            }
+
+            let starts_number = match byte {
+                b'0'..=b'9' => true,
+                C_PLUS_SIGN | C_HYPHEN_MINUS | C_FULL_STOP => self.starts_number_at(position),
+                _ => false,
+            };
+            if starts_number {
+                invalidates_composes = true;
+                trivia_start = None;
+                position = self.scan_numeric(position).1;
+                continue;
+            }
+
+            match byte {
+                C_LEFT_SQUARE => {
+                    invalidates_composes = true;
+                    *square_depth = 1;
+                    trivia_start = None;
+                    position += 1;
+                }
+                // Outside an attribute selector a string may belong to
+                // `url()` or `image-set()`, whose balanced-stack kind decides
+                // whether it creates a dependency.
+                C_QUOTATION_MARK | C_APOSTROPHE => break,
+                C_FULL_STOP | C_NUMBER_SIGN | C_COLON if has_mode => break,
+                C_NUMBER_SIGN => {
+                    let name_start = position + 1;
+                    position = if self.starts_ident_at(name_start)
+                        || self
+                            .value
+                            .get(name_start)
+                            .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                    {
+                        self.scan_name(name_start)
+                    } else {
+                        name_start
+                    };
+                    invalidates_composes = true;
+                    trivia_start = None;
+                }
+                C_RIGHT_PARENTHESIS => {
+                    position = trivia_start.unwrap_or(position);
+                    break;
+                }
+                C_LEFT_PARENTHESIS | C_LEFT_CURLY | C_RIGHT_CURLY | C_COMMA | C_SEMICOLON
+                | C_AT_SIGN => break,
+                _ => {
+                    invalidates_composes = true;
+                    trivia_start = None;
+                    position += 1;
+                }
+            }
+        }
+
+        self.scan_pos = position as Pos;
+        debug_assert!(
+            self.scan_pos >= scan_start as Pos,
+            "selector fast-forward moved scan_pos backward from {scan_start} to {position}"
+        );
+        invalidates_composes
+    }
+
+    /// Skip a balanced delimiter run whose opening token has already been
+    /// consumed. Only `RightParenthesis`, `RightSquareBracket`, and
+    /// `RightCurlyBracket` are accepted as `end`.
+    ///
+    /// Returns the range from the opening token through the matching closing
+    /// token on success. The caller is responsible for passing the position
+    /// just past the opening token.
+    ///
+    /// Nested delimiters are tracked on a local stack. Strings, comments,
+    /// escapes, and non-ASCII code points are skipped without tokenizing so
+    /// their content can never close the run. The scan is transactional: on
+    /// failure (EOF or an unbalanced closing token) `scan_pos` is left
+    /// unchanged and `None` is returned so the caller can fall back to the
+    /// regular tokenizer, which remains the sole owner of parser state
+    /// changes.
+    pub(crate) fn fast_forward(&mut self, end: TokenKind) -> Option<Range> {
+        match end {
+            TokenKind::RightParenthesis
+            | TokenKind::RightSquareBracket
+            | TokenKind::RightCurlyBracket => {}
+            _ => unreachable!("fast_forward accepts only closing bracket kinds"),
+        }
+        let open_start = self.scan_pos;
+        let mut stack: SmallVec<[TokenKind; 8]> = SmallVec::new();
+        stack.push(end);
+        let mut position = open_start as usize;
+        let bytes = self.value;
+        while position < bytes.len() {
+            let byte = bytes[position];
+            match byte {
+                C_QUOTATION_MARK | C_APOSTROPHE => {
+                    let (kind, string_end, _, _, _) = self.scan_string(position, byte);
+                    if kind == TokenKind::BadString {
+                        return None;
+                    }
+                    position = string_end;
+                }
+                C_SOLIDUS if bytes.get(position + 1) == Some(&C_ASTERISK) => {
+                    let (kind, comment_end, _, _, _) = self.scan_comment(position);
+                    if kind == TokenKind::BadComment {
+                        return None;
+                    }
+                    position = comment_end;
+                }
+                C_REVERSE_SOLIDUS if self.is_valid_escape_at(position) => {
+                    position = self.scan_escape(position);
+                }
+                C_LEFT_PARENTHESIS => {
+                    stack.push(TokenKind::RightParenthesis);
+                    position += 1;
+                }
+                C_LEFT_SQUARE => {
+                    stack.push(TokenKind::RightSquareBracket);
+                    position += 1;
+                }
+                C_LEFT_CURLY => {
+                    stack.push(TokenKind::RightCurlyBracket);
+                    position += 1;
+                }
+                C_RIGHT_PARENTHESIS | C_RIGHT_SQUARE | C_RIGHT_CURLY => {
+                    if *stack.last().expect("delimiter stack never empties") != kind_to_right(byte)
+                    {
+                        return None;
+                    }
+                    stack.pop();
+                    position += 1;
+                    if stack.is_empty() {
+                        self.scan_pos = position as Pos;
+                        debug_assert!(
+                            self.scan_pos >= open_start as Pos,
+                            "fast_forward moved scan_pos backward from {open_start} to {position}"
+                        );
+                        return Some(Range::new(open_start, position as Pos));
+                    }
+                }
+                // A semicolon ends an at-rule prelude regardless of nesting
+                // depth. Bail so the regular tokenizer resumes and the
+                // dependency scanner completes the at-rule at the semicolon.
+                C_SEMICOLON => return None,
+                _ if byte >= 0x80 => {
+                    position += self.utf8_width_at(position);
+                }
+                _ => position += 1,
+            }
+        }
+        None
+    }
+
+    pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
+        let range = Range::new(start, end);
+        let start = start as usize;
+        let end = end as usize;
+        if start > end || end > self.value.len() {
+            return None;
+        }
+        // SAFETY: Lexer-generated positions always delimit complete tokens or
+        // source fragments and therefore stay on UTF-8 code point boundaries.
+        Some(unsafe { Self::slice_unchecked(self.value, &range) })
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice_trusted(&self, start: Pos, end: Pos) -> &'s str {
+        debug_assert!(start <= end && end <= self.value.len() as Pos);
+        // SAFETY: Token ranges and parser positions originate from this
+        // lexer, so they delimit valid UTF-8 source boundaries.
+        unsafe { Self::slice_unchecked(self.value, &Range::new(start, end)) }
     }
 
     pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
-        input.get(range.start as usize..range.end as usize)
+        let start = range.start as usize;
+        let end = range.end as usize;
+        if start > end
+            || end > input.len()
+            || !input.is_char_boundary(start)
+            || !input.is_char_boundary(end)
+        {
+            return None;
+        }
+        // SAFETY: The range was checked against the original `str` above.
+        Some(unsafe { Self::slice_unchecked(input.as_bytes(), range) })
+    }
+
+    unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
+        let value = input.get_unchecked(range.start as usize..range.end as usize);
+        str::from_utf8_unchecked(value)
     }
 }
 
-impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
-    pub fn consume(&mut self) {
-        self.cur_pos = self.peek_pos();
-        self.cur = self.peek;
-        self.peek = self.peek2;
-        self.peek2 = self.iter.next();
-    }
-
-    pub fn cur_pos(&self) -> Option<Pos> {
-        self.cur_pos
-    }
-
-    pub fn cur(&self) -> Option<char> {
-        self.cur
-    }
-
-    pub fn peek_pos(&self) -> Option<Pos> {
-        if let Some(pos) = self.cur_pos() {
-            self.cur().map(|c| pos + c.len_utf8() as u32)
-        } else {
-            Some(0)
-        }
-    }
-
-    pub fn peek(&self) -> Option<char> {
-        self.peek
-    }
-
-    pub fn peek2_pos(&self) -> Option<Pos> {
-        self.peek_pos()
-            .and_then(|pos| self.peek().map(|c| pos + c.len_utf8() as u32))
-    }
-
-    pub fn peek2(&self) -> Option<char> {
-        self.peek2
+impl Lexer<'_> {
+    #[inline]
+    pub(crate) fn scan_pos(&self) -> Pos {
+        self.scan_pos
     }
 }
 
 impl<'s> Lexer<'s> {
-    pub fn lex<T: Visitor<'s>>(&mut self, visitor: &mut T) {
-        self.lex_impl(visitor);
-    }
+    /// Return the next CSS token without allocating or decoding its value.
+    ///
+    /// `TokenKind::Eof` is returned after the input is exhausted. Unterminated
+    /// comments, strings, and URLs are represented by the corresponding
+    /// `Bad*` token kinds, so EOF and tokenizer errors are never conflated.
+    #[inline]
+    pub fn next_token(&mut self) -> Token {
+        let start = self.scan_pos as usize;
+        let len = self.value.len();
+        if start >= len {
+            self.scan_pos = len as Pos;
+            return Token::new(
+                TokenKind::Eof,
+                Range::new(len as Pos, len as Pos),
+                Range::new(len as Pos, len as Pos),
+            );
+        }
 
-    fn lex_impl<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        while self.cur().is_some() {
-            self.consume_comments_with_visitor(visitor)?;
-            // https://drafts.csswg.org/css-syntax/#consume-token
-            match self.cur()? {
-                c if is_white_space(c) => self.consume_space()?,
-                C_QUOTATION_MARK => self.consume_string(visitor, C_QUOTATION_MARK)?,
-                C_NUMBER_SIGN => self.consume_number_sign(visitor)?,
-                C_APOSTROPHE => self.consume_string(visitor, C_APOSTROPHE)?,
-                C_LEFT_PARENTHESIS => self.consume_left_parenthesis(visitor)?,
-                C_RIGHT_PARENTHESIS => self.consume_right_parenthesis(visitor)?,
-                C_PLUS_SIGN => self.consume_plus_sign()?,
-                C_COMMA => self.consume_comma(visitor)?,
-                C_HYPHEN_MINUS => self.consume_minus(visitor)?,
-                C_FULL_STOP => self.consume_full_stop(visitor)?,
-                C_COLON => self.consume_potential_pseudo(visitor)?,
-                C_SEMICOLON => self.consume_semicolon(visitor)?,
-                C_LESS_THAN_SIGN => self.consume_less_than_sign()?,
-                C_AT_SIGN => self.consume_at_sign(visitor)?,
-                C_LEFT_SQUARE => self.consume_delim(),
-                C_REVERSE_SOLIDUS => self.consume_reverse_solidus(visitor)?,
-                C_RIGHT_SQUARE => self.consume_delim(),
-                C_LEFT_CURLY => self.consume_left_curly(visitor)?,
-                C_RIGHT_CURLY => self.consume_right_curly(visitor)?,
-                c if is_digit(c) => self.consume_numeric_token()?,
-                c if is_ident_start(c) => self.consume_ident_like(visitor)?,
-                _ => self.consume_delim(),
+        let byte = self.value[start];
+        let (kind, end, value_start, value_end, flags) = match byte {
+            C_SPACE | C_TAB | C_LINE_FEED | C_CARRIAGE_RETURN | C_FORM_FEED => {
+                self.scan_whitespace(start)
             }
-        }
-        Some(())
-    }
-
-    pub fn consume_comments_with_visitor<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
-            let start = self.cur_pos()?;
-            self.consume();
-            loop {
-                self.consume();
-                let c = self.cur()?;
-                if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
-                    self.consume();
-                    self.consume();
-                    break;
-                }
-            }
-            let end = self.cur_pos()?;
-            visitor.comment(self, start, end)?;
-        }
-        Some(())
-    }
-
-    pub fn consume_white_space_and_comments_with_visitor<T: Visitor<'s>>(
-        &mut self,
-        visitor: &mut T,
-    ) -> Option<()> {
-        loop {
-            self.consume_comments_with_visitor(visitor)?;
-            if is_white_space(self.cur()?) {
-                self.consume_space()?;
-            } else {
-                break;
-            }
-        }
-        Some(())
-    }
-
-    pub fn consume_delim(&mut self) {
-        self.consume();
-    }
-
-    pub fn consume_numeric_token(&mut self) -> Option<()> {
-        self.consume_number()?;
-        let c = self.cur()?;
-        if start_ident_sequence(c, self.peek()?, self.peek2()?) {
-            return self.consume_ident_sequence();
-        }
-        if c == C_PERCENTAGE {
-            self.consume();
-        }
-        Some(())
-    }
-
-    pub fn consume_number(&mut self) -> Option<()> {
-        self.consume();
-        while is_digit(self.cur()?) {
-            self.consume();
-        }
-        if self.cur()? == C_FULL_STOP && is_digit(self.peek()?) {
-            self.consume();
-            self.consume();
-            while is_digit(self.cur()?) {
-                self.consume();
-            }
-        }
-        let c = self.cur()?;
-        if c == C_LOWER_E || c == C_UPPER_E {
-            let c = self.peek()?;
-            if is_digit(c) {
-                self.consume();
-            } else if c == C_HYPHEN_MINUS || c == C_PLUS_SIGN {
-                let c = self.peek2()?;
-                if is_digit(c) {
-                    self.consume();
-                    self.consume();
+            C_QUOTATION_MARK => self.scan_string(start, C_QUOTATION_MARK),
+            C_APOSTROPHE => self.scan_string(start, C_APOSTROPHE),
+            C_NUMBER_SIGN => {
+                let value_start = start + 1;
+                if self.starts_ident_at(value_start) {
+                    let (end, flags) = self.scan_name_with_flags(value_start);
+                    (TokenKind::IdHash, end, value_start, end, flags)
+                } else if self
+                    .value
+                    .get(value_start)
+                    .is_some_and(|byte| is_digit(*byte) || *byte == C_HYPHEN_MINUS)
+                {
+                    let (end, flags) = self.scan_name_with_flags(value_start);
+                    (TokenKind::Hash, end, value_start, end, flags)
                 } else {
-                    return Some(());
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_LEFT_PARENTHESIS => (
+                TokenKind::LeftParenthesis,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_RIGHT_PARENTHESIS => (
+                TokenKind::RightParenthesis,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_LEFT_SQUARE => (
+                TokenKind::LeftSquareBracket,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_RIGHT_SQUARE => (
+                TokenKind::RightSquareBracket,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_LEFT_CURLY => (
+                TokenKind::LeftCurlyBracket,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_RIGHT_CURLY => (
+                TokenKind::RightCurlyBracket,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_COLON => (
+                TokenKind::Colon,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_SEMICOLON => (
+                TokenKind::Semicolon,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_COMMA => (
+                TokenKind::Comma,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+            C_PLUS_SIGN => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_HYPHEN_MINUS => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else if self.starts_ident_at(start) {
+                    self.scan_ident_like(start)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_FULL_STOP => {
+                if self.starts_number_at(start) {
+                    self.scan_numeric(start)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_SOLIDUS => {
+                if self.value.get(start + 1) == Some(&C_ASTERISK) {
+                    self.scan_comment(start)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_AT_SIGN => {
+                let value_start = start + 1;
+                if self.starts_ident_at(value_start) {
+                    let (end, flags) = self.scan_name_with_flags(value_start);
+                    (TokenKind::AtKeyword, end, value_start, end, flags)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            C_REVERSE_SOLIDUS => {
+                if self.is_valid_escape_at(start) {
+                    self.scan_ident_like(start)
+                } else {
+                    (
+                        TokenKind::Delim,
+                        start + 1,
+                        start,
+                        start + 1,
+                        TokenFlags::ascii(),
+                    )
+                }
+            }
+            b'0'..=b'9' => self.scan_numeric(start),
+            b'$' if self.value[start..].starts_with(b"$=") => (
+                TokenKind::SuffixMatch,
+                start + 2,
+                start,
+                start + 2,
+                TokenFlags::ascii(),
+            ),
+            b'^' if self.value[start..].starts_with(b"^=") => (
+                TokenKind::PrefixMatch,
+                start + 2,
+                start,
+                start + 2,
+                TokenFlags::ascii(),
+            ),
+            b'|' if self.value[start..].starts_with(b"|=") => (
+                TokenKind::DashMatch,
+                start + 2,
+                start,
+                start + 2,
+                TokenFlags::ascii(),
+            ),
+            b'~' if self.value[start..].starts_with(b"~=") => (
+                TokenKind::IncludeMatch,
+                start + 2,
+                start,
+                start + 2,
+                TokenFlags::ascii(),
+            ),
+            b'*' if self.value[start..].starts_with(b"*=") => (
+                TokenKind::SubstringMatch,
+                start + 2,
+                start,
+                start + 2,
+                TokenFlags::ascii(),
+            ),
+            _ if self.starts_ident_at(start) => self.scan_ident_like(start),
+            _ => (
+                TokenKind::Delim,
+                start + 1,
+                start,
+                start + 1,
+                TokenFlags::ascii(),
+            ),
+        };
+
+        self.scan_pos = end as Pos;
+        debug_assert!(
+            self.scan_pos >= start as Pos,
+            "scan_pos moved backward from {start} to {}",
+            self.scan_pos
+        );
+        Token::with_flags(
+            kind,
+            Range::new(start as Pos, end as Pos),
+            Range::new(value_start as Pos, value_end as Pos),
+            flags,
+        )
+    }
+
+    #[inline]
+    fn scan_whitespace(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let bytes = self.value;
+        let mut end = start;
+        while end < bytes.len() && is_white_space(bytes[end]) {
+            end += 1;
+        }
+        (TokenKind::WhiteSpace, end, start, end, TokenFlags::ascii())
+    }
+
+    fn scan_comment(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let bytes = self.value;
+        let mut end = start + 2;
+        let mut flags = TokenFlags::ascii();
+        while end + 1 < bytes.len() {
+            if bytes[end] == C_ASTERISK && bytes[end + 1] == C_SOLIDUS {
+                return (TokenKind::Comment, end + 2, start + 2, end, flags);
+            }
+            if bytes[end] == 0 {
+                flags.mark_null();
+            } else if !bytes[end].is_ascii() {
+                flags.mark_non_ascii();
+            }
+            end += if bytes[end] < 0x80 {
+                1
+            } else {
+                self.utf8_width_at(end)
+            };
+        }
+        (
+            TokenKind::BadComment,
+            bytes.len(),
+            start + 2,
+            bytes.len(),
+            flags,
+        )
+    }
+
+    fn scan_string(&self, start: usize, quote: u8) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let mut end = start + 1;
+        let mut flags = TokenFlags::ascii();
+        while end < self.value.len() {
+            let byte = self.value[end];
+            if byte == quote {
+                return (TokenKind::QuotedString, end + 1, start + 1, end, flags);
+            }
+            if is_new_line(byte) {
+                return (TokenKind::BadString, end, start + 1, end, flags);
+            }
+            if byte == 0 {
+                flags.mark_null();
+            } else if !byte.is_ascii() {
+                flags.mark_non_ascii();
+            }
+            if byte == C_REVERSE_SOLIDUS {
+                flags.mark_escape();
+                if self.value.get(end + 1).is_some_and(|next| !next.is_ascii()) {
+                    flags.mark_non_ascii();
+                }
+                if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 1;
+                    if self.value.get(end) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end + 1) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                    end += 1;
+                } else if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else {
+                    end += 1;
                 }
             } else {
-                return Some(());
+                end += self.utf8_width_at(end);
             }
-        } else {
-            return Some(());
         }
-        self.consume();
-        while is_digit(self.cur()?) {
-            self.consume();
-        }
-        Some(())
+        (TokenKind::BadString, end, start + 1, end, flags)
     }
 
-    pub fn consume_ident_sequence(&mut self) -> Option<()> {
-        loop {
-            let c = self.cur()?;
-            if maybe_valid_escape(c) {
-                self.consume();
-                self.consume_escaped()?;
-            } else if is_ident(c) {
-                self.consume();
+    fn scan_ident_like(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let (name_end, name_flags) = self.scan_name_with_flags(start);
+        if self.value.get(name_end) != Some(&C_LEFT_PARENTHESIS) {
+            return (TokenKind::Ident, name_end, start, name_end, name_flags);
+        }
+
+        let open_end = name_end + 1;
+        let name = &self.value[start..name_end];
+        let is_url = name.eq_ignore_ascii_case(b"url")
+            || (name.contains(&C_REVERSE_SOLIDUS) && eq_css_ascii_case(name, b"url"));
+        if is_url {
+            let content_start = self.skip_white_space(open_end);
+            if !matches!(
+                self.value.get(content_start),
+                Some(&C_QUOTATION_MARK) | Some(&C_APOSTROPHE)
+            ) {
+                let (kind, end, value_start, value_end, url_flags) =
+                    self.scan_url(start, content_start);
+                let mut flags = name_flags;
+                flags.merge(url_flags);
+                return (kind, end, value_start, value_end, flags);
+            }
+        }
+        (TokenKind::Function, open_end, start, name_end, name_flags)
+    }
+
+    fn scan_url(
+        &self,
+        start: usize,
+        content_start: usize,
+    ) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let mut end = content_start;
+        let mut flags = TokenFlags::ascii();
+        while end < self.value.len() {
+            let byte = self.value[end];
+            if byte == C_RIGHT_PARENTHESIS {
+                return (TokenKind::Url, end + 1, content_start, end, flags);
+            }
+            if is_white_space(byte) {
+                let content_end = end;
+                let close = self.skip_white_space(end);
+                if self.value.get(close) == Some(&C_RIGHT_PARENTHESIS) {
+                    return (TokenKind::Url, close + 1, content_start, content_end, flags);
+                }
+                return self.scan_bad_url(start, close, content_start, flags);
+            }
+            if byte == 0 {
+                flags.mark_null();
+            } else if !byte.is_ascii() {
+                flags.mark_non_ascii();
+            }
+            if byte == C_QUOTATION_MARK
+                || byte == C_APOSTROPHE
+                || byte == C_LEFT_PARENTHESIS
+                || is_non_printable(byte)
+            {
+                return self.scan_bad_url(start, end, content_start, flags);
+            }
+            if byte == C_REVERSE_SOLIDUS {
+                flags.mark_escape();
+                if self.value.get(end + 1).is_some_and(|next| !next.is_ascii()) {
+                    flags.mark_non_ascii();
+                }
+                if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 2;
+                    if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                } else {
+                    return self.scan_bad_url(start, end, content_start, flags);
+                }
             } else {
-                return Some(());
+                end += self.utf8_width_at(end);
             }
         }
+        (
+            TokenKind::BadUrl,
+            self.value.len(),
+            content_start,
+            self.value.len(),
+            flags,
+        )
     }
 
-    pub fn consume_escaped(&mut self) -> Option<()> {
-        if is_hex_digit(self.cur()?) {
-            for _ in 1..5 {
-                self.consume();
-                if !is_hex_digit(self.cur()?) {
+    fn scan_bad_url(
+        &self,
+        _start: usize,
+        mut end: usize,
+        content_start: usize,
+        mut flags: TokenFlags,
+    ) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        while end < self.value.len() {
+            let byte = self.value[end];
+            if byte == 0 {
+                flags.mark_null();
+            } else if !byte.is_ascii() {
+                flags.mark_non_ascii();
+            }
+            if byte == C_RIGHT_PARENTHESIS {
+                end += 1;
+                break;
+            }
+            if byte == C_REVERSE_SOLIDUS {
+                flags.mark_escape();
+                if self.value.get(end + 1).is_some_and(|next| !next.is_ascii()) {
+                    flags.mark_non_ascii();
+                }
+                if self.is_valid_escape_at(end) {
+                    end = self.scan_escape(end);
+                } else if self
+                    .value
+                    .get(end + 1)
+                    .is_some_and(|next| is_new_line(*next))
+                {
+                    end += 2;
+                    if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                        && self.value.get(end) == Some(&C_LINE_FEED)
+                    {
+                        end += 1;
+                    }
+                } else {
+                    end += 1;
+                }
+            } else {
+                end += self.utf8_width_at(end);
+            }
+        }
+        (TokenKind::BadUrl, end, content_start, end, flags)
+    }
+
+    fn scan_numeric(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let mut end = start;
+        if matches!(
+            self.value.get(end),
+            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+        ) {
+            end += 1;
+        }
+        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+            end += 1;
+        }
+        if self.value.get(end) == Some(&C_FULL_STOP)
+            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
+        {
+            end += 1;
+            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                end += 1;
+            }
+        }
+        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
+            let exponent_start = end;
+            let mut exponent_end = end + 1;
+            if matches!(
+                self.value.get(exponent_end),
+                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+            ) {
+                exponent_end += 1;
+            }
+            if self
+                .value
+                .get(exponent_end)
+                .is_some_and(|byte| is_digit(*byte))
+            {
+                end = exponent_end + 1;
+                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                    end += 1;
+                }
+            } else {
+                end = exponent_start;
+            }
+        }
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return (
+                TokenKind::Percentage,
+                end + 1,
+                start,
+                end + 1,
+                TokenFlags::ascii(),
+            );
+        }
+        if self.starts_ident_at(end) {
+            let (end, flags) = self.scan_name_with_flags(end);
+            return (TokenKind::Dimension, end, start, end, flags);
+        }
+        (TokenKind::Number, end, start, end, TokenFlags::ascii())
+    }
+
+    #[inline]
+    fn skip_white_space(&self, mut position: usize) -> usize {
+        while self
+            .value
+            .get(position)
+            .is_some_and(|byte| is_white_space(*byte))
+        {
+            position += 1;
+        }
+        position
+    }
+
+    #[inline]
+    fn scan_plain_ascii_name(&self, mut position: usize) -> usize {
+        while self
+            .value
+            .get(position)
+            .is_some_and(|byte| PLAIN_ASCII_NAME_BYTE[*byte as usize])
+        {
+            position += 1;
+        }
+        position
+    }
+
+    #[inline]
+    fn raw_name_needs_tokenizer(&self, position: usize) -> bool {
+        self.value
+            .get(position)
+            .is_some_and(|byte| *byte == 0 || *byte == C_REVERSE_SOLIDUS || !byte.is_ascii())
+    }
+
+    #[inline]
+    fn scan_raw_numeric_end(&self, start: usize) -> Option<usize> {
+        let mut end = start;
+        if matches!(
+            self.value.get(end),
+            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+        ) {
+            end += 1;
+        }
+        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+            end += 1;
+        }
+        if self.value.get(end) == Some(&C_FULL_STOP)
+            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
+        {
+            end += 1;
+            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                end += 1;
+            }
+        }
+        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
+            let exponent_start = end;
+            let mut exponent_end = end + 1;
+            if matches!(
+                self.value.get(exponent_end),
+                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
+            ) {
+                exponent_end += 1;
+            }
+            if self
+                .value
+                .get(exponent_end)
+                .is_some_and(|byte| is_digit(*byte))
+            {
+                end = exponent_end + 1;
+                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
+                    end += 1;
+                }
+            } else {
+                end = exponent_start;
+            }
+        }
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return Some(end + 1);
+        }
+        if self.starts_ident_at(end) {
+            let name_end = self.scan_plain_ascii_name(end);
+            if name_end == end || self.raw_name_needs_tokenizer(name_end) {
+                return None;
+            }
+            return Some(name_end);
+        }
+        if self.raw_name_needs_tokenizer(end) {
+            return None;
+        }
+        Some(end)
+    }
+
+    #[inline]
+    fn scan_name(&self, position: usize) -> usize {
+        self.scan_name_impl::<false>(position).0
+    }
+
+    #[inline]
+    fn scan_name_with_flags(&self, position: usize) -> (usize, TokenFlags) {
+        self.scan_name_impl::<true>(position)
+    }
+
+    #[inline]
+    fn scan_name_impl<const TRACK_FLAGS: bool>(&self, mut position: usize) -> (usize, TokenFlags) {
+        let bytes = self.value;
+        let mut flags = TokenFlags::ascii();
+        while position < bytes.len() {
+            while position < bytes.len() {
+                let byte = bytes[position];
+                if PLAIN_ASCII_NAME_BYTE[byte as usize] {
+                    position += 1;
+                } else if byte == 0 {
+                    if TRACK_FLAGS {
+                        flags.mark_null();
+                    }
+                    position += 1;
+                } else {
                     break;
                 }
             }
-            if is_white_space(self.cur()?) {
-                self.consume();
-            }
-        } else {
-            self.consume();
-        }
-        Some(())
-    }
-
-    pub fn consume_ident_like<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let start = self.cur_pos()?;
-        self.consume_ident_sequence()?;
-        let peek_pos = self.peek_pos()?;
-        if self.cur_pos()? == start + 3 && self.slice(start, peek_pos)?.eq_ignore_ascii_case("url(")
-        {
-            self.consume();
-            while is_white_space(self.cur()?) {
-                self.consume();
-            }
-            let c = self.cur()?;
-            if c == C_QUOTATION_MARK || c == C_APOSTROPHE {
-                visitor.function(self, start, peek_pos)
-            } else {
-                self.consume_url(visitor, start)
-            }
-        } else if self.cur()? == C_LEFT_PARENTHESIS {
-            self.consume();
-            visitor.function(self, start, self.cur_pos()?)
-        } else {
-            visitor.ident(self, start, self.cur_pos()?)
-        }
-    }
-
-    pub fn consume_url<T: Visitor<'s>>(
-        self: &mut Lexer<'s>,
-        visitor: &mut T,
-        start: Pos,
-    ) -> Option<()> {
-        let content_start = self.cur_pos()?;
-        loop {
-            let c = self.cur()?;
-            if maybe_valid_escape(c) {
-                self.consume();
-                self.consume_escaped()?;
-            } else if is_white_space(c) {
-                let content_end = self.cur_pos()?;
-                self.consume();
-                while is_white_space(self.cur()?) {
-                    self.consume();
-                }
-                if self.cur()? != C_RIGHT_PARENTHESIS {
-                    return Some(());
-                }
-                self.consume();
-                return visitor.url(self, start, self.cur_pos()?, content_start, content_end);
-            } else if c == C_RIGHT_PARENTHESIS {
-                let content_end = self.cur_pos()?;
-                self.consume();
-                return visitor.url(self, start, self.cur_pos()?, content_start, content_end);
-            } else if c == C_LEFT_PARENTHESIS {
-                return Some(());
-            } else {
-                self.consume();
-            }
-        }
-    }
-
-    pub fn consume_string<T: Visitor<'s>>(&mut self, visitor: &mut T, end: char) -> Option<()> {
-        let start = self.cur_pos()?;
-        self.consume();
-        loop {
-            let c = self.cur()?;
-            if c == end {
-                self.consume();
+            if position == bytes.len() {
                 break;
-            } else if is_new_line(c) {
-                break;
-            } else if c == C_REVERSE_SOLIDUS {
-                self.consume();
-                let c2 = self.cur()?;
-                if is_new_line(c2) {
-                    self.consume();
-                } else if are_valid_escape(c, c2) {
-                    self.consume_escaped()?;
+            }
+
+            let byte = bytes[position];
+            if byte == C_REVERSE_SOLIDUS {
+                if self.is_valid_escape_at(position) {
+                    if TRACK_FLAGS {
+                        flags.mark_escape();
+                        if bytes.get(position + 1).is_some_and(|next| !next.is_ascii()) {
+                            flags.mark_non_ascii();
+                        }
+                    }
+                    position = self.scan_escape(position);
+                } else {
+                    break;
                 }
+            } else if byte.is_ascii() {
+                break;
             } else {
-                self.consume();
+                if TRACK_FLAGS {
+                    flags.mark_non_ascii();
+                }
+                position += self.utf8_width_at(position);
             }
         }
-        visitor.string(self, start, self.cur_pos()?)
+        (position, flags)
     }
 
-    pub fn consume_number_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let c2 = self.peek()?;
-        let start = self.cur_pos()?;
-        if is_ident(c2) || are_valid_escape(c2, self.peek2()?) {
-            self.consume();
-            if !visitor.is_selector(self)? {
-                return Some(());
+    #[inline]
+    fn starts_ident_at(&self, position: usize) -> bool {
+        let Some(byte) = self.value.get(position).copied() else {
+            return false;
+        };
+        match byte {
+            C_HYPHEN_MINUS => match self.value.get(position + 1).copied() {
+                Some(next) => {
+                    is_name_start_byte(next)
+                        || next == C_HYPHEN_MINUS
+                        || self.is_valid_escape_at(position + 1)
+                }
+                None => false,
+            },
+            C_REVERSE_SOLIDUS => self.is_valid_escape_at(position),
+            _ => is_name_start_byte(byte),
+        }
+    }
+
+    #[inline]
+    fn starts_number_at(&self, position: usize) -> bool {
+        let Some(first) = self.value.get(position).copied() else {
+            return false;
+        };
+        let second = self.value.get(position + 1).copied();
+        let third = self.value.get(position + 2).copied();
+        match first {
+            C_PLUS_SIGN | C_HYPHEN_MINUS => {
+                second.is_some_and(is_digit)
+                    || (second == Some(C_FULL_STOP) && third.is_some_and(is_digit))
             }
-            if !start_ident_sequence(self.cur()?, self.peek()?, self.peek2()?) {
-                return visitor.id(self, start, self.cur_pos()?);
+            C_FULL_STOP => second.is_some_and(is_digit),
+            _ => is_digit(first),
+        }
+    }
+
+    #[inline]
+    fn is_valid_escape_at(&self, position: usize) -> bool {
+        self.value.get(position) == Some(&C_REVERSE_SOLIDUS)
+            && self
+                .value
+                .get(position + 1)
+                .is_some_and(|byte| !is_new_line(*byte))
+    }
+
+    #[inline]
+    fn scan_escape(&self, position: usize) -> usize {
+        debug_assert!(self.is_valid_escape_at(position));
+        let mut end = position + 1;
+        if self.value[end].is_ascii_hexdigit() {
+            let mut digits = 0;
+            while end < self.value.len() && digits < 6 && self.value[end].is_ascii_hexdigit() {
+                end += 1;
+                digits += 1;
             }
-            self.consume_ident_sequence()?;
-            visitor.id(self, start, self.cur_pos()?)
+            if self
+                .value
+                .get(end)
+                .is_some_and(|byte| is_white_space(*byte))
+            {
+                end += 1;
+                if self.value.get(end - 1) == Some(&C_CARRIAGE_RETURN)
+                    && self.value.get(end) == Some(&C_LINE_FEED)
+                {
+                    end += 1;
+                }
+            }
+            return end;
+        }
+        end + self.utf8_width_at(end)
+    }
+
+    #[inline]
+    fn utf8_width_at(&self, position: usize) -> usize {
+        let byte = self.value[position];
+        if byte < 0x80 {
+            1
+        } else if byte < 0xE0 {
+            2
+        } else if byte < 0xF0 {
+            3
         } else {
-            self.consume_delim();
-            visitor.id(self, start, self.cur_pos()?)
+            4
         }
-    }
-
-    pub fn consume_left_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.left_parenthesis(self, end - 1, end)
-    }
-
-    pub fn consume_right_parenthesis<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.right_parenthesis(self, end - 1, end)
-    }
-
-    pub fn consume_plus_sign(&mut self) -> Option<()> {
-        if start_number(self.cur()?, self.peek()?, self.peek2()?) {
-            self.consume_numeric_token()?;
-        } else {
-            self.consume_delim();
-        }
-        Some(())
-    }
-
-    pub fn consume_comma<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.comma(self, end - 1, end)
-    }
-
-    pub fn consume_minus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let c = self.cur()?;
-        let c2 = self.peek()?;
-        let c3 = self.peek2()?;
-        if start_number(c, c2, c3) {
-            self.consume_numeric_token()?;
-        } else if c2 == C_HYPHEN_MINUS && c3 == C_GREATER_THAN_SIGN {
-            self.consume();
-            self.consume();
-        } else if start_ident_sequence(c, c2, c3) {
-            self.consume_ident_like(visitor)?;
-        } else {
-            self.consume_delim();
-        }
-        Some(())
-    }
-
-    pub fn consume_full_stop<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let c = self.cur()?;
-        let c2 = self.peek()?;
-        let c3 = self.peek2()?;
-        if start_number(c, c2, c3) {
-            return self.consume_numeric_token();
-        }
-        let start = self.cur_pos()?;
-        self.consume();
-        if !visitor.is_selector(self)? {
-            return Some(());
-        }
-        if !start_ident_sequence(c2, c3, self.peek2()?) {
-            return visitor.class(self, start, self.cur_pos()?);
-        }
-        self.consume_ident_sequence()?;
-        visitor.class(self, start, self.cur_pos()?)
-    }
-
-    pub fn consume_potential_pseudo<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let start = self.cur_pos()?;
-        self.consume();
-        if !start_ident_sequence(self.cur()?, self.peek()?, self.peek2()?) {
-            return Some(());
-        }
-        if !visitor.is_selector(self)? {
-            return Some(());
-        }
-        self.consume_ident_sequence()?;
-        if self.cur()? == C_LEFT_PARENTHESIS {
-            self.consume();
-            visitor.pseudo_function(self, start, self.cur_pos()?)
-        } else {
-            visitor.pseudo_class(self, start, self.cur_pos()?)
-        }
-    }
-
-    pub fn consume_semicolon<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.semicolon(self, end - 1, end)
-    }
-
-    pub fn consume_less_than_sign(&mut self) -> Option<()> {
-        self.consume();
-        if self.cur()? == '!' && self.peek()? == '-' && self.peek2()? == '-' {
-            self.consume();
-            self.consume();
-            self.consume();
-        }
-        Some(())
-    }
-
-    pub fn consume_at_sign<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        let start = self.cur_pos()?;
-        self.consume();
-        if start_ident_sequence(self.cur()?, self.peek()?, self.peek2()?) {
-            self.consume_ident_sequence()?;
-            return visitor.at_keyword(self, start, self.cur_pos()?);
-        }
-        Some(())
-    }
-
-    pub fn consume_reverse_solidus<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        if are_valid_escape(self.cur()?, self.peek()?) {
-            self.consume_ident_like(visitor)?;
-        } else {
-            self.consume_delim();
-        }
-        Some(())
-    }
-
-    pub fn consume_left_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.left_curly_bracket(self, end - 1, end)
-    }
-
-    pub fn consume_right_curly<T: Visitor<'s>>(&mut self, visitor: &mut T) -> Option<()> {
-        self.consume();
-        let end = self.cur_pos()?;
-        visitor.right_curly_bracket(self, end - 1, end)
     }
 }
 
-impl<'s, I: Iterator<Item = char>> Lexer<'s, I> {
-    pub fn consume_comments(&mut self) -> Option<()> {
-        if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
-            self.consume();
-            loop {
-                self.consume();
-                let c = self.cur()?;
-                if c == C_ASTERISK && self.peek()? == C_SOLIDUS {
-                    self.consume();
-                    self.consume();
-                    break;
+/// The single forward stream used by dependency extraction.
+///
+/// The stream owns the main scanner state and gives the dependency scanner one
+/// token of lookahead without cloning the lexer for every decision. Special
+/// parsers use the same stream through `next_parser_token`, so consuming a
+/// subgrammar never creates a second scanner over the source.
+///
+/// The cursor is strictly one-directional:
+///
+/// ```text
+/// Lexer::scan_pos         farthest tokenized position, only advances
+/// TokenStream::consumed   farthest semantically consumed position, only advances
+/// buffered lookahead      tokens scanned but not yet consumed
+/// ```
+///
+/// `next` consumes from the buffer first and only calls `lexer.next_token`
+/// when the buffer is empty; it never moves the scanner backwards, so every
+/// source range is tokenized at most once and every token is consumed at most
+/// once.
+pub(crate) struct TokenStream<'a, 's> {
+    lexer: &'a mut Lexer<'s>,
+    consumed: Pos,
+    buffered: VecDeque<TokenWithTrivia>,
+    generic_value_state: GenericValueScanState,
+    at_rule_state: GenericValueScanState,
+    special_value_state: GenericValueScanState,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct GenericValueScanState {
+    parentheses: u32,
+    squares: u32,
+    curlies: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GenericValueScanOptions {
+    keep_comments: bool,
+    preserve_strings: bool,
+    preserve_delimiters: bool,
+    property: Option<PropertyKind>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PrescannedIdent {
+    start: Pos,
+    end: Pos,
+    flags: TokenFlags,
+}
+
+impl GenericValueScanState {
+    #[inline]
+    fn is_nested(&self) -> bool {
+        self.parentheses != 0 || self.squares != 0 || self.curlies != 0
+    }
+}
+
+#[inline]
+fn is_dependency_value_function(name: &str) -> bool {
+    name.eq_ignore_ascii_case("url")
+        || name.eq_ignore_ascii_case("var")
+        || name.eq_ignore_ascii_case("image-set")
+        || ["-webkit-", "-moz-", "-ms-", "-o-"]
+            .into_iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
+            })
+        || name.starts_with("--")
+}
+
+fn eq_css_ascii_case(input: &[u8], expected: &[u8]) -> bool {
+    let mut input_position = 0;
+    let mut expected_position = 0;
+    while input_position < input.len() {
+        let byte = if input[input_position] == C_REVERSE_SOLIDUS {
+            input_position += 1;
+            let Some(&first) = input.get(input_position) else {
+                return false;
+            };
+            if first.is_ascii_hexdigit() {
+                let mut value = 0u32;
+                let mut digits = 0;
+                while let Some(&digit) = input.get(input_position) {
+                    if digits == 6 || !digit.is_ascii_hexdigit() {
+                        break;
+                    }
+                    value = value * 16 + hex_digit_value(digit) as u32;
+                    input_position += 1;
+                    digits += 1;
                 }
-            }
-        }
-        Some(())
-    }
-
-    pub fn consume_space(&mut self) -> Option<()> {
-        self.consume();
-        while is_white_space(self.cur()?) {
-            self.consume();
-        }
-        Some(())
-    }
-
-    pub fn consume_white_space_and_comments(&mut self) -> Option<()> {
-        loop {
-            self.consume_comments()?;
-            if is_white_space(self.cur()?) {
-                self.consume_space()?;
+                if input
+                    .get(input_position)
+                    .is_some_and(|byte| is_white_space(*byte))
+                {
+                    input_position += 1;
+                    if input.get(input_position - 1) == Some(&C_CARRIAGE_RETURN)
+                        && input.get(input_position) == Some(&C_LINE_FEED)
+                    {
+                        input_position += 1;
+                    }
+                }
+                let Ok(byte) = u8::try_from(value) else {
+                    return false;
+                };
+                if byte == 0 {
+                    return false;
+                }
+                byte
             } else {
-                break;
+                if !first.is_ascii() || is_new_line(first) {
+                    return false;
+                }
+                input_position += 1;
+                first
             }
+        } else {
+            let byte = input[input_position];
+            if !byte.is_ascii() || byte == 0 {
+                return false;
+            }
+            input_position += 1;
+            byte
+        };
+        let Some(expected_byte) = expected.get(expected_position) else {
+            return false;
+        };
+        if !byte.eq_ignore_ascii_case(expected_byte) {
+            return false;
         }
-        Some(())
+        expected_position += 1;
+    }
+    expected_position == expected.len()
+}
+
+fn hex_digit_value(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => unreachable!("hex digit checked by caller"),
+    }
+}
+
+#[inline(always)]
+fn never_fast_forward_candidate(_: &str) -> bool {
+    false
+}
+
+fn is_css_modules_pure_magic_comment(input: &str) -> bool {
+    let input = trim_slice(input);
+    let Some(keyword) = input.strip_prefix("cssmodules-pure-") else {
+        return false;
+    };
+    ["ignore", "no-check"].into_iter().any(|expected| {
+        keyword.strip_prefix(expected).is_some_and(|rest| {
+            rest.is_empty()
+                || rest
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| is_white_space(*byte))
+        })
+    })
+}
+
+fn trim_slice(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && is_white_space(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_white_space(bytes[end - 1]) {
+        end -= 1;
+    }
+    &input[start..end]
+}
+
+impl<'a, 's> TokenStream<'a, 's> {
+    pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s>) -> Self {
+        Self {
+            lexer,
+            consumed: 0,
+            buffered: VecDeque::new(),
+            generic_value_state: GenericValueScanState::default(),
+            at_rule_state: GenericValueScanState::default(),
+            special_value_state: GenericValueScanState::default(),
+        }
     }
 
-    pub(crate) fn consume_trivia(&mut self) -> Option<Trivia> {
+    #[inline(always)]
+    pub(crate) fn next<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+        let token = if let Some(token) = self.buffered.pop_front() {
+            token
+        } else {
+            self.read_significant::<KEEP_COMMENTS>()
+        };
+        debug_assert!(
+            token.token.range.start >= self.consumed,
+            "token range starts before consumed_pos: {:?} < {}",
+            token.token.range,
+            self.consumed
+        );
+        self.consumed = token.token.range.end;
+        if matches!(
+            token.token.kind,
+            TokenKind::Semicolon | TokenKind::RightCurlyBracket
+        ) {
+            self.generic_value_state = GenericValueScanState::default();
+        }
+        debug_assert!(
+            self.consumed <= self.lexer.scan_pos(),
+            "consumed_pos ({}) exceeded scan_pos ({})",
+            self.consumed,
+            self.lexer.scan_pos()
+        );
+        token
+    }
+
+    /// Consume the next parser token while folding comments into its leading
+    /// trivia. This is the equivalent of the old isolated cursor's behavior,
+    /// but it advances the main stream and therefore preserves one scanner
+    /// ownership for all subgrammars.
+    #[inline]
+    pub(crate) fn next_parser_token(&mut self) -> TokenWithTrivia {
+        let mut item = self.next::<true>();
+        if item.token.kind != TokenKind::Comment {
+            return item;
+        }
+
+        let start = item.leading.range.start;
+        let first_comment_start = item
+            .leading
+            .first_comment_start
+            .or(Some(item.token.range.start));
+        let mut has_white_space = item.leading.has_white_space;
+        loop {
+            item = self.next::<true>();
+            has_white_space |= item.leading.has_white_space;
+            if item.token.kind == TokenKind::Comment {
+                continue;
+            }
+            let end = item.leading.end;
+            item.leading = Trivia {
+                range: Range::new(start, end),
+                end,
+                first_comment_start,
+                has_white_space,
+            };
+            return item;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn peek<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+        if self.buffered.is_empty() {
+            let item = self.read_significant::<KEEP_COMMENTS>();
+            self.buffered.push_back(item);
+        }
+        *self.buffered.front().unwrap()
+    }
+
+    /// Peek the next parser token (folding comments into its leading trivia)
+    /// without consuming it or any preceding comments. The stream state is
+    /// unchanged: `next` later returns the same tokens in the same order.
+    #[inline]
+    pub(crate) fn peek_parser_token(&mut self) -> TokenWithTrivia {
+        self.peek::<true>();
+        let mut leading_start = None;
         let mut first_comment_start = None;
         let mut has_white_space = false;
-
+        let mut index = 0usize;
         loop {
-            if self.cur()? == C_SOLIDUS && self.peek()? == C_ASTERISK {
-                first_comment_start.get_or_insert(self.cur_pos()?);
-                self.consume_comments()?;
+            if index == self.buffered.len() {
+                let item = self.read_significant::<true>();
+                self.buffered.push_back(item);
+            }
+            let item = self.buffered[index];
+            leading_start.get_or_insert(item.leading.range.start);
+            has_white_space |= item.leading.has_whitespace();
+            if matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                first_comment_start.get_or_insert(item.token.range.start);
+                index += 1;
                 continue;
             }
-            if is_white_space(self.cur()?) {
-                has_white_space = true;
-                self.consume_space()?;
-                continue;
-            }
-            break;
-        }
 
-        Some(Trivia {
-            end: self.cur_pos()?,
-            first_comment_start,
-            has_white_space,
-        })
+            let end = item.leading.end;
+            let mut result = item;
+            result.leading = Trivia {
+                range: Range::new(leading_start.unwrap_or(end), end),
+                end,
+                first_comment_start: first_comment_start.or(item.leading.first_comment_start),
+                has_white_space,
+            };
+            return result;
+        }
+    }
+
+    /// Peek at the next significant token, leaving any skipped comments in
+    /// the buffer for `next` to consume in source order.
+    #[inline]
+    pub(crate) fn peek_significant_skipping_comments<const KEEP_COMMENTS: bool>(
+        &mut self,
+    ) -> TokenWithTrivia {
+        self.peek::<KEEP_COMMENTS>();
+        for item in &self.buffered {
+            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                return *item;
+            }
+        }
+        loop {
+            let item = self.read_significant::<KEEP_COMMENTS>();
+            self.buffered.push_back(item);
+            if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                return item;
+            }
+        }
+    }
+
+    /// The position of the next yet-untokenized source byte. The buffer may
+    /// still hold tokens; callers must drain `next` before fast-forwarding.
+    #[inline]
+    pub(crate) fn fast_forward_generic_value_if_buffer_empty<F, C>(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+            &mut self.generic_value_state,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                property: None,
+            },
+            &mut is_candidate,
+            &mut is_comment_candidate,
+            None,
+        );
+        self.finish_value_fast_forward(candidate);
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_generic_value_without_candidates_if_buffer_empty(
+        &mut self,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+    ) {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+            &mut self.generic_value_state,
+            GenericValueScanOptions {
+                keep_comments: false,
+                preserve_strings,
+                preserve_delimiters,
+                property: None,
+            },
+            never_fast_forward_candidate,
+            never_fast_forward_candidate,
+            None,
+        );
+        self.finish_value_fast_forward(candidate);
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_at_rule_if_buffer_empty<F, C>(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        let candidate = self.lexer.fast_forward_generic_value::<true, _, _>(
+            &mut self.at_rule_state,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                property: None,
+            },
+            &mut is_candidate,
+            &mut is_comment_candidate,
+            None,
+        );
+        self.finish_value_fast_forward(candidate);
+    }
+
+    #[inline]
+    pub(crate) fn reset_at_rule_scan_state(&mut self) {
+        self.at_rule_state = GenericValueScanState::default();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_special_value_if_buffer_empty(
+        &mut self,
+        keep_comments: bool,
+        preserve_strings: bool,
+        preserve_delimiters: bool,
+        property: PropertyKind,
+        icss_symbols: Option<&FxHashSet<&str>>,
+    ) {
+        if !self.buffered.is_empty() {
+            return;
+        }
+        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+            &mut self.special_value_state,
+            GenericValueScanOptions {
+                keep_comments,
+                preserve_strings,
+                preserve_delimiters,
+                property: Some(property),
+            },
+            never_fast_forward_candidate,
+            is_css_modules_pure_magic_comment,
+            icss_symbols,
+        );
+        self.finish_value_fast_forward(candidate);
+    }
+
+    #[inline]
+    fn finish_value_fast_forward(&mut self, candidate: Option<PrescannedIdent>) {
+        let Some(candidate) = candidate else {
+            self.consumed = self.lexer.scan_pos();
+            return;
+        };
+        debug_assert_eq!(candidate.end, self.lexer.scan_pos());
+        self.consumed = candidate.start;
+        let range = Range::new(candidate.start, candidate.end);
+        self.buffered.push_back(TokenWithTrivia {
+            token: Token::with_flags(TokenKind::Ident, range, range, candidate.flags),
+            leading: Trivia {
+                range: Range::new(candidate.start, candidate.start),
+                end: candidate.start,
+                first_comment_start: None,
+                has_white_space: false,
+            },
+        });
+    }
+
+    #[inline]
+    pub(crate) fn reset_special_value_scan_state(&mut self) {
+        self.special_value_state = GenericValueScanState::default();
+    }
+
+    #[inline]
+    pub(crate) fn fast_forward_selector_if_buffer_empty<C>(
+        &mut self,
+        square_depth: &mut u32,
+        keep_comments: bool,
+        has_mode: bool,
+        is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
+        if !self.buffered.is_empty() {
+            return false;
+        }
+        if *square_depth == 0 {
+            let scan_pos = self.lexer.scan_pos();
+            let Some(next) = self.lexer.byte_at(scan_pos) else {
+                return false;
+            };
+            if matches!(
+                next,
+                b'"' | b'\'' | b'(' | b')' | b'{' | b'}' | b',' | b';' | b'@'
+            ) || (has_mode && matches!(next, b'.' | b'#' | b':'))
+            {
+                return false;
+            }
+
+            // A raw scan has a fixed call/setup cost. Keep short, dense
+            // selector fragments on the regular tokenizer path and only
+            // enter the scanner when it can skip a useful run. Comments and
+            // attributes are exceptions because their contents are opaque.
+            let mut probe = scan_pos;
+            while probe - scan_pos < 4 {
+                let Some(byte) = self.lexer.byte_at(probe) else {
+                    return false;
+                };
+                if matches!(byte, b'/' | b'[') {
+                    break;
+                }
+                if probe != scan_pos
+                    && (matches!(
+                        byte,
+                        b'"' | b'\'' | b'(' | b')' | b'{' | b'}' | b',' | b';' | b'@'
+                    ) || (has_mode && matches!(byte, b'.' | b'#' | b':')))
+                {
+                    return false;
+                }
+                probe += 1;
+            }
+        }
+        let invalidates_composes = self.lexer.fast_forward_selector(
+            square_depth,
+            keep_comments,
+            has_mode,
+            is_comment_candidate,
+        );
+        self.consumed = self.lexer.scan_pos();
+        invalidates_composes
+    }
+
+    /// Skip a balanced delimiter run without manufacturing tokens. The opening
+    /// token must already be consumed, and no further tokens may be buffered.
+    ///
+    /// On success `consumed` is advanced to the end of the closing token and
+    /// the full range is returned. On failure (`None`) the lexer position is
+    /// unchanged so the caller can re-tokenize the region normally.
+    pub(crate) fn fast_forward(&mut self, end: TokenKind) -> Option<Range> {
+        debug_assert!(
+            self.buffered.is_empty(),
+            "fast_forward requires an empty lookahead buffer"
+        );
+        let old_scan_pos = self.lexer.scan_pos();
+        let old_consumed = self.consumed;
+        let range = self.lexer.fast_forward(end)?;
+        self.consumed = range.end;
+        debug_assert!(old_scan_pos <= self.lexer.scan_pos());
+        debug_assert!(old_consumed <= self.consumed);
+        debug_assert!(self.consumed <= self.lexer.scan_pos());
+        Some(range)
+    }
+
+    /// The farthest position consumed by `next`. This is the current semantic
+    /// position of the dependency scanner.
+    #[inline]
+    pub(crate) fn consumed_pos(&self) -> Pos {
+        self.consumed
+    }
+
+    #[inline]
+    pub(crate) fn lexer(&self) -> &Lexer<'s> {
+        self.lexer
+    }
+
+    #[inline]
+    pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s> {
+        self.lexer
+    }
+
+    #[inline]
+    pub(crate) fn source_end(&self) -> Pos {
+        self.lexer.source_end()
+    }
+
+    #[inline(always)]
+    pub(crate) fn byte_at(&self, position: Pos) -> Option<u8> {
+        self.lexer.byte_at(position)
+    }
+
+    #[inline]
+    pub(crate) fn slice(&self, start: Pos, end: Pos) -> Option<&'s str> {
+        self.lexer.slice(start, end)
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice_trusted(&self, start: Pos, end: Pos) -> &'s str {
+        self.lexer.slice_trusted(start, end)
+    }
+
+    #[inline(always)]
+    fn read_significant<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+        let start = self.lexer.scan_pos();
+        let mut end = start;
+        let mut first_comment_start = None;
+        let mut has_white_space = false;
+        loop {
+            let token = self.lexer.next_token();
+            debug_assert!(token.range.start >= end);
+            if token.kind == TokenKind::WhiteSpace {
+                has_white_space = true;
+                end = token.range.end;
+                continue;
+            }
+            if !KEEP_COMMENTS && matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
+                first_comment_start.get_or_insert(token.range.start);
+                end = token.range.end;
+                continue;
+            }
+            let leading = Trivia {
+                range: Range::new(start, end),
+                end,
+                first_comment_start,
+                has_white_space,
+            };
+            return TokenWithTrivia { token, leading };
+        }
     }
 }
 
-pub fn is_new_line(c: char) -> bool {
+pub fn is_new_line(c: u8) -> bool {
     c == C_LINE_FEED || c == C_CARRIAGE_RETURN || c == C_FORM_FEED
 }
 
-pub fn is_space(c: char) -> bool {
+#[inline]
+fn kind_to_right(byte: u8) -> TokenKind {
+    match byte {
+        C_RIGHT_PARENTHESIS => TokenKind::RightParenthesis,
+        C_RIGHT_SQUARE => TokenKind::RightSquareBracket,
+        C_RIGHT_CURLY => TokenKind::RightCurlyBracket,
+        _ => unreachable!("fast_forward only sees closing bracket bytes"),
+    }
+}
+
+pub fn is_space(c: u8) -> bool {
     c == C_TAB || c == C_SPACE
 }
 
-pub fn is_white_space(c: char) -> bool {
+pub fn is_white_space(c: u8) -> bool {
     is_new_line(c) || is_space(c)
 }
 
-pub fn is_digit(c: char) -> bool {
-    c >= C_0 && c <= C_9
+pub fn is_digit(c: u8) -> bool {
+    c.is_ascii_digit()
 }
 
-pub fn is_hex_digit(c: char) -> bool {
-    is_digit(c) || (c >= C_UPPER_A && c <= C_UPPER_F) || (c >= C_LOWER_A && c <= C_LOWER_F)
+#[inline]
+fn is_name_start_byte(c: u8) -> bool {
+    c == 0 || c == C_LOW_LINE || c.is_ascii_alphabetic() || !c.is_ascii()
 }
 
-pub fn is_ident_start(c: char) -> bool {
-    c == C_LOW_LINE
-        || (c >= C_LOWER_A && c <= C_LOWER_Z)
-        || (c >= C_UPPER_A && c <= C_UPPER_Z)
-        || c >= '\u{80}'
-}
-
-pub fn is_ident(c: char) -> bool {
-    is_ident_start(c) || is_digit(c) || c == C_HYPHEN_MINUS
-}
-
-pub fn start_ident_sequence(c1: char, c2: char, c3: char) -> bool {
-    if c1 == C_HYPHEN_MINUS {
-        is_ident_start(c2) || c2 == C_HYPHEN_MINUS || are_valid_escape(c2, c3)
-    } else {
-        is_ident_start(c1) || are_valid_escape(c1, c2)
-    }
-}
-
-pub fn maybe_valid_escape(c: char) -> bool {
-    c == C_REVERSE_SOLIDUS
-}
-
-pub fn are_valid_escape(c1: char, c2: char) -> bool {
-    c1 == C_REVERSE_SOLIDUS && !is_new_line(c2)
-}
-
-pub fn start_number(c1: char, c2: char, c3: char) -> bool {
-    if c1 == C_PLUS_SIGN || c1 == C_HYPHEN_MINUS {
-        is_digit(c2) || (c2 == C_FULL_STOP && is_digit(c3))
-    } else {
-        is_digit(c1) || (c1 == C_FULL_STOP && is_digit(c2))
-    }
+#[inline]
+fn is_non_printable(c: u8) -> bool {
+    matches!(c, 0x00..=0x08 | 0x0B | 0x0E..=0x1F | 0x7F)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use indoc::indoc;
-    use std::fmt::Write as _;
-
-    fn assert_lexer_state<I: Iterator<Item = char>>(
-        lexer: &Lexer<'_, I>,
-        cur: Option<char>,
-        cur_pos: Option<Pos>,
-        peek: Option<char>,
-        peek_pos: Option<Pos>,
-        peek2: Option<char>,
-        peek2_pos: Option<Pos>,
-    ) {
-        assert_eq!(lexer.cur(), cur);
-        assert_eq!(lexer.cur_pos(), cur_pos);
-        assert_eq!(lexer.peek(), peek);
-        assert_eq!(lexer.peek_pos(), peek_pos);
-        assert_eq!(lexer.peek2(), peek2);
-        assert_eq!(lexer.peek2_pos(), peek2_pos);
-    }
-
-    #[derive(Default)]
-    struct Snapshot {
-        results: Vec<(String, String)>,
-    }
-
-    impl Snapshot {
-        pub fn add(&mut self, key: &str, value: &str) {
-            self.results.push((key.to_string(), value.to_string()))
-        }
-
-        pub fn snapshot(&self) -> String {
-            self.results
-                .iter()
-                .fold(String::new(), |mut output, (key, value)| {
-                    writeln!(output, "{key}: {value}").expect("writing to String cannot fail");
-                    output
-                })
-        }
-    }
-
-    impl Visitor<'_> for Snapshot {
-        fn function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("function", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn ident(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("ident", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn url(
-            &mut self,
-            lexer: &mut Lexer,
-            _: Pos,
-            _: Pos,
-            content_start: Pos,
-            content_end: Pos,
-        ) -> Option<()> {
-            self.add("url", lexer.slice(content_start, content_end)?);
-            Some(())
-        }
-
-        fn string(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("string", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn is_selector(&mut self, _: &mut Lexer) -> Option<bool> {
-            Some(true)
-        }
-
-        fn id(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("id", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn left_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("left_parenthesis", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn right_parenthesis(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("right_parenthesis", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn comma(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("comma", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("class", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn pseudo_function(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("pseudo_function", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn pseudo_class(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("pseudo_class", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn semicolon(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("semicolon", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn at_keyword(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("at_keyword", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn left_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("left_curly", lexer.slice(start, end)?);
-            Some(())
-        }
-
-        fn right_curly_bracket(&mut self, lexer: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
-            self.add("right_curly", lexer.slice(start, end)?);
-            Some(())
-        }
-    }
-
-    fn assert_lexer_snapshot(input: &str, snapshot: &str) {
-        let mut s = Snapshot::default();
-        let mut l = Lexer::new(input);
-        l.lex(&mut s);
-        assert!(l.cur().is_none());
-        similar_asserts::assert_eq!(s.snapshot(), snapshot);
-    }
-
-    #[test]
-    fn lexer_state_1() {
-        let mut l = Lexer::new("");
-        assert_lexer_state(&l, None, None, None, Some(0), None, None);
-        l.consume();
-        assert_eq!(l.cur(), None);
-        assert_lexer_state(&l, None, Some(0), None, None, None, None);
-        l.consume();
-        assert_eq!(l.cur(), None);
-    }
-
-    #[test]
-    fn consume_trivia_distinguishes_comments_from_white_space() {
-        let input = " /** first **//** second **/ .class";
-        let mut lexer = Lexer::new(input);
-        lexer.consume();
-
-        let trivia = lexer.consume_trivia().unwrap();
-
-        assert!(trivia.has_white_space);
-        assert_eq!(trivia.first_comment_start, Some(1));
-        assert_eq!(trivia.end, input.find(".class").unwrap() as Pos);
-        assert_eq!(lexer.cur(), Some('.'));
-    }
-
-    #[test]
-    fn lexer_state_2() {
-        let mut l = Lexer::new("0壹👂삼");
-        assert_lexer_state(&l, None, None, Some('0'), Some(0), Some('壹'), Some(1));
-        l.consume();
-        assert_eq!(l.cur(), Some('0'));
-        assert_lexer_state(
-            &l,
-            Some('0'),
-            Some(0),
-            Some('壹'),
-            Some(1),
-            Some('👂'),
-            Some(4),
-        );
-        l.consume();
-        assert_eq!(l.cur(), Some('壹'));
-        assert_lexer_state(
-            &l,
-            Some('壹'),
-            Some(1),
-            Some('👂'),
-            Some(4),
-            Some('삼'),
-            Some(8),
-        );
-        l.consume();
-        assert_eq!(l.cur(), Some('👂'));
-        assert_lexer_state(&l, Some('👂'), Some(4), Some('삼'), Some(8), None, Some(11));
-        l.consume();
-        assert_eq!(l.cur(), Some('삼'));
-        assert_lexer_state(&l, Some('삼'), Some(8), None, Some(11), None, None);
-        l.consume();
-        assert_eq!(l.cur(), None);
-        assert_lexer_state(&l, None, Some(11), None, None, None, None);
-        l.consume();
-        assert_eq!(l.cur(), None);
-    }
-
-    #[test]
-    fn lexer_state_3() {
-        let l = Lexer::new("");
-        let mut l = l.turn_back(0);
-        assert_lexer_state(&l, None, None, None, Some(0), None, None);
-        l.consume();
-        assert_lexer_state(&l, None, Some(0), None, None, None, None);
-    }
-
-    #[test]
-    fn parse_urls() {
-        assert_lexer_snapshot(
-            indoc! {r#"
-            body {
-                background: url(
-                    https://example\2f4a8f.com\
-            /image.png
-                )
-            }
-            --element\ name.class\ name#_id {
-                background: url(  "https://example.com/some url \"with\" 'spaces'.png"   )  url('https://example.com/\'"quotes"\'.png');
-            }
-        "#},
-            indoc! {r#"
-            ident: body
-            left_curly: {
-            ident: background
-            url: https://example\2f4a8f.com\
-            /image.png
-            right_curly: }
-            ident: --element\ name
-            class: .class\ name
-            id: #_id
-            left_curly: {
-            ident: background
-            function: url(
-            string: "https://example.com/some url \"with\" 'spaces'.png"
-            right_parenthesis: )
-            function: url(
-            string: 'https://example.com/\'"quotes"\'.png'
-            right_parenthesis: )
-            semicolon: ;
-            right_curly: }
-        "#},
-        );
-    }
-
-    #[test]
-    fn parse_pseudo_functions() {
-        assert_lexer_snapshot(
-            indoc! {r#"
-            :local(.class#id, .class:not(*:hover)) { color: red; }
-            :import(something from ":somewhere") {}
-        "#},
-            indoc! {r#"
-            pseudo_function: :local(
-            class: .class
-            id: #id
-            comma: ,
-            class: .class
-            pseudo_function: :not(
-            pseudo_class: :hover
-            right_parenthesis: )
-            right_parenthesis: )
-            left_curly: {
-            ident: color
-            ident: red
-            semicolon: ;
-            right_curly: }
-            pseudo_function: :import(
-            ident: something
-            ident: from
-            string: ":somewhere"
-            right_parenthesis: )
-            left_curly: {
-            right_curly: }
-        "#},
-        );
-    }
-
-    #[test]
-    fn parse_at_rules() {
-        assert_lexer_snapshot(
-            indoc! {r#"
-            @media (max-size: 100px) {
-                @import "external.css";
-                body { color: red; }
-            }
-        "#},
-            indoc! {r#"
-            at_keyword: @media
-            left_parenthesis: (
-            ident: max-size
-            right_parenthesis: )
-            left_curly: {
-            at_keyword: @import
-            string: "external.css"
-            semicolon: ;
-            ident: body
-            left_curly: {
-            ident: color
-            ident: red
-            semicolon: ;
-            right_curly: }
-            right_curly: }
-        "#},
-        );
-    }
-
-    #[test]
-    fn parse_escape() {
-        assert_lexer_snapshot(
-            indoc! {r#"
-                body {
-                    a\
-                a: \
-                url(https://example\2f4a8f.com\
-                /image.png)
-                    b: url(#\
-                hash)
-                }
-            "#},
-            indoc! {r#"
-                ident: body
-                left_curly: {
-                ident: a\
-                a
-                url: https://example\2f4a8f.com\
-                /image.png
-                ident: b
-                url: #\
-                hash
-                right_curly: }
-            "#},
-        );
-    }
-
-    #[test]
-    fn parse_pseudo_elements() {
-        assert_lexer_snapshot(
-            indoc! {r#"
-                a::after {
-                    content: ' (' attr(href) ')';
-                }
-            "#},
-            indoc! {r#"
-                ident: a
-                pseudo_class: :after
-                left_curly: {
-                ident: content
-                string: ' ('
-                function: attr(
-                ident: href
-                right_parenthesis: )
-                string: ')'
-                semicolon: ;
-                right_curly: }
-            "#},
-        );
-    }
-
-    #[test]
-    fn parse_minimized_urls() {
-        assert_lexer_snapshot(
-            "body{background:url(./image.png)}",
-            indoc! {r#"
-                ident: body
-                left_curly: {
-                ident: background
-                pseudo_function: :url(
-                class: .
-                ident: image
-                class: .png
-                right_parenthesis: )
-                right_curly: }
-            "#},
-        );
-    }
-}
+#[path = "../tests/unit/lexer_tests.rs"]
+mod tests;
