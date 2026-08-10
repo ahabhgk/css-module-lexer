@@ -10,6 +10,8 @@ use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::str;
 
+use bitflags::bitflags;
+
 const fn build_plain_ascii_name_byte_table() -> [bool; 256] {
     let mut table = [false; 256];
     let mut byte = 0usize;
@@ -147,16 +149,18 @@ impl Token {
     }
 }
 
-/// Properties collected while scanning a token. They let dependency parsing
-/// skip escape/null checks for the overwhelmingly common plain-ASCII path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenFlags(u8);
+bitflags! {
+    /// Properties collected while scanning a token. They let dependency parsing
+    /// skip escape/null checks for the overwhelmingly common plain-ASCII path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TokenFlags: u8 {
+        const HAS_ESCAPE = 1 << 0;
+        const HAS_NULL = 1 << 1;
+        const IS_ASCII = 1 << 2;
+    }
+}
 
 impl TokenFlags {
-    pub const HAS_ESCAPE: Self = Self(1 << 0);
-    pub const HAS_NULL: Self = Self(1 << 1);
-    pub const IS_ASCII: Self = Self(1 << 2);
-
     #[inline]
     pub const fn ascii() -> Self {
         Self::IS_ASCII
@@ -164,38 +168,38 @@ impl TokenFlags {
 
     #[inline]
     pub const fn has_escape(self) -> bool {
-        self.0 & Self::HAS_ESCAPE.0 != 0
+        self.contains(Self::HAS_ESCAPE)
     }
 
     #[inline]
     pub const fn has_null(self) -> bool {
-        self.0 & Self::HAS_NULL.0 != 0
+        self.contains(Self::HAS_NULL)
     }
 
     #[inline]
     pub const fn is_ascii(self) -> bool {
-        self.0 & Self::IS_ASCII.0 != 0
+        self.contains(Self::IS_ASCII)
     }
 
     #[inline]
     fn mark_escape(&mut self) {
-        self.0 |= Self::HAS_ESCAPE.0;
+        self.insert(Self::HAS_ESCAPE);
     }
 
     #[inline]
     fn mark_null(&mut self) {
-        self.0 |= Self::HAS_NULL.0;
+        self.insert(Self::HAS_NULL);
     }
 
     #[inline]
     fn mark_non_ascii(&mut self) {
-        self.0 &= !Self::IS_ASCII.0;
+        self.remove(Self::IS_ASCII);
     }
 
     #[inline]
     fn merge(&mut self, other: Self) {
         let is_ascii = self.is_ascii() && other.is_ascii();
-        self.0 |= other.0;
+        self.insert(other);
         if !is_ascii {
             self.mark_non_ascii();
         }
