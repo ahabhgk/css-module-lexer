@@ -115,10 +115,13 @@ pub(crate) fn normalize_css_keyword<'a>(
     Some(unsafe { std::str::from_utf8_unchecked(&output[..output_position]) })
 }
 
-pub(crate) fn strip_vendor_prefix(input: &str) -> Option<&str> {
+pub(crate) fn strip_vendor_prefix_ignore_ascii_case(input: &str) -> Option<&str> {
     ["-webkit-", "-moz-", "-ms-", "-o-"]
         .into_iter()
-        .find_map(|prefix| input.strip_prefix(prefix))
+        .find_map(|prefix| {
+            let (candidate, rest) = input.split_at_checked(prefix.len())?;
+            candidate.eq_ignore_ascii_case(prefix).then_some(rest)
+        })
 }
 
 fn hex_digit_value(byte: u8) -> u8 {
