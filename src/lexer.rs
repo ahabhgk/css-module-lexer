@@ -1186,6 +1186,25 @@ impl<'s> Lexer<'s> {
     }
 
     fn scan_numeric(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let end = self.scan_number_end(start);
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return (
+                TokenKind::Percentage,
+                end + 1,
+                start,
+                end + 1,
+                TokenFlags::ascii(),
+            );
+        }
+        if self.starts_ident_at(end) {
+            let (end, flags) = self.scan_name_with_flags(end);
+            return (TokenKind::Dimension, end, start, end, flags);
+        }
+        (TokenKind::Number, end, start, end, TokenFlags::ascii())
+    }
+
+    #[inline]
+    fn scan_number_end(&self, start: usize) -> usize {
         let mut end = start;
         if matches!(
             self.value.get(end),
@@ -1226,20 +1245,7 @@ impl<'s> Lexer<'s> {
                 end = exponent_start;
             }
         }
-        if self.value.get(end) == Some(&C_PERCENTAGE) {
-            return (
-                TokenKind::Percentage,
-                end + 1,
-                start,
-                end + 1,
-                TokenFlags::ascii(),
-            );
-        }
-        if self.starts_ident_at(end) {
-            let (end, flags) = self.scan_name_with_flags(end);
-            return (TokenKind::Dimension, end, start, end, flags);
-        }
-        (TokenKind::Number, end, start, end, TokenFlags::ascii())
+        end
     }
 
     #[inline]
@@ -1275,46 +1281,7 @@ impl<'s> Lexer<'s> {
 
     #[inline]
     fn scan_raw_numeric_end(&self, start: usize) -> Option<usize> {
-        let mut end = start;
-        if matches!(
-            self.value.get(end),
-            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
-        ) {
-            end += 1;
-        }
-        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-            end += 1;
-        }
-        if self.value.get(end) == Some(&C_FULL_STOP)
-            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
-        {
-            end += 1;
-            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-                end += 1;
-            }
-        }
-        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
-            let exponent_start = end;
-            let mut exponent_end = end + 1;
-            if matches!(
-                self.value.get(exponent_end),
-                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
-            ) {
-                exponent_end += 1;
-            }
-            if self
-                .value
-                .get(exponent_end)
-                .is_some_and(|byte| is_digit(*byte))
-            {
-                end = exponent_end + 1;
-                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-                    end += 1;
-                }
-            } else {
-                end = exponent_start;
-            }
-        }
+        let end = self.scan_number_end(start);
         if self.value.get(end) == Some(&C_PERCENTAGE) {
             return Some(end + 1);
         }
