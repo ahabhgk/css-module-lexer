@@ -7,9 +7,9 @@ use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
 use crate::css_syntax::{
-    MAX_CSS_KEYWORD_LEN, is_css_modules_magic_comment, is_css_modules_pure_magic_comment,
-    is_css_space_byte, is_css_white_space_char, normalize_css_keyword,
-    strip_vendor_prefix_ignore_ascii_case, trim_css_whitespace,
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_magic_comment,
+    is_css_modules_pure_magic_comment, is_css_space_byte, is_css_white_space_char,
+    lowercase_ascii_keyword, normalize_css_keyword, strip_vendor_prefix, trim_css_whitespace,
 };
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
@@ -293,11 +293,13 @@ impl BalancedItem {
     pub fn new(name: &str, flags: TokenFlags, start: Pos, end: Pos) -> Self {
         let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
         let kind = if flags.has_escape() {
-            normalize_css_keyword(name, &mut normalized)
+            decode_css_keyword(name, &mut normalized)
                 .map(BalancedItemKind::new)
                 .unwrap_or(BalancedItemKind::Other)
         } else {
-            BalancedItemKind::new(name)
+            lowercase_ascii_keyword(name, &mut normalized)
+                .map(BalancedItemKind::new)
+                .unwrap_or(BalancedItemKind::Other)
         };
         Self {
             kind,
@@ -344,29 +346,18 @@ enum BalancedItemKind {
 
 impl BalancedItemKind {
     pub fn new(name: &str) -> Self {
-        if name.eq_ignore_ascii_case("url(") {
-            Self::Url
-        } else if name.eq_ignore_ascii_case("image-set(")
-            || strip_vendor_prefix_ignore_ascii_case(name)
-                .is_some_and(|name| name.eq_ignore_ascii_case("image-set("))
-        {
-            Self::ImageSet
-        } else if name.eq_ignore_ascii_case("layer(") {
-            Self::Layer
-        } else if name.eq_ignore_ascii_case("supports(") {
-            Self::Supports
-        } else if name.eq_ignore_ascii_case("palette-mix(") {
-            Self::PaletteMix
-        } else if name.eq_ignore_ascii_case(":local(") {
-            Self::LocalFn
-        } else if name.eq_ignore_ascii_case(":global(") {
-            Self::GlobalFn
-        } else if name.eq_ignore_ascii_case(":local") {
-            Self::LocalClass
-        } else if name.eq_ignore_ascii_case(":global") {
-            Self::GlobalClass
-        } else {
-            Self::Other
+        match name {
+            "url(" => Self::Url,
+            "image-set(" => Self::ImageSet,
+            _ if strip_vendor_prefix(name) == Some("image-set(") => Self::ImageSet,
+            "layer(" => Self::Layer,
+            "supports(" => Self::Supports,
+            "palette-mix(" => Self::PaletteMix,
+            ":local(" => Self::LocalFn,
+            ":global(" => Self::GlobalFn,
+            ":local" => Self::LocalClass,
+            ":global" => Self::GlobalClass,
+            _ => Self::Other,
         }
     }
 
@@ -1173,33 +1164,14 @@ enum GridPropertyKind {
 }
 
 fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
-    if [
-        "grid",
-        "grid-area",
-        "grid-column",
-        "grid-column-end",
-        "grid-column-start",
-        "grid-row",
-        "grid-row-end",
-        "grid-row-start",
-    ]
-    .into_iter()
-    .any(|expected| ident.eq_ignore_ascii_case(expected))
-    {
-        Some(GridPropertyKind::Generic)
-    } else if [
-        "grid-template",
-        "grid-template-columns",
-        "grid-template-rows",
-    ]
-    .into_iter()
-    .any(|expected| ident.eq_ignore_ascii_case(expected))
-    {
-        Some(GridPropertyKind::TemplateLike)
-    } else if ident.eq_ignore_ascii_case("grid-template-areas") {
-        Some(GridPropertyKind::TemplateAreas)
-    } else {
-        None
+    match ident {
+        "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
+        | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
+        "grid-template" | "grid-template-columns" | "grid-template-rows" => {
+            Some(GridPropertyKind::TemplateLike)
+        }
+        "grid-template-areas" => Some(GridPropertyKind::TemplateAreas),
+        _ => None,
     }
 }
 
@@ -1829,37 +1801,38 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         flags: TokenFlags,
         property_local_mode: bool,
     ) -> (PropertyKind, Option<GridPropertyKind>) {
+        if property_local_mode && name.starts_with("--") {
+            return (PropertyKind::CustomProperty, None);
+        }
         let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
         let name = if flags.has_escape() {
-            let Some(name) = normalize_css_keyword(name, &mut normalized) else {
+            let Some(name) = decode_css_keyword(name, &mut normalized) else {
                 return (PropertyKind::Generic, None);
             };
             name
         } else {
+            let Some(name) = lowercase_ascii_keyword(name, &mut normalized) else {
+                return (PropertyKind::Generic, None);
+            };
             name
         };
-        if name.eq_ignore_ascii_case("composes") || name.eq_ignore_ascii_case("compose-with") {
+        if matches!(name, "composes" | "compose-with") {
             return (PropertyKind::Composes, None);
         }
         if !property_local_mode {
             return (PropertyKind::Generic, None);
         }
-        if name.starts_with("--") {
-            return (PropertyKind::CustomProperty, None);
-        }
-        let unprefixed = strip_vendor_prefix_ignore_ascii_case(name).unwrap_or(name);
-        if unprefixed.eq_ignore_ascii_case("animation")
-            || unprefixed.eq_ignore_ascii_case("animation-name")
-        {
+        let unprefixed = strip_vendor_prefix(name).unwrap_or(name);
+        if matches!(unprefixed, "animation" | "animation-name") {
             return (PropertyKind::Animation, None);
         }
-        if name.eq_ignore_ascii_case("list-style") || name.eq_ignore_ascii_case("list-style-type") {
+        if matches!(name, "list-style" | "list-style-type") {
             return (PropertyKind::ListStyle, None);
         }
-        if name.eq_ignore_ascii_case("font-palette") {
+        if name == "font-palette" {
             return (PropertyKind::FontPalette, None);
         }
-        if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("container-name") {
+        if matches!(name, "container" | "container-name") {
             return (PropertyKind::Container, None);
         }
         if let Some(grid) = grid_property_kind(name) {
@@ -1871,43 +1844,32 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     fn classify_at_rule(name: &str, flags: TokenFlags) -> AtRuleKind {
         let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
         let name = if flags.has_escape() {
-            let Some(name) = normalize_css_keyword(name, &mut normalized) else {
+            let Some(name) = decode_css_keyword(name, &mut normalized) else {
                 return AtRuleKind::Other;
             };
             name
         } else {
+            let Some(name) = lowercase_ascii_keyword(name, &mut normalized) else {
+                return AtRuleKind::Other;
+            };
             name
         };
-        if name.eq_ignore_ascii_case("@value") {
-            AtRuleKind::Value
-        } else if name.eq_ignore_ascii_case("@scope") {
-            AtRuleKind::Scope
-        } else if name.eq_ignore_ascii_case("@import") {
-            AtRuleKind::Import
-        } else if name.eq_ignore_ascii_case("@charset") {
-            AtRuleKind::Charset
-        } else if name.eq_ignore_ascii_case("@function") {
-            AtRuleKind::Function
-        } else if name.eq_ignore_ascii_case("@property") {
-            AtRuleKind::Property
-        } else if name.eq_ignore_ascii_case("@namespace") {
-            AtRuleKind::Namespace
-        } else if name.eq_ignore_ascii_case("@keyframes") {
-            AtRuleKind::Keyframes
-        } else if name.eq_ignore_ascii_case("@container") {
-            AtRuleKind::Container
-        } else if name.eq_ignore_ascii_case("@counter-style") {
-            AtRuleKind::CounterStyle
-        } else if name.eq_ignore_ascii_case("@font-palette-values") {
-            AtRuleKind::FontPaletteValues
-        } else if name
-            .strip_prefix('@')
-            .and_then(strip_vendor_prefix_ignore_ascii_case)
-            .is_some_and(|name| name.eq_ignore_ascii_case("keyframes"))
-        {
-            AtRuleKind::Keyframes
-        } else {
-            AtRuleKind::Other
+        match name {
+            "@value" => AtRuleKind::Value,
+            "@scope" => AtRuleKind::Scope,
+            "@import" => AtRuleKind::Import,
+            "@charset" => AtRuleKind::Charset,
+            "@function" => AtRuleKind::Function,
+            "@property" => AtRuleKind::Property,
+            "@namespace" => AtRuleKind::Namespace,
+            "@keyframes" => AtRuleKind::Keyframes,
+            "@container" => AtRuleKind::Container,
+            "@counter-style" => AtRuleKind::CounterStyle,
+            "@font-palette-values" => AtRuleKind::FontPaletteValues,
+            _ if name.strip_prefix('@').and_then(strip_vendor_prefix) == Some("keyframes") => {
+                AtRuleKind::Keyframes
+            }
+            _ => AtRuleKind::Other,
         }
     }
 
@@ -3355,12 +3317,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let name = stream.slice_trusted(start, end);
         let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
         let normalized_name = if flags.has_escape() {
-            normalize_css_keyword(name, &mut normalized)
+            decode_css_keyword(name, &mut normalized)
         } else {
-            Some(name)
-        };
-        let is_name = |expected: &str| {
-            normalized_name.is_some_and(|name| name.eq_ignore_ascii_case(expected))
+            lowercase_ascii_keyword(name, &mut normalized)
         };
         let item = normalized_name.map_or_else(
             || BalancedItem::new_other(start, end),
@@ -3371,15 +3330,15 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.balanced.push(item, self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if at_import_top_level && is_name("url(") {
+            if at_import_top_level && normalized_name == Some("url(") {
                 import_data.prelude.push(ImportPreludeNode::Url {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && is_name("layer(") {
+            } else if at_import_top_level && normalized_name == Some("layer(") {
                 import_data.prelude.push(ImportPreludeNode::Layer {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && is_name("supports(") {
+            } else if at_import_top_level && normalized_name == Some("supports(") {
                 import_data.prelude.push(ImportPreludeNode::Supports {
                     range: Range::new(start, end),
                 });
@@ -3388,14 +3347,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 import_data.prelude.push(ImportPreludeNode::Other {
                     range: Range::new(start, end),
                 });
-            } else if is_name("supports(") {
+            } else if normalized_name == Some("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            let layer_end = at_import_top_level && is_name("layer(");
-            let supports_end = is_name("supports(");
+            let layer_end = at_import_top_level && normalized_name == Some("layer(");
+            let supports_end = normalized_name == Some("supports(");
             if layer_end || supports_end {
                 let Some(close) = stream.fast_forward(TokenKind::RightParenthesis) else {
                     return Some(());
@@ -3426,7 +3385,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     range: Range::new(start, end - 1),
                 });
         }
-        if mode_data.is_current_local_mode() && is_name("var(") {
+        if mode_data.is_current_local_mode() && normalized_name == Some("var(") {
             self.lex_local_var(stream)?;
         }
         Some(())

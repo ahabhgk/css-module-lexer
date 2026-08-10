@@ -1,7 +1,7 @@
 use crate::Range;
 use crate::css_syntax::{
-    MAX_CSS_KEYWORD_LEN, is_css_modules_pure_magic_comment, normalize_css_keyword,
-    strip_vendor_prefix_ignore_ascii_case,
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment,
+    lowercase_ascii_keyword, strip_vendor_prefix,
 };
 use crate::dependencies::PropertyKind;
 use crate::dependencies::special_value_is_candidate;
@@ -1068,14 +1068,15 @@ impl<'s> Lexer<'s> {
 
         let open_end = name_end + 1;
         let name = &self.value[start..name_end];
-        let is_url = if name_flags.has_escape() {
-            // SAFETY: a scanned name starts and ends on UTF-8 boundaries.
-            let name = unsafe { str::from_utf8_unchecked(name) };
-            let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
-            normalize_css_keyword(name, &mut normalized) == Some("url")
+        // SAFETY: a scanned name starts and ends on UTF-8 boundaries.
+        let name = unsafe { str::from_utf8_unchecked(name) };
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let normalized = if name_flags.has_escape() {
+            decode_css_keyword(name, &mut normalized)
         } else {
-            name.eq_ignore_ascii_case(b"url")
+            lowercase_ascii_keyword(name, &mut normalized)
         };
+        let is_url = normalized == Some("url");
         if is_url {
             let content_start = self.skip_white_space(open_end);
             if !matches!(
@@ -1520,11 +1521,12 @@ impl GenericValueScanState {
 
 #[inline]
 fn is_dependency_value_function(name: &str) -> bool {
-    name.eq_ignore_ascii_case("url")
-        || name.eq_ignore_ascii_case("var")
-        || name.eq_ignore_ascii_case("image-set")
-        || strip_vendor_prefix_ignore_ascii_case(name)
-            .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let Some(name) = lowercase_ascii_keyword(name, &mut lowercase) else {
+        return name.starts_with("--");
+    };
+    matches!(name, "url" | "var" | "image-set")
+        || strip_vendor_prefix(name) == Some("image-set")
         || name.starts_with("--")
 }
 

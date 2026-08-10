@@ -50,12 +50,25 @@ pub(crate) fn is_css_modules_pure_magic_comment(input: &str) -> bool {
     })
 }
 
-/// Decode a CSS identifier into a lowercase ASCII keyword.
+/// Lowercase a keyword that does not contain CSS escapes.
+pub(crate) fn lowercase_ascii_keyword<'a>(
+    input: &str,
+    output: &'a mut [u8; MAX_CSS_KEYWORD_LEN],
+) -> Option<&'a str> {
+    let output = output.get_mut(..input.len())?;
+    for (output, input) in output.iter_mut().zip(input.bytes()) {
+        *output = input.to_ascii_lowercase();
+    }
+    // ASCII case conversion preserves valid UTF-8.
+    Some(unsafe { std::str::from_utf8_unchecked(output) })
+}
+
+/// Decode an escaped CSS identifier into a lowercase ASCII keyword.
 ///
 /// The dependency parser only compares CSS syntax keywords, so non-ASCII or
 /// replacement-character escapes can stop early. The original source slice is
 /// still retained for dependency names and ranges.
-pub(crate) fn normalize_css_keyword<'a>(
+pub(crate) fn decode_css_keyword<'a>(
     input: &str,
     output: &'a mut [u8; MAX_CSS_KEYWORD_LEN],
 ) -> Option<&'a str> {
@@ -115,13 +128,22 @@ pub(crate) fn normalize_css_keyword<'a>(
     Some(unsafe { std::str::from_utf8_unchecked(&output[..output_position]) })
 }
 
-pub(crate) fn strip_vendor_prefix_ignore_ascii_case(input: &str) -> Option<&str> {
+/// Normalize a keyword when token flags are unavailable.
+pub(crate) fn normalize_css_keyword<'a>(
+    input: &str,
+    output: &'a mut [u8; MAX_CSS_KEYWORD_LEN],
+) -> Option<&'a str> {
+    if input.as_bytes().contains(&b'\\') {
+        decode_css_keyword(input, output)
+    } else {
+        lowercase_ascii_keyword(input, output)
+    }
+}
+
+pub(crate) fn strip_vendor_prefix(input: &str) -> Option<&str> {
     ["-webkit-", "-moz-", "-ms-", "-o-"]
         .into_iter()
-        .find_map(|prefix| {
-            let (candidate, rest) = input.split_at_checked(prefix.len())?;
-            candidate.eq_ignore_ascii_case(prefix).then_some(rest)
-        })
+        .find_map(|prefix| input.strip_prefix(prefix))
 }
 
 fn hex_digit_value(byte: u8) -> u8 {
