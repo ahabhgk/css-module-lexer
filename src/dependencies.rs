@@ -15,25 +15,18 @@ use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
 
-macro_rules! match_ignore_ascii_case {
-    (
-        $value:expr, {
-            $(
-                $($pattern:literal)|+ => $result:expr,
-            )*
-            _ => $fallback:expr $(,)?
-        }
-    ) => {{
-        let value = $value;
-        $(
-            if $(value.eq_ignore_ascii_case($pattern))||+ {
-                $result
-            } else
-        )*
-        {
-            $fallback
-        }
-    }};
+const MAX_RESERVED_KEYWORD_LEN: usize = "korean-hanja-informal".len();
+
+fn to_ascii_lowercase<'a>(
+    value: &str,
+    output: &'a mut [u8; MAX_RESERVED_KEYWORD_LEN],
+) -> Option<&'a str> {
+    let output = output.get_mut(..value.len())?;
+    for (output, value) in output.iter_mut().zip(value.bytes()) {
+        *output = value.to_ascii_lowercase();
+    }
+    // ASCII case conversion preserves valid UTF-8.
+    Some(unsafe { std::str::from_utf8_unchecked(output) })
 }
 
 #[derive(Debug)]
@@ -1035,7 +1028,11 @@ struct AnimationReserved {
 
 impl ReservedValues for AnimationReserved {
     fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+            return true;
+        };
+        match ident {
             "normal" => self.check_and_update(Self::NORMAL),
             "reverse" => self.check_and_update(Self::REVERSE),
             "alternate" => self.check_and_update(Self::ALTERNATE),
@@ -1058,7 +1055,7 @@ impl ReservedValues for AnimationReserved {
             // global values
             "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
             _ => true,
-        })
+        }
     }
 
     fn reset(&mut self) {
@@ -1099,7 +1096,11 @@ struct ListStyleReserved;
 
 impl ReservedValues for ListStyleReserved {
     fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+            return true;
+        };
+        match ident {
             // https://www.w3.org/TR/css-counter-styles-3/#simple-numeric
             "decimal"
             | "decimal-leading-zero"
@@ -1168,7 +1169,7 @@ impl ReservedValues for ListStyleReserved {
             | "revert"
             | "revert-layer" => false,
             _ => true,
-        })
+        }
     }
 
     fn reset(&mut self) {}
@@ -1190,7 +1191,12 @@ struct ContainerReserved;
 
 impl ReservedValues for ContainerReserved {
     fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+            return true;
+        };
+        !matches!(
+            ident,
             "normal"
                 | "size"
                 | "inline-size"
@@ -1200,9 +1206,8 @@ impl ReservedValues for ContainerReserved {
                 | "inherit"
                 | "unset"
                 | "revert"
-                | "revert-layer" => false,
-            _ => true,
-        })
+                | "revert-layer"
+        )
     }
 
     fn reset(&mut self) {}
@@ -1216,19 +1221,26 @@ enum GridPropertyKind {
 }
 
 fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
-    match_ignore_ascii_case!(ident, {
+    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+    let ident = to_ascii_lowercase(ident, &mut lowercase)?;
+    match ident {
         "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
         | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
         "grid-template" | "grid-template-columns" | "grid-template-rows" => {
             Some(GridPropertyKind::TemplateLike)
-        },
+        }
         "grid-template-areas" => Some(GridPropertyKind::TemplateAreas),
         _ => None,
-    })
+    }
 }
 
 fn is_reserved_grid_ident(ident: &str) -> bool {
-    match_ignore_ascii_case!(ident, {
+    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+    let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+        return false;
+    };
+    matches!(
+        ident,
         "auto"
             | "span"
             | "auto-flow"
@@ -1244,9 +1256,8 @@ fn is_reserved_grid_ident(ident: &str) -> bool {
             | "inherit"
             | "unset"
             | "revert"
-            | "revert-layer" => true,
-        _ => false,
-    })
+            | "revert-layer"
+    )
 }
 
 /// Decide whether a raw-scanned ident inside a special property value must be
@@ -1277,10 +1288,11 @@ pub(crate) fn special_value_is_candidate(
 }
 
 fn is_reserved_container_query_ident(ident: &str) -> bool {
-    match_ignore_ascii_case!(ident, {
-        "none" | "and" | "or" | "not" => true,
-        _ => false,
-    })
+    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
+    let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+        return false;
+    };
+    matches!(ident, "none" | "and" | "or" | "not")
 }
 
 fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> impl Iterator<Item = Range> + '_ {
