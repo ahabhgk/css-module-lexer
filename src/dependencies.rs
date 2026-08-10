@@ -9,7 +9,7 @@ use crate::Pos;
 use crate::css_syntax::{
     MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_magic_comment,
     is_css_modules_pure_magic_comment, is_css_space_byte, is_css_white_space_char,
-    lowercase_ascii_keyword, normalize_css_keyword, strip_vendor_prefix, trim_css_whitespace,
+    lowercase_ascii_keyword, strip_vendor_prefix, trim_css_whitespace,
 };
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
@@ -936,16 +936,16 @@ impl<T: ReservedValues> InProperty<T> {
         }
     }
 
-    fn check_reserved(&mut self, ident: &str) -> bool {
-        self.reserved.check(ident)
+    fn check_reserved(&mut self, ident: &str, flags: TokenFlags) -> bool {
+        self.reserved.check(ident, flags)
     }
 
     pub fn reset_reserved(&mut self) {
         self.reserved.reset();
     }
 
-    pub fn set_rename(&mut self, ident: &str, range: Range) {
-        if self.check_reserved(ident) {
+    pub fn set_rename(&mut self, ident: &str, flags: TokenFlags, range: Range) {
+        if self.check_reserved(ident, flags) {
             self.rename = Some(range);
         }
     }
@@ -960,7 +960,7 @@ impl<T: ReservedValues> InProperty<T> {
 }
 
 trait ReservedValues {
-    fn check(&mut self, ident: &str) -> bool;
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool;
     fn reset(&mut self);
 }
 
@@ -970,9 +970,14 @@ struct AnimationReserved {
 }
 
 impl ReservedValues for AnimationReserved {
-    fn check(&mut self, ident: &str) -> bool {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
         let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
-        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
             return true;
         };
         match ident {
@@ -1038,9 +1043,14 @@ impl AnimationReserved {
 struct ListStyleReserved;
 
 impl ReservedValues for ListStyleReserved {
-    fn check(&mut self, ident: &str) -> bool {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
         let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
-        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
             return true;
         };
         match ident {
@@ -1122,7 +1132,7 @@ impl ReservedValues for ListStyleReserved {
 struct FontPaletteReserved;
 
 impl ReservedValues for FontPaletteReserved {
-    fn check(&mut self, ident: &str) -> bool {
+    fn check(&mut self, ident: &str, _flags: TokenFlags) -> bool {
         ident.starts_with("--")
     }
 
@@ -1133,9 +1143,14 @@ impl ReservedValues for FontPaletteReserved {
 struct ContainerReserved;
 
 impl ReservedValues for ContainerReserved {
-    fn check(&mut self, ident: &str) -> bool {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
         let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
-        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
             return true;
         };
         !matches!(
@@ -1175,9 +1190,14 @@ fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
     }
 }
 
-fn is_reserved_grid_ident(ident: &str) -> bool {
+fn is_reserved_grid_ident(ident: &str, flags: TokenFlags) -> bool {
     let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
-    let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
+    let ident = if flags.has_escape() {
+        decode_css_keyword(ident, &mut lowercase)
+    } else {
+        lowercase_ascii_keyword(ident, &mut lowercase)
+    };
+    let Some(ident) = ident else {
         return false;
     };
     matches!(
@@ -1217,10 +1237,10 @@ pub(crate) fn special_value_is_candidate(
         return true;
     }
     match property {
-        PropertyKind::ListStyle => ListStyleReserved.check(ident),
+        PropertyKind::ListStyle => ListStyleReserved.check(ident, TokenFlags::ascii()),
         PropertyKind::FontPalette => ident.starts_with("--"),
-        PropertyKind::Container => ContainerReserved.check(ident),
-        PropertyKind::Grid => !is_reserved_grid_ident(ident),
+        PropertyKind::Container => ContainerReserved.check(ident, TokenFlags::ascii()),
+        PropertyKind::Grid => !is_reserved_grid_ident(ident, TokenFlags::ascii()),
         PropertyKind::Animation
         | PropertyKind::Generic
         | PropertyKind::Composes
@@ -1228,9 +1248,14 @@ pub(crate) fn special_value_is_candidate(
     }
 }
 
-fn is_reserved_container_query_ident(ident: &str) -> bool {
+fn is_reserved_container_query_ident(ident: &str, flags: TokenFlags) -> bool {
     let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
-    let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
+    let ident = if flags.has_escape() {
+        decode_css_keyword(ident, &mut lowercase)
+    } else {
+        lowercase_ascii_keyword(ident, &mut lowercase)
+    };
+    let Some(ident) = ident else {
         return false;
     };
     matches!(ident, "none" | "and" | "or" | "not")
@@ -2540,7 +2565,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let start = name_token.range.start;
         let end = name_token.range.end;
         let ident = stream.slice(start, end)?;
-        if is_reserved_container_query_ident(ident) {
+        if is_reserved_container_query_ident(ident, name_token.flags) {
             return Some(());
         }
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
@@ -3528,7 +3553,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            animation.set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            animation.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
@@ -3536,8 +3565,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(list_style) = &mut self.in_list_style_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            list_style
-                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            list_style.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
@@ -3547,15 +3579,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         if self.balanced.is_empty()
                             || matches!(self.balanced.last(), Some(last) if matches!(last.kind, BalancedItemKind::PaletteMix))
                         {
-                            font_palette
-                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            font_palette.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
 
                     if let Some(container) = &mut self.in_container_property {
                         if self.balanced.is_empty() {
-                            container.set_rename(ident, Range::new(start, end));
+                            container.set_rename(ident, flags, Range::new(start, end));
                             if let Some(range) = container.take_rename(self.balanced.len()) {
                                 self.dependency_context.push_dependency(
                                     Dependency::LocalContainerDecl {
@@ -3569,7 +3604,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }
 
                     if self.in_grid_property.is_some() {
-                        if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
+                        if self.balanced.is_empty() && !is_reserved_grid_ident(ident, flags) {
                             self.dependency_context
                                 .push_dependency(Dependency::LocalGrid {
                                     name: ident,

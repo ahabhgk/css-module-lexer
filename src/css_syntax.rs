@@ -128,18 +128,6 @@ pub(crate) fn decode_css_keyword<'a>(
     Some(unsafe { std::str::from_utf8_unchecked(&output[..output_position]) })
 }
 
-/// Normalize a keyword when token flags are unavailable.
-pub(crate) fn normalize_css_keyword<'a>(
-    input: &str,
-    output: &'a mut [u8; MAX_CSS_KEYWORD_LEN],
-) -> Option<&'a str> {
-    if input.as_bytes().contains(&b'\\') {
-        decode_css_keyword(input, output)
-    } else {
-        lowercase_ascii_keyword(input, output)
-    }
-}
-
 pub(crate) fn strip_vendor_prefix(input: &str) -> Option<&str> {
     ["-webkit-", "-moz-", "-ms-", "-o-"]
         .into_iter()
