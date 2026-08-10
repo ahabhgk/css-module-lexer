@@ -109,6 +109,16 @@ fn streaming_tokenizer_marks_token_flags() {
     assert!(!unicode.flags.is_ascii());
     assert!(!unicode.flags.has_escape());
     assert!(!unicode.flags.has_null());
+
+    let mut unicode_url = Lexer::new("url(café)");
+    let unicode_url = unicode_url.next_token();
+    assert_eq!(unicode_url.kind, TokenKind::Url);
+    assert!(!unicode_url.flags.is_ascii());
+
+    let mut unterminated_comment = Lexer::new("/*\0");
+    let unterminated_comment = unterminated_comment.next_token();
+    assert_eq!(unterminated_comment.kind, TokenKind::BadComment);
+    assert!(unterminated_comment.flags.has_null());
 }
 
 #[test]

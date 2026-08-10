@@ -1864,6 +1864,80 @@ fn css_modules_reserved_values_are_ascii_case_insensitive() {
 }
 
 #[test]
+fn css_modules_semantic_keywords_decode_css_escapes() {
+    let input = indoc! {r#"
+        .escaped {
+            animation: l\69 near 1s;
+            list-style: n\6f ne;
+            grid-column: s\70 an 1;
+            container: n\6f rmal;
+            an\69 mation: fade 1s;
+            color: v\61 r(--theme);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".escaped", false);
+    assert_local_keyframes_dependency(input, &dependencies[1], "fade");
+    assert_local_var_dependency(input, &dependencies[2], "theme", None);
+    assert_eq!(dependencies.len(), 3);
+}
+
+#[test]
+fn css_modules_dependency_functions_are_ascii_case_insensitive() {
+    let input = indoc! {r#"
+        .images {
+            a: URL("a.png");
+            b: IMAGE-SET("b.png" 1x);
+            c: -WEBKIT-IMAGE-SET("c.png" 1x);
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_class_dependency(input, &dependencies[0], ".images", false);
+    assert_url_dependency(
+        input,
+        &dependencies[1],
+        "a.png",
+        UrlRangeKind::String,
+        "\"a.png\"",
+    );
+    assert_url_dependency(
+        input,
+        &dependencies[2],
+        "b.png",
+        UrlRangeKind::Function,
+        "\"b.png\"",
+    );
+    assert_url_dependency(
+        input,
+        &dependencies[3],
+        "c.png",
+        UrlRangeKind::Function,
+        "\"c.png\"",
+    );
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
+fn css_modules_vendor_prefixed_keywords_are_ascii_case_insensitive() {
+    let input = indoc! {r#"
+        @-WEBKIT-KEYFRAMES fade {}
+        .animated {
+            -WEBKIT-ANIMATION: fade 1s;
+            -WEBKIT-ANIMATION-NAME: other;
+        }
+    "#};
+    let (dependencies, warnings) = collect_dependencies(input, Mode::Local);
+    assert!(warnings.is_empty());
+    assert_local_keyframes_decl_dependency(input, &dependencies[0], "fade");
+    assert_local_class_dependency(input, &dependencies[1], ".animated", false);
+    assert_local_keyframes_dependency(input, &dependencies[2], "fade");
+    assert_local_keyframes_dependency(input, &dependencies[3], "other");
+    assert_eq!(dependencies.len(), 4);
+}
+
+#[test]
 fn css_modules_font_palette() {
     let input = indoc! {r#"
         @font-palette-values --Cooler {

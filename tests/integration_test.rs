@@ -219,6 +219,26 @@ fn selector_fast_forward_preserves_candidates_and_opaque_ranges() {
 }
 
 #[test]
+fn selector_fast_forward_skips_escaped_brackets_in_attributes() {
+    let input = format!(
+        "/*{}*/ .root[data=\\[] .real {{}}",
+        "selector-fast-forward-padding".repeat(10)
+    );
+    assert!(input.len() >= 256);
+
+    let (dependencies, warnings) = collect_dependencies(&input, Mode::Local);
+    assert!(warnings.is_empty());
+    let local_classes = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            Dependency::LocalClass { name, .. } => Some(*name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_classes, [".root", ".real"]);
+}
+
+#[test]
 fn selector_fast_forward_keeps_composes_validation() {
     for selector in ["element.local", "[data-kind].local", "*.local"] {
         let input = format!(

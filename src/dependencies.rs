@@ -6,6 +6,11 @@ use smallvec::SmallVec;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
+use crate::css_syntax::{
+    MAX_CSS_KEYWORD_LEN, is_css_modules_magic_comment, is_css_modules_pure_magic_comment,
+    is_css_space_byte, is_css_white_space_char, normalize_css_keyword, strip_vendor_prefix,
+    trim_css_whitespace,
+};
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
     WarningKind,
@@ -14,20 +19,6 @@ use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
-
-const MAX_RESERVED_KEYWORD_LEN: usize = "korean-hanja-informal".len();
-
-fn to_ascii_lowercase<'a>(
-    value: &str,
-    output: &'a mut [u8; MAX_RESERVED_KEYWORD_LEN],
-) -> Option<&'a str> {
-    let output = output.get_mut(..value.len())?;
-    for (output, value) in output.iter_mut().zip(value.bytes()) {
-        *output = value.to_ascii_lowercase();
-    }
-    // ASCII case conversion preserves valid UTF-8.
-    Some(unsafe { std::str::from_utf8_unchecked(output) })
-}
 
 #[derive(Debug)]
 enum Scope<'s> {
@@ -300,6 +291,17 @@ struct BalancedItem {
 
 impl BalancedItem {
     pub fn new(name: &str, start: Pos, end: Pos) -> Self {
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let kind = normalize_css_keyword(name, &mut normalized)
+            .map(BalancedItemKind::new)
+            .unwrap_or(BalancedItemKind::Other);
+        Self {
+            kind,
+            range: Range::new(start, end),
+        }
+    }
+
+    pub fn new_normalized(name: &str, start: Pos, end: Pos) -> Self {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
@@ -341,14 +343,14 @@ impl BalancedItemKind {
         match name {
             "url(" => Self::Url,
             "image-set(" => Self::ImageSet,
-            _ if with_vendor_prefixed_eq(name, "image-set(", false) => Self::ImageSet,
-            _ if name.eq_ignore_ascii_case("layer(") => Self::Layer,
-            _ if name.eq_ignore_ascii_case("supports(") => Self::Supports,
+            _ if strip_vendor_prefix(name) == Some("image-set(") => Self::ImageSet,
+            "layer(" => Self::Layer,
+            "supports(" => Self::Supports,
             "palette-mix(" => Self::PaletteMix,
-            _ if name.eq_ignore_ascii_case(":local(") => Self::LocalFn,
-            _ if name.eq_ignore_ascii_case(":global(") => Self::GlobalFn,
-            _ if name.eq_ignore_ascii_case(":local") => Self::LocalClass,
-            _ if name.eq_ignore_ascii_case(":global") => Self::GlobalClass,
+            ":local(" => Self::LocalFn,
+            ":global(" => Self::GlobalFn,
+            ":local" => Self::LocalClass,
+            ":global" => Self::GlobalClass,
             _ => Self::Other,
         }
     }
@@ -368,55 +370,6 @@ impl BalancedItemKind {
     pub fn is_mode_class(&self) -> bool {
         matches!(self, Self::LocalClass | Self::GlobalClass)
     }
-}
-
-fn is_css_space_byte(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
-}
-
-fn is_css_white_space_char(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
-}
-
-fn trim_slice(input: &str) -> &str {
-    let bytes = input.as_bytes();
-    let mut start = 0usize;
-    let mut end = bytes.len();
-    while start < end && is_css_space_byte(bytes[start]) {
-        start += 1;
-    }
-    while end > start && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    &input[start..end]
-}
-
-fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
-    let input = trim_slice(input);
-    let Some(rest) = input.strip_prefix(keyword) else {
-        return false;
-    };
-    rest.is_empty()
-        || rest
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| is_css_space_byte(*byte))
-}
-
-fn is_css_modules_pure_magic_comment(input: &str) -> bool {
-    let input = trim_slice(input);
-    let Some(keyword) = input.strip_prefix("cssmodules-pure-") else {
-        return false;
-    };
-    ["ignore", "no-check"].into_iter().any(|expected| {
-        keyword.strip_prefix(expected).is_some_and(|rest| {
-            rest.is_empty()
-                || rest
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| is_css_space_byte(*byte))
-        })
-    })
 }
 
 fn trivia_only(input: &str) -> bool {
@@ -777,22 +730,6 @@ impl<'s> ValueAtRuleStream<'s> {
     }
 }
 
-fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
-    let left = if at_rule {
-        if let Some(left) = left.strip_prefix('@') {
-            left
-        } else {
-            return false;
-        }
-    } else {
-        left
-    };
-    matches!(left.strip_prefix("-webkit-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-moz-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-ms-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-o-"), Some(left) if left.eq_ignore_ascii_case(right))
-}
-
 #[derive(Debug)]
 pub struct ModeData<'s> {
     default: Mode,
@@ -1028,8 +965,8 @@ struct AnimationReserved {
 
 impl ReservedValues for AnimationReserved {
     fn check(&mut self, ident: &str) -> bool {
-        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
             return true;
         };
         match ident {
@@ -1096,8 +1033,8 @@ struct ListStyleReserved;
 
 impl ReservedValues for ListStyleReserved {
     fn check(&mut self, ident: &str) -> bool {
-        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
             return true;
         };
         match ident {
@@ -1191,8 +1128,8 @@ struct ContainerReserved;
 
 impl ReservedValues for ContainerReserved {
     fn check(&mut self, ident: &str) -> bool {
-        let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-        let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
             return true;
         };
         !matches!(
@@ -1221,8 +1158,8 @@ enum GridPropertyKind {
 }
 
 fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
-    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-    let ident = to_ascii_lowercase(ident, &mut lowercase)?;
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let ident = normalize_css_keyword(ident, &mut lowercase)?;
     match ident {
         "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
         | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
@@ -1235,8 +1172,8 @@ fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
 }
 
 fn is_reserved_grid_ident(ident: &str) -> bool {
-    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-    let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
         return false;
     };
     matches!(
@@ -1288,8 +1225,8 @@ pub(crate) fn special_value_is_candidate(
 }
 
 fn is_reserved_container_query_ident(ident: &str) -> bool {
-    let mut lowercase = [0; MAX_RESERVED_KEYWORD_LEN];
-    let Some(ident) = to_ascii_lowercase(ident, &mut lowercase) else {
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let Some(ident) = normalize_css_keyword(ident, &mut lowercase) else {
         return false;
     };
     matches!(ident, "none" | "and" | "or" | "not")
@@ -1859,7 +1796,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         name: &str,
         property_local_mode: bool,
     ) -> (PropertyKind, Option<GridPropertyKind>) {
-        if name.eq_ignore_ascii_case("composes") || name.eq_ignore_ascii_case("compose-with") {
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let normalized_name = normalize_css_keyword(name, &mut normalized);
+        if matches!(normalized_name, Some("composes" | "compose-with")) {
             return (PropertyKind::Composes, None);
         }
         if !property_local_mode {
@@ -1868,20 +1807,20 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if name.starts_with("--") {
             return (PropertyKind::CustomProperty, None);
         }
-        if name.eq_ignore_ascii_case("animation")
-            || name.eq_ignore_ascii_case("animation-name")
-            || with_vendor_prefixed_eq(name, "animation", false)
-            || with_vendor_prefixed_eq(name, "animation-name", false)
-        {
+        let Some(name) = normalized_name else {
+            return (PropertyKind::Generic, None);
+        };
+        let unprefixed = strip_vendor_prefix(name).unwrap_or(name);
+        if matches!(unprefixed, "animation" | "animation-name") {
             return (PropertyKind::Animation, None);
         }
-        if name.eq_ignore_ascii_case("list-style") || name.eq_ignore_ascii_case("list-style-type") {
+        if matches!(name, "list-style" | "list-style-type") {
             return (PropertyKind::ListStyle, None);
         }
-        if name.eq_ignore_ascii_case("font-palette") {
+        if name == "font-palette" {
             return (PropertyKind::FontPalette, None);
         }
-        if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("container-name") {
+        if matches!(name, "container" | "container-name") {
             return (PropertyKind::Container, None);
         }
         if let Some(grid) = grid_property_kind(name) {
@@ -1891,21 +1830,25 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     fn classify_at_rule(name: &str) -> AtRuleKind {
-        match name.len() {
-            6 if name.eq_ignore_ascii_case("@value") => AtRuleKind::Value,
-            6 if name.eq_ignore_ascii_case("@scope") => AtRuleKind::Scope,
-            7 if name.eq_ignore_ascii_case("@import") => AtRuleKind::Import,
-            8 if name.eq_ignore_ascii_case("@charset") => AtRuleKind::Charset,
-            9 if name.eq_ignore_ascii_case("@function") => AtRuleKind::Function,
-            9 if name.eq_ignore_ascii_case("@property") => AtRuleKind::Property,
-            10 if name.eq_ignore_ascii_case("@namespace") => AtRuleKind::Namespace,
-            10 if name.eq_ignore_ascii_case("@keyframes") => AtRuleKind::Keyframes,
-            10 if name.eq_ignore_ascii_case("@container") => AtRuleKind::Container,
-            14 if name.eq_ignore_ascii_case("@counter-style") => AtRuleKind::CounterStyle,
-            20 if name.eq_ignore_ascii_case("@font-palette-values") => {
-                AtRuleKind::FontPaletteValues
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let Some(name) = normalize_css_keyword(name, &mut normalized) else {
+            return AtRuleKind::Other;
+        };
+        match name {
+            "@value" => AtRuleKind::Value,
+            "@scope" => AtRuleKind::Scope,
+            "@import" => AtRuleKind::Import,
+            "@charset" => AtRuleKind::Charset,
+            "@function" => AtRuleKind::Function,
+            "@property" => AtRuleKind::Property,
+            "@namespace" => AtRuleKind::Namespace,
+            "@keyframes" => AtRuleKind::Keyframes,
+            "@container" => AtRuleKind::Container,
+            "@counter-style" => AtRuleKind::CounterStyle,
+            "@font-palette-values" => AtRuleKind::FontPaletteValues,
+            _ if name.strip_prefix('@').and_then(strip_vendor_prefix) == Some("keyframes") => {
+                AtRuleKind::Keyframes
             }
-            _ if with_vendor_prefixed_eq(name, "keyframes", true) => AtRuleKind::Keyframes,
             _ => AtRuleKind::Other,
         }
     }
@@ -2232,7 +2175,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     ..colon.prev_end as usize];
                 let raw = &parser.input[colon.end as usize..parser.params_end as usize];
                 value = if parser.first_colon_tokens_after > 0 {
-                    trim_slice(raw)
+                    trim_css_whitespace(raw)
                 } else {
                     raw
                 };
@@ -2241,7 +2184,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 local_name = &parser.input[first_start as usize..first_end as usize];
                 let raw = &parser.input[first_end as usize..parser.params_end as usize];
                 value = if parser.significant_count > 1 {
-                    trim_slice(raw)
+                    trim_css_whitespace(raw)
                 } else {
                     raw
                 };
@@ -3352,21 +3295,26 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         _flags: TokenFlags,
     ) -> Option<()> {
         let name = stream.slice_trusted(start, end);
-        let item = BalancedItem::new(name, start, end);
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let normalized_name = normalize_css_keyword(name, &mut normalized);
+        let item = normalized_name.map_or_else(
+            || BalancedItem::new_other(start, end),
+            |name| BalancedItem::new_normalized(name, start, end),
+        );
         let at_import_top_level =
             matches!(self.scope, Scope::InAtImport(_)) && self.balanced.is_empty();
         self.balanced.push(item, self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if at_import_top_level && name.eq_ignore_ascii_case("url(") {
+            if at_import_top_level && normalized_name == Some("url(") {
                 import_data.prelude.push(ImportPreludeNode::Url {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("layer(") {
+            } else if at_import_top_level && normalized_name == Some("layer(") {
                 import_data.prelude.push(ImportPreludeNode::Layer {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("supports(") {
+            } else if at_import_top_level && normalized_name == Some("supports(") {
                 import_data.prelude.push(ImportPreludeNode::Supports {
                     range: Range::new(start, end),
                 });
@@ -3375,14 +3323,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 import_data.prelude.push(ImportPreludeNode::Other {
                     range: Range::new(start, end),
                 });
-            } else if name.eq_ignore_ascii_case("supports(") {
+            } else if normalized_name == Some("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            let layer_end = at_import_top_level && name.eq_ignore_ascii_case("layer(");
-            let supports_end = name.eq_ignore_ascii_case("supports(");
+            let layer_end = at_import_top_level && normalized_name == Some("layer(");
+            let supports_end = normalized_name == Some("supports(");
             if layer_end || supports_end {
                 let Some(close) = stream.fast_forward(TokenKind::RightParenthesis) else {
                     return Some(());
@@ -3413,7 +3361,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     range: Range::new(start, end - 1),
                 });
         }
-        if mode_data.is_current_local_mode() && name.eq_ignore_ascii_case("var(") {
+        if mode_data.is_current_local_mode() && normalized_name == Some("var(") {
             self.lex_local_var(stream)?;
         }
         Some(())
