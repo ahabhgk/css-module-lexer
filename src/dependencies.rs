@@ -1826,8 +1826,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         flags: TokenFlags,
         property_local_mode: bool,
     ) -> (PropertyKind, Option<GridPropertyKind>) {
-        if property_local_mode && name.starts_with("--") {
-            return (PropertyKind::CustomProperty, None);
+        if name.starts_with("--") {
+            return if property_local_mode {
+                (PropertyKind::CustomProperty, None)
+            } else {
+                (PropertyKind::Generic, None)
+            };
         }
         let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
         let name = if flags.has_escape() {
