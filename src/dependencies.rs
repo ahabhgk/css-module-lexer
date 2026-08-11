@@ -1386,21 +1386,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let mut stream = TokenStream::from_lexer(source);
         let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
         let has_mode = self.mode_data.is_some();
-        match (keep_comments, has_mode) {
-            (true, true) => self.lex_streaming_inner::<true, true>(&mut stream),
-            (true, false) => self.lex_streaming_inner::<true, false>(&mut stream),
-            (false, true) => self.lex_streaming_inner::<false, true>(&mut stream),
-            (false, false) => self.lex_streaming_inner::<false, false>(&mut stream),
-        }
+        self.lex_streaming_inner(&mut stream, keep_comments, has_mode);
     }
 
     #[inline(always)]
-    fn lex_streaming_inner<const KEEP_COMMENTS: bool, const HAS_MODE: bool>(
+    fn lex_streaming_inner(
         &mut self,
         stream: &mut TokenStream<'_, 's>,
+        keep_comments: bool,
+        has_mode: bool,
     ) {
         loop {
-            let item = stream.next::<KEEP_COMMENTS>();
+            let item = stream.next(keep_comments);
             let token = item.token;
             if token.kind == TokenKind::Eof {
                 return;
@@ -1435,22 +1432,22 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
             let mut colon_next = None;
             let mut dot_next = None;
-            if HAS_MODE
+            if has_mode
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Colon
                 && stream.lexer().could_start_ident_at(token.range.end)
             {
-                let first = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
+                let first = stream.peek_significant_skipping_comments(keep_comments);
                 if first.token.kind != TokenKind::Eof {
                     colon_next = Some(first);
                 }
-            } else if HAS_MODE
+            } else if has_mode
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Delim
                 && stream.lexer().byte_at(token.range.start) == Some(b'.')
                 && stream.lexer().could_start_ident_at(token.range.end)
             {
-                let next = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
+                let next = stream.peek_significant_skipping_comments(keep_comments);
                 if next.token.kind != TokenKind::Eof {
                     dot_next = Some(next);
                 }
@@ -1502,7 +1499,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     );
                 }
                 TokenKind::IdHash | TokenKind::Hash
-                    if !HAS_MODE || self.scan_context != ScanContext::Selector => {}
+                    if !has_mode || self.scan_context != ScanContext::Selector => {}
                 TokenKind::IdHash | TokenKind::Hash => {
                     let id_end = if token.kind == TokenKind::Hash {
                         token.range.start + 1
@@ -1513,7 +1510,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         self.handle_id(stream.lexer_mut(), token.range.start, id_end, token.flags);
                 }
                 TokenKind::Delim
-                    if (!HAS_MODE || self.scan_context != ScanContext::Selector)
+                    if (!has_mode || self.scan_context != ScanContext::Selector)
                         && stream.byte_at(token.range.start) == Some(b'#') => {}
                 TokenKind::Delim if stream.byte_at(token.range.start) == Some(b'#') => {
                     result = self.handle_id(
@@ -1524,7 +1521,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     );
                 }
                 TokenKind::Delim
-                    if (!HAS_MODE || self.scan_context != ScanContext::Selector)
+                    if (!has_mode || self.scan_context != ScanContext::Selector)
                         && stream.byte_at(token.range.start) == Some(b'.') => {}
                 TokenKind::Delim if stream.byte_at(token.range.start) == Some(b'.') => {
                     let mut class_end = token.range.end;
@@ -1545,7 +1542,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         class_flags,
                     );
                     if consumes_name {
-                        stream.next::<KEEP_COMMENTS>();
+                        stream.next(keep_comments);
                     }
                 }
                 TokenKind::Delim if self.scan_context == ScanContext::Selector => {
@@ -1558,7 +1555,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
                     result = self.enter_property_value(stream);
                 }
-                TokenKind::Colon if !HAS_MODE => {}
+                TokenKind::Colon if !has_mode => {}
                 TokenKind::Colon => {
                     if let Some(next) = colon_next.filter(|next| {
                         matches!(next.token.kind, TokenKind::Ident | TokenKind::Function)
@@ -1566,7 +1563,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }) {
                         let (end, function) =
                             (next.token.range.end, next.token.kind == TokenKind::Function);
-                        stream.next::<KEEP_COMMENTS>();
+                        stream.next(keep_comments);
                         result = if function {
                             self.handle_pseudo_function(
                                 stream,
@@ -1647,18 +1644,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             match self.scan_context {
                 ScanContext::Selector if self.selector_fast_forward_enabled => {
-                    self.fast_forward_selector::<KEEP_COMMENTS, HAS_MODE>(stream);
+                    self.fast_forward_selector(stream, keep_comments, has_mode);
                 }
                 ScanContext::AtRule
                     if !matches!(self.scope, Scope::InAtImport(_) | Scope::AtImportInvalid) =>
                 {
-                    self.fast_forward_at_rule::<KEEP_COMMENTS>(stream);
+                    self.fast_forward_at_rule(stream, keep_comments);
                 }
                 ScanContext::SpecialValue(property) => {
-                    self.fast_forward_special_value::<KEEP_COMMENTS>(stream, property);
+                    self.fast_forward_special_value(stream, property, keep_comments);
                 }
                 ScanContext::GenericValue if !is_trivia => {
-                    self.fast_forward_generic_value::<KEEP_COMMENTS>(stream);
+                    self.fast_forward_generic_value(stream, keep_comments);
                 }
                 _ => {}
             }
@@ -1666,14 +1663,16 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_selector<const KEEP_COMMENTS: bool, const HAS_MODE: bool>(
+    fn fast_forward_selector(
         &mut self,
         stream: &mut TokenStream<'_, 's>,
+        keep_comments: bool,
+        has_mode: bool,
     ) {
         let invalidates_composes = stream.fast_forward_selector_if_buffer_empty(
             &mut self.selector_square_depth,
-            KEEP_COMMENTS,
-            HAS_MODE,
+            keep_comments,
+            has_mode,
             is_css_modules_pure_magic_comment,
         );
         if invalidates_composes
@@ -1685,23 +1684,20 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_generic_value<const KEEP_COMMENTS: bool>(
-        &self,
-        stream: &mut TokenStream<'_, 's>,
-    ) {
+    fn fast_forward_generic_value(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
         );
         let preserve_delimiters = !self.balanced.is_empty();
-        if self.icss_symbols.is_empty() && !KEEP_COMMENTS {
+        if self.icss_symbols.is_empty() && !keep_comments {
             stream.fast_forward_generic_value_without_candidates_if_buffer_empty(
                 preserve_strings,
                 preserve_delimiters,
             );
         } else {
             stream.fast_forward_generic_value_if_buffer_empty(
-                KEEP_COMMENTS,
+                keep_comments,
                 preserve_strings,
                 preserve_delimiters,
                 |ident| self.contains_icss_symbol(ident),
@@ -1711,14 +1707,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_at_rule<const KEEP_COMMENTS: bool>(&self, stream: &mut TokenStream<'_, 's>) {
+    fn fast_forward_at_rule(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
         );
         let preserve_delimiters = !self.balanced.is_empty();
         stream.fast_forward_at_rule_if_buffer_empty(
-            KEEP_COMMENTS,
+            keep_comments,
             preserve_strings,
             preserve_delimiters,
             |ident| self.contains_icss_symbol(ident),
@@ -1727,10 +1723,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_special_value<const KEEP_COMMENTS: bool>(
+    fn fast_forward_special_value(
         &self,
         stream: &mut TokenStream<'_, 's>,
         property: PropertyKind,
+        keep_comments: bool,
     ) {
         // An animation name may be any top-level identifier, so the raw
         // scanner usually stops immediately. Continue tokenizing directly.
@@ -1745,7 +1742,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let preserve_delimiters = !self.balanced.is_empty();
         let icss_symbols = (!self.icss_symbols.is_empty()).then_some(&self.icss_symbols);
         stream.fast_forward_special_value_if_buffer_empty(
-            KEEP_COMMENTS,
+            keep_comments,
             preserve_strings,
             preserve_delimiters,
             property,
@@ -2023,7 +2020,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             let prop_start = first.range.start;
             let prop_end = self.consume_icss_export_prop(stream, first)?;
-            let colon = stream.peek_significant_skipping_comments::<true>().token;
+            let colon = stream.peek_significant_skipping_comments(true).token;
             if colon.kind != TokenKind::Colon {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(colon.range.start, colon.range.end),
@@ -2074,7 +2071,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
         end = first.range.end;
         loop {
-            let token = stream.peek_significant_skipping_comments::<true>().token;
+            let token = stream.peek_significant_skipping_comments(true).token;
             if token.kind == TokenKind::Eof {
                 return None;
             }
@@ -2125,7 +2122,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(first.range.start);
         }
         loop {
-            let token = stream.peek::<true>().token;
+            let token = stream.peek(true).token;
             if token.kind == TokenKind::Eof {
                 return None;
             }
@@ -2135,7 +2132,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             ) {
                 return Some(token.range.start);
             }
-            stream.next::<true>();
+            stream.next(true);
         }
     }
 
@@ -2289,7 +2286,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             let prop_start = first.range.start;
             let prop_end = self.consume_icss_export_prop(stream, first)?;
-            let colon = stream.peek_significant_skipping_comments::<true>().token;
+            let colon = stream.peek_significant_skipping_comments(true).token;
             if colon.kind != TokenKind::Colon {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(colon.range.start, colon.range.end),
@@ -2344,12 +2341,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(());
         }
         let end = name_token.range.end;
-        let next = stream.peek_significant_skipping_comments::<true>().token;
+        let next = stream.peek_significant_skipping_comments(true).token;
         let from = if next.kind == TokenKind::Ident
             && stream.slice(next.range.start, next.range.end)? == "from"
         {
             stream.next_parser_token();
-            let path = stream.peek_significant_skipping_comments::<true>().token;
+            let path = stream.peek_significant_skipping_comments(true).token;
             let path_start = path.range.start;
             let path_end = path.range.end;
             if !matches!(path.kind, TokenKind::QuotedString | TokenKind::Ident) {
@@ -2400,7 +2397,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 stream.slice(start + 2, end)?,
                 Range::new(start, end),
             ));
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning
                 .handle_warning(left_curly_warning(Range::new(
@@ -2481,7 +2478,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 });
         }
         if is_function {
-            let right_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+            let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
             if right_parenthesis.kind != TokenKind::RightParenthesis {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(right_parenthesis.range.start, right_parenthesis.range.end),
@@ -2501,7 +2498,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             mode_data.inside_mode_function -= 1;
             self.balanced.pop_without_moda_data();
         }
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_curly.range.start, left_curly.range.end),
@@ -2545,7 +2542,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 name: stream.slice(start, end)?,
                 range: Range::new(start, end),
             });
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_curly.range.start, left_curly.range.end),
@@ -2660,7 +2657,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
 
         if is_function {
-            let right_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+            let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
             if right_parenthesis.kind != TokenKind::RightParenthesis {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(
@@ -2688,7 +2685,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if name_token.kind == TokenKind::Function {
             return Some(());
         }
-        let left_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+        let left_parenthesis = stream.peek_significant_skipping_comments(true).token;
         if left_parenthesis.kind != TokenKind::LeftParenthesis {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_parenthesis.range.start, left_parenthesis.range.end),
@@ -2730,14 +2727,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         local_classes: SmallVec<[&'s str; 2]>,
         start: Pos,
     ) -> Option<()> {
-        let colon = stream.peek_significant_skipping_comments::<true>().token;
+        let colon = stream.peek_significant_skipping_comments(true).token;
         if colon.kind != TokenKind::Colon {
             return Some(());
         }
         stream.next_parser_token();
         let mut replacement_end = colon.range.end;
         loop {
-            let first = stream.peek_significant_skipping_comments::<true>().token;
+            let first = stream.peek_significant_skipping_comments(true).token;
             if first.kind == TokenKind::Eof {
                 break;
             }
@@ -2785,8 +2782,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         });
                         return Some(());
                     };
-                    let right_parenthesis =
-                        stream.peek_significant_skipping_comments::<true>().token;
+                    let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
                     if right_parenthesis.kind != TokenKind::RightParenthesis {
                         self.handle_warning.handle_warning(Warning {
                             range: Range::new(
@@ -2807,7 +2803,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         Some("global"),
                         Range::new(global_start, item_end),
                     );
-                    delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                    delimiter = stream.peek_significant_skipping_comments(true).token;
                     continue;
                 }
 
@@ -2827,7 +2823,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 let ident = stream.slice(name_range.start, name_range.end)?;
                 if !names.is_empty() && ident.eq_ignore_ascii_case("from") {
                     stream.next_parser_token();
-                    let path = stream.peek_significant_skipping_comments::<true>().token;
+                    let path = stream.peek_significant_skipping_comments(true).token;
                     if matches!(
                         path.kind,
                         TokenKind::QuotedString | TokenKind::Ident | TokenKind::Function
@@ -2846,7 +2842,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         );
                         has_from = true;
                         stream.next_parser_token();
-                        delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                        delimiter = stream.peek_significant_skipping_comments(true).token;
                         break;
                     }
                     names.push(ident);
@@ -2857,7 +2853,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 names.push(ident);
                 item_end = name_range.end;
                 stream.next_parser_token();
-                delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                delimiter = stream.peek_significant_skipping_comments(true).token;
             }
 
             if has_from {
