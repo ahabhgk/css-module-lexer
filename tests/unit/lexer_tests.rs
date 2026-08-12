@@ -109,6 +109,16 @@ fn streaming_tokenizer_marks_token_flags() {
     assert!(!unicode.flags.is_ascii());
     assert!(!unicode.flags.has_escape());
     assert!(!unicode.flags.has_null());
+
+    let mut unicode_url = Lexer::new("url(café)");
+    let unicode_url = unicode_url.next_token();
+    assert_eq!(unicode_url.kind, TokenKind::Url);
+    assert!(!unicode_url.flags.is_ascii());
+
+    let mut unterminated_comment = Lexer::new("/*\0");
+    let unterminated_comment = unterminated_comment.next_token();
+    assert_eq!(unterminated_comment.kind, TokenKind::BadComment);
+    assert!(unterminated_comment.flags.has_null());
 }
 
 #[test]
@@ -168,7 +178,7 @@ fn token_stream_folds_trivia_and_preserves_pure_comments() {
     let input = " \t/** first **/foo";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    let item = stream.next::<false>();
+    let item = stream.next(false);
     assert_eq!(item.token.kind, TokenKind::Ident);
     assert!(item.leading.has_whitespace());
     assert_eq!(item.leading.first_comment_start, Some(2));
@@ -176,8 +186,8 @@ fn token_stream_folds_trivia_and_preserves_pure_comments() {
     let input = "/** magic **/ foo";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Comment);
-    let item = stream.next::<true>();
+    assert_eq!(stream.next(true).token.kind, TokenKind::Comment);
+    let item = stream.next(true);
     assert_eq!(item.token.kind, TokenKind::Ident);
     assert!(item.leading.has_whitespace());
 }
@@ -186,12 +196,12 @@ fn token_stream_folds_trivia_and_preserves_pure_comments() {
 fn token_stream_peeks_past_comments_without_rescanning() {
     let mut lexer = Lexer::new("local/**/.foo");
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
-    let next = stream.peek_significant_skipping_comments::<true>();
+    assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
+    let next = stream.peek_significant_skipping_comments(true);
     assert_eq!(next.token.kind, TokenKind::Delim);
     let scan_after_peek = stream.lexer().scan_pos();
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Comment);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Delim);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Comment);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Delim);
     assert_eq!(stream.lexer().scan_pos(), scan_after_peek);
 }
 
@@ -264,18 +274,18 @@ fn token_stream_cursors_are_monotonic_and_cover_the_input() {
 fn token_stream_single_peek_does_not_rescan() {
     let mut lexer = Lexer::new("color:red;");
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Colon);
-    let red = stream.peek_significant_skipping_comments::<true>().token;
+    assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Colon);
+    let red = stream.peek_significant_skipping_comments(true).token;
     assert_eq!(red.kind, TokenKind::Ident);
     let scan_before = stream.lexer().scan_pos();
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
     assert_eq!(
         stream.lexer().scan_pos(),
         scan_before,
         "consuming the buffered token must not advance the scanner"
     );
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Semicolon);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Semicolon);
 }
 
 #[test]
@@ -284,20 +294,20 @@ fn token_stream_comment_separated_mode_stays_buffered_in_source_order() {
     // dependency scanner consumes them exactly once in source order.
     let mut lexer = Lexer::new(":local/**/.foo");
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Colon);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
-    let delim = stream.peek_significant_skipping_comments::<true>().token;
+    assert_eq!(stream.next(true).token.kind, TokenKind::Colon);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
+    let delim = stream.peek_significant_skipping_comments(true).token;
     assert_eq!(delim.kind, TokenKind::Delim);
     let scan_after_peek = stream.lexer().scan_pos();
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Comment);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Delim);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Comment);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Delim);
     assert_eq!(
         stream.lexer().scan_pos(),
         scan_after_peek,
         "the buffered comment and delim must be consumed without rescanning"
     );
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Ident);
-    assert_eq!(stream.next::<true>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
+    assert_eq!(stream.next(true).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -314,16 +324,16 @@ fn generic_value_fast_forward_keeps_raw_depth_across_candidates() {
         |_| false,
     );
     assert_eq!(stream.consumed_pos(), 11);
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Ident);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Ident);
 
     stream.fast_forward_generic_value_if_buffer_empty(false, false, false, |_| false, |_| false);
     assert_eq!(stream.consumed_pos(), 21);
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Url);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Url);
 
     stream.fast_forward_generic_value_if_buffer_empty(false, false, false, |_| false, |_| false);
     assert_eq!(stream.byte_at(stream.consumed_pos()), Some(b';'));
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Semicolon);
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Semicolon);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -343,7 +353,7 @@ fn generic_value_fast_forward_buffers_plain_ascii_candidate_once() {
     assert_eq!(stream.consumed_pos(), 4);
     assert_eq!(stream.lexer().scan_pos(), 12);
 
-    let candidate = stream.next::<false>().token;
+    let candidate = stream.next(false).token;
     assert_eq!(candidate.kind, TokenKind::Ident);
     assert_eq!(candidate.range, Range::new(4, 12));
     assert_eq!(stream.consumed_pos(), 12);
@@ -355,7 +365,7 @@ fn fast_forward_skips_plain_nesting() {
     let input = "foo(bar())";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    let open = stream.next::<false>().token;
+    let open = stream.next(false).token;
     assert_eq!(open.kind, TokenKind::Function);
     assert_eq!(open.range, Range::new(0, 4));
     assert_eq!(
@@ -364,7 +374,7 @@ fn fast_forward_skips_plain_nesting() {
     );
     assert_eq!(stream.consumed_pos(), 10);
     assert_eq!(stream.lexer().scan_pos(), 10);
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -372,13 +382,13 @@ fn fast_forward_skips_mixed_brackets() {
     let input = "foo([a{b}])";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    let open = stream.next::<false>().token;
+    let open = stream.next(false).token;
     assert_eq!(open.kind, TokenKind::Function);
     assert_eq!(
         stream.fast_forward(TokenKind::RightParenthesis),
         Some(Range::new(4, 11))
     );
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -386,12 +396,12 @@ fn fast_forward_ignores_brackets_inside_strings_and_comments() {
     let input = "foo(\")\" /* ) */ )";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(
         stream.fast_forward(TokenKind::RightParenthesis),
         Some(Range::new(4, 17))
     );
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -399,12 +409,12 @@ fn fast_forward_skips_escaped_closing_bracket() {
     let input = r"foo(a\)b)";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(
         stream.fast_forward(TokenKind::RightParenthesis),
         Some(Range::new(4, 9))
     );
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Eof);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
 }
 
 #[test]
@@ -412,11 +422,11 @@ fn fast_forward_returns_none_on_unclosed_function() {
     let input = "foo(bar";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
     assert_eq!(stream.lexer().scan_pos(), 4);
     assert_eq!(stream.consumed_pos(), 4);
-    assert_eq!(stream.next::<false>().token.kind, TokenKind::Ident);
+    assert_eq!(stream.next(false).token.kind, TokenKind::Ident);
 }
 
 #[test]
@@ -424,13 +434,10 @@ fn fast_forward_returns_none_on_unbalanced_closing_bracket() {
     let input = "foo(]";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
     assert_eq!(stream.lexer().scan_pos(), 4);
-    assert_eq!(
-        stream.next::<false>().token.kind,
-        TokenKind::RightSquareBracket
-    );
+    assert_eq!(stream.next(false).token.kind, TokenKind::RightSquareBracket);
 }
 
 #[test]
@@ -438,12 +445,12 @@ fn fast_forward_tracks_next_token_range() {
     let input = "foo(bar) baz";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(
         stream.fast_forward(TokenKind::RightParenthesis),
         Some(Range::new(4, 8))
     );
-    let next = stream.next::<false>().token;
+    let next = stream.next(false).token;
     assert_eq!(next.kind, TokenKind::Ident);
     assert_eq!(next.range, Range::new(9, 12));
 }
@@ -453,18 +460,15 @@ fn fast_forward_skips_non_ascii_boundaries() {
     let input = "foo(中)文)";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(
         stream.fast_forward(TokenKind::RightParenthesis),
         Some(Range::new(4, 8))
     );
-    let next = stream.next::<false>().token;
+    let next = stream.next(false).token;
     assert_eq!(next.kind, TokenKind::Ident);
     assert_eq!(next.range, Range::new(8, 11));
-    assert_eq!(
-        stream.next::<false>().token.kind,
-        TokenKind::RightParenthesis
-    );
+    assert_eq!(stream.next(false).token.kind, TokenKind::RightParenthesis);
 }
 
 #[test]
@@ -472,11 +476,11 @@ fn fast_forward_stops_at_top_level_semicolon() {
     let input = "supports(display: flex; display: grid)";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
-    stream.next::<false>();
+    stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
     assert_eq!(stream.lexer().scan_pos(), 9);
     loop {
-        let token = stream.next::<false>().token;
+        let token = stream.next(false).token;
         if token.kind == TokenKind::Semicolon {
             assert_eq!(token.range, Range::new(22, 23));
             break;

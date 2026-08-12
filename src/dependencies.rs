@@ -6,6 +6,11 @@ use smallvec::SmallVec;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
+use crate::css_syntax::{
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_magic_comment,
+    is_css_modules_pure_magic_comment, is_css_space_byte, is_css_white_space_char,
+    lowercase_ascii_keyword, strip_vendor_prefix, trim_css_whitespace,
+};
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
     WarningKind,
@@ -14,27 +19,6 @@ use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
-
-macro_rules! match_ignore_ascii_case {
-    (
-        $value:expr, {
-            $(
-                $($pattern:literal)|+ => $result:expr,
-            )*
-            _ => $fallback:expr $(,)?
-        }
-    ) => {{
-        let value = $value;
-        $(
-            if $(value.eq_ignore_ascii_case($pattern))||+ {
-                $result
-            } else
-        )*
-        {
-            $fallback
-        }
-    }};
-}
 
 #[derive(Debug)]
 enum Scope<'s> {
@@ -306,7 +290,24 @@ struct BalancedItem {
 }
 
 impl BalancedItem {
-    pub fn new(name: &str, start: Pos, end: Pos) -> Self {
+    pub fn new(name: &str, flags: TokenFlags, start: Pos, end: Pos) -> Self {
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let kind = if flags.has_escape() {
+            decode_css_keyword(name, &mut normalized)
+                .map(BalancedItemKind::new)
+                .unwrap_or(BalancedItemKind::Other)
+        } else {
+            lowercase_ascii_keyword(name, &mut normalized)
+                .map(BalancedItemKind::new)
+                .unwrap_or(BalancedItemKind::Other)
+        };
+        Self {
+            kind,
+            range: Range::new(start, end),
+        }
+    }
+
+    pub fn new_normalized(name: &str, start: Pos, end: Pos) -> Self {
         Self {
             kind: BalancedItemKind::new(name),
             range: Range::new(start, end),
@@ -348,14 +349,14 @@ impl BalancedItemKind {
         match name {
             "url(" => Self::Url,
             "image-set(" => Self::ImageSet,
-            _ if with_vendor_prefixed_eq(name, "image-set(", false) => Self::ImageSet,
-            _ if name.eq_ignore_ascii_case("layer(") => Self::Layer,
-            _ if name.eq_ignore_ascii_case("supports(") => Self::Supports,
+            _ if strip_vendor_prefix(name) == Some("image-set(") => Self::ImageSet,
+            "layer(" => Self::Layer,
+            "supports(" => Self::Supports,
             "palette-mix(" => Self::PaletteMix,
-            _ if name.eq_ignore_ascii_case(":local(") => Self::LocalFn,
-            _ if name.eq_ignore_ascii_case(":global(") => Self::GlobalFn,
-            _ if name.eq_ignore_ascii_case(":local") => Self::LocalClass,
-            _ if name.eq_ignore_ascii_case(":global") => Self::GlobalClass,
+            ":local(" => Self::LocalFn,
+            ":global(" => Self::GlobalFn,
+            ":local" => Self::LocalClass,
+            ":global" => Self::GlobalClass,
             _ => Self::Other,
         }
     }
@@ -375,55 +376,6 @@ impl BalancedItemKind {
     pub fn is_mode_class(&self) -> bool {
         matches!(self, Self::LocalClass | Self::GlobalClass)
     }
-}
-
-fn is_css_space_byte(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
-}
-
-fn is_css_white_space_char(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
-}
-
-fn trim_slice(input: &str) -> &str {
-    let bytes = input.as_bytes();
-    let mut start = 0usize;
-    let mut end = bytes.len();
-    while start < end && is_css_space_byte(bytes[start]) {
-        start += 1;
-    }
-    while end > start && is_css_space_byte(bytes[end - 1]) {
-        end -= 1;
-    }
-    &input[start..end]
-}
-
-fn is_css_modules_magic_comment(input: &str, keyword: &str) -> bool {
-    let input = trim_slice(input);
-    let Some(rest) = input.strip_prefix(keyword) else {
-        return false;
-    };
-    rest.is_empty()
-        || rest
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| is_css_space_byte(*byte))
-}
-
-fn is_css_modules_pure_magic_comment(input: &str) -> bool {
-    let input = trim_slice(input);
-    let Some(keyword) = input.strip_prefix("cssmodules-pure-") else {
-        return false;
-    };
-    ["ignore", "no-check"].into_iter().any(|expected| {
-        keyword.strip_prefix(expected).is_some_and(|rest| {
-            rest.is_empty()
-                || rest
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| is_css_space_byte(*byte))
-        })
-    })
 }
 
 fn trivia_only(input: &str) -> bool {
@@ -784,22 +736,6 @@ impl<'s> ValueAtRuleStream<'s> {
     }
 }
 
-fn with_vendor_prefixed_eq(left: &str, right: &str, at_rule: bool) -> bool {
-    let left = if at_rule {
-        if let Some(left) = left.strip_prefix('@') {
-            left
-        } else {
-            return false;
-        }
-    } else {
-        left
-    };
-    matches!(left.strip_prefix("-webkit-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-moz-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-ms-"), Some(left) if left.eq_ignore_ascii_case(right))
-        || matches!(left.strip_prefix("-o-"), Some(left) if left.eq_ignore_ascii_case(right))
-}
-
 #[derive(Debug)]
 pub struct ModeData<'s> {
     default: Mode,
@@ -1000,16 +936,16 @@ impl<T: ReservedValues> InProperty<T> {
         }
     }
 
-    fn check_reserved(&mut self, ident: &str) -> bool {
-        self.reserved.check(ident)
+    fn check_reserved(&mut self, ident: &str, flags: TokenFlags) -> bool {
+        self.reserved.check(ident, flags)
     }
 
     pub fn reset_reserved(&mut self) {
         self.reserved.reset();
     }
 
-    pub fn set_rename(&mut self, ident: &str, range: Range) {
-        if self.check_reserved(ident) {
+    pub fn set_rename(&mut self, ident: &str, flags: TokenFlags, range: Range) {
+        if self.check_reserved(ident, flags) {
             self.rename = Some(range);
         }
     }
@@ -1024,7 +960,7 @@ impl<T: ReservedValues> InProperty<T> {
 }
 
 trait ReservedValues {
-    fn check(&mut self, ident: &str) -> bool;
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool;
     fn reset(&mut self);
 }
 
@@ -1034,8 +970,17 @@ struct AnimationReserved {
 }
 
 impl ReservedValues for AnimationReserved {
-    fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
+            return true;
+        };
+        match ident {
             "normal" => self.check_and_update(Self::NORMAL),
             "reverse" => self.check_and_update(Self::REVERSE),
             "alternate" => self.check_and_update(Self::ALTERNATE),
@@ -1058,7 +1003,7 @@ impl ReservedValues for AnimationReserved {
             // global values
             "initial" | "inherit" | "unset" | "revert" | "revert-layer" => false,
             _ => true,
-        })
+        }
     }
 
     fn reset(&mut self) {
@@ -1098,8 +1043,17 @@ impl AnimationReserved {
 struct ListStyleReserved;
 
 impl ReservedValues for ListStyleReserved {
-    fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
+            return true;
+        };
+        match ident {
             // https://www.w3.org/TR/css-counter-styles-3/#simple-numeric
             "decimal"
             | "decimal-leading-zero"
@@ -1168,7 +1122,7 @@ impl ReservedValues for ListStyleReserved {
             | "revert"
             | "revert-layer" => false,
             _ => true,
-        })
+        }
     }
 
     fn reset(&mut self) {}
@@ -1178,7 +1132,7 @@ impl ReservedValues for ListStyleReserved {
 struct FontPaletteReserved;
 
 impl ReservedValues for FontPaletteReserved {
-    fn check(&mut self, ident: &str) -> bool {
+    fn check(&mut self, ident: &str, _flags: TokenFlags) -> bool {
         ident.starts_with("--")
     }
 
@@ -1189,8 +1143,18 @@ impl ReservedValues for FontPaletteReserved {
 struct ContainerReserved;
 
 impl ReservedValues for ContainerReserved {
-    fn check(&mut self, ident: &str) -> bool {
-        match_ignore_ascii_case!(ident, {
+    fn check(&mut self, ident: &str, flags: TokenFlags) -> bool {
+        let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+        let ident = if flags.has_escape() {
+            decode_css_keyword(ident, &mut lowercase)
+        } else {
+            lowercase_ascii_keyword(ident, &mut lowercase)
+        };
+        let Some(ident) = ident else {
+            return true;
+        };
+        !matches!(
+            ident,
             "normal"
                 | "size"
                 | "inline-size"
@@ -1200,9 +1164,8 @@ impl ReservedValues for ContainerReserved {
                 | "inherit"
                 | "unset"
                 | "revert"
-                | "revert-layer" => false,
-            _ => true,
-        })
+                | "revert-layer"
+        )
     }
 
     fn reset(&mut self) {}
@@ -1216,19 +1179,29 @@ enum GridPropertyKind {
 }
 
 fn grid_property_kind(ident: &str) -> Option<GridPropertyKind> {
-    match_ignore_ascii_case!(ident, {
+    match ident {
         "grid" | "grid-area" | "grid-column" | "grid-column-end" | "grid-column-start"
         | "grid-row" | "grid-row-end" | "grid-row-start" => Some(GridPropertyKind::Generic),
         "grid-template" | "grid-template-columns" | "grid-template-rows" => {
             Some(GridPropertyKind::TemplateLike)
-        },
+        }
         "grid-template-areas" => Some(GridPropertyKind::TemplateAreas),
         _ => None,
-    })
+    }
 }
 
-fn is_reserved_grid_ident(ident: &str) -> bool {
-    match_ignore_ascii_case!(ident, {
+fn is_reserved_grid_ident(ident: &str, flags: TokenFlags) -> bool {
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let ident = if flags.has_escape() {
+        decode_css_keyword(ident, &mut lowercase)
+    } else {
+        lowercase_ascii_keyword(ident, &mut lowercase)
+    };
+    let Some(ident) = ident else {
+        return false;
+    };
+    matches!(
+        ident,
         "auto"
             | "span"
             | "auto-flow"
@@ -1244,9 +1217,8 @@ fn is_reserved_grid_ident(ident: &str) -> bool {
             | "inherit"
             | "unset"
             | "revert"
-            | "revert-layer" => true,
-        _ => false,
-    })
+            | "revert-layer"
+    )
 }
 
 /// Decide whether a raw-scanned ident inside a special property value must be
@@ -1265,10 +1237,10 @@ pub(crate) fn special_value_is_candidate(
         return true;
     }
     match property {
-        PropertyKind::ListStyle => ListStyleReserved.check(ident),
+        PropertyKind::ListStyle => ListStyleReserved.check(ident, TokenFlags::ascii()),
         PropertyKind::FontPalette => ident.starts_with("--"),
-        PropertyKind::Container => ContainerReserved.check(ident),
-        PropertyKind::Grid => !is_reserved_grid_ident(ident),
+        PropertyKind::Container => ContainerReserved.check(ident, TokenFlags::ascii()),
+        PropertyKind::Grid => !is_reserved_grid_ident(ident, TokenFlags::ascii()),
         PropertyKind::Animation
         | PropertyKind::Generic
         | PropertyKind::Composes
@@ -1276,11 +1248,17 @@ pub(crate) fn special_value_is_candidate(
     }
 }
 
-fn is_reserved_container_query_ident(ident: &str) -> bool {
-    match_ignore_ascii_case!(ident, {
-        "none" | "and" | "or" | "not" => true,
-        _ => false,
-    })
+fn is_reserved_container_query_ident(ident: &str, flags: TokenFlags) -> bool {
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let ident = if flags.has_escape() {
+        decode_css_keyword(ident, &mut lowercase)
+    } else {
+        lowercase_ascii_keyword(ident, &mut lowercase)
+    };
+    let Some(ident) = ident else {
+        return false;
+    };
+    matches!(ident, "none" | "and" | "or" | "not")
 }
 
 fn parse_grid_template_area_ranges(input: &str, offset: Pos) -> impl Iterator<Item = Range> + '_ {
@@ -1408,21 +1386,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let mut stream = TokenStream::from_lexer(source);
         let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
         let has_mode = self.mode_data.is_some();
-        match (keep_comments, has_mode) {
-            (true, true) => self.lex_streaming_inner::<true, true>(&mut stream),
-            (true, false) => self.lex_streaming_inner::<true, false>(&mut stream),
-            (false, true) => self.lex_streaming_inner::<false, true>(&mut stream),
-            (false, false) => self.lex_streaming_inner::<false, false>(&mut stream),
-        }
+        self.lex_streaming_inner(&mut stream, keep_comments, has_mode);
     }
 
     #[inline(always)]
-    fn lex_streaming_inner<const KEEP_COMMENTS: bool, const HAS_MODE: bool>(
+    fn lex_streaming_inner(
         &mut self,
         stream: &mut TokenStream<'_, 's>,
+        keep_comments: bool,
+        has_mode: bool,
     ) {
         loop {
-            let item = stream.next::<KEEP_COMMENTS>();
+            let item = stream.next(keep_comments);
             let token = item.token;
             if token.kind == TokenKind::Eof {
                 return;
@@ -1457,22 +1432,22 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
             let mut colon_next = None;
             let mut dot_next = None;
-            if HAS_MODE
+            if has_mode
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Colon
                 && stream.lexer().could_start_ident_at(token.range.end)
             {
-                let first = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
+                let first = stream.peek_significant_skipping_comments(keep_comments);
                 if first.token.kind != TokenKind::Eof {
                     colon_next = Some(first);
                 }
-            } else if HAS_MODE
+            } else if has_mode
                 && self.scan_context == ScanContext::Selector
                 && token.kind == TokenKind::Delim
                 && stream.lexer().byte_at(token.range.start) == Some(b'.')
                 && stream.lexer().could_start_ident_at(token.range.end)
             {
-                let next = stream.peek_significant_skipping_comments::<KEEP_COMMENTS>();
+                let next = stream.peek_significant_skipping_comments(keep_comments);
                 if next.token.kind != TokenKind::Eof {
                     dot_next = Some(next);
                 }
@@ -1524,7 +1499,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     );
                 }
                 TokenKind::IdHash | TokenKind::Hash
-                    if !HAS_MODE || self.scan_context != ScanContext::Selector => {}
+                    if !has_mode || self.scan_context != ScanContext::Selector => {}
                 TokenKind::IdHash | TokenKind::Hash => {
                     let id_end = if token.kind == TokenKind::Hash {
                         token.range.start + 1
@@ -1535,7 +1510,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         self.handle_id(stream.lexer_mut(), token.range.start, id_end, token.flags);
                 }
                 TokenKind::Delim
-                    if (!HAS_MODE || self.scan_context != ScanContext::Selector)
+                    if (!has_mode || self.scan_context != ScanContext::Selector)
                         && stream.byte_at(token.range.start) == Some(b'#') => {}
                 TokenKind::Delim if stream.byte_at(token.range.start) == Some(b'#') => {
                     result = self.handle_id(
@@ -1546,7 +1521,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     );
                 }
                 TokenKind::Delim
-                    if (!HAS_MODE || self.scan_context != ScanContext::Selector)
+                    if (!has_mode || self.scan_context != ScanContext::Selector)
                         && stream.byte_at(token.range.start) == Some(b'.') => {}
                 TokenKind::Delim if stream.byte_at(token.range.start) == Some(b'.') => {
                     let mut class_end = token.range.end;
@@ -1567,7 +1542,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         class_flags,
                     );
                     if consumes_name {
-                        stream.next::<KEEP_COMMENTS>();
+                        stream.next(keep_comments);
                     }
                 }
                 TokenKind::Delim if self.scan_context == ScanContext::Selector => {
@@ -1580,7 +1555,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 TokenKind::Colon if self.scan_context == ScanContext::DeclarationName => {
                     result = self.enter_property_value(stream);
                 }
-                TokenKind::Colon if !HAS_MODE => {}
+                TokenKind::Colon if !has_mode => {}
                 TokenKind::Colon => {
                     if let Some(next) = colon_next.filter(|next| {
                         matches!(next.token.kind, TokenKind::Ident | TokenKind::Function)
@@ -1588,7 +1563,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }) {
                         let (end, function) =
                             (next.token.range.end, next.token.kind == TokenKind::Function);
-                        stream.next::<KEEP_COMMENTS>();
+                        stream.next(keep_comments);
                         result = if function {
                             self.handle_pseudo_function(
                                 stream,
@@ -1669,18 +1644,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             match self.scan_context {
                 ScanContext::Selector if self.selector_fast_forward_enabled => {
-                    self.fast_forward_selector::<KEEP_COMMENTS, HAS_MODE>(stream);
+                    self.fast_forward_selector(stream, keep_comments, has_mode);
                 }
                 ScanContext::AtRule
                     if !matches!(self.scope, Scope::InAtImport(_) | Scope::AtImportInvalid) =>
                 {
-                    self.fast_forward_at_rule::<KEEP_COMMENTS>(stream);
+                    self.fast_forward_at_rule(stream, keep_comments);
                 }
                 ScanContext::SpecialValue(property) => {
-                    self.fast_forward_special_value::<KEEP_COMMENTS>(stream, property);
+                    self.fast_forward_special_value(stream, property, keep_comments);
                 }
                 ScanContext::GenericValue if !is_trivia => {
-                    self.fast_forward_generic_value::<KEEP_COMMENTS>(stream);
+                    self.fast_forward_generic_value(stream, keep_comments);
                 }
                 _ => {}
             }
@@ -1688,14 +1663,16 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_selector<const KEEP_COMMENTS: bool, const HAS_MODE: bool>(
+    fn fast_forward_selector(
         &mut self,
         stream: &mut TokenStream<'_, 's>,
+        keep_comments: bool,
+        has_mode: bool,
     ) {
         let invalidates_composes = stream.fast_forward_selector_if_buffer_empty(
             &mut self.selector_square_depth,
-            KEEP_COMMENTS,
-            HAS_MODE,
+            keep_comments,
+            has_mode,
             is_css_modules_pure_magic_comment,
         );
         if invalidates_composes
@@ -1707,23 +1684,20 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_generic_value<const KEEP_COMMENTS: bool>(
-        &self,
-        stream: &mut TokenStream<'_, 's>,
-    ) {
+    fn fast_forward_generic_value(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
         );
         let preserve_delimiters = !self.balanced.is_empty();
-        if self.icss_symbols.is_empty() && !KEEP_COMMENTS {
+        if self.icss_symbols.is_empty() && !keep_comments {
             stream.fast_forward_generic_value_without_candidates_if_buffer_empty(
                 preserve_strings,
                 preserve_delimiters,
             );
         } else {
             stream.fast_forward_generic_value_if_buffer_empty(
-                KEEP_COMMENTS,
+                keep_comments,
                 preserve_strings,
                 preserve_delimiters,
                 |ident| self.contains_icss_symbol(ident),
@@ -1733,14 +1707,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_at_rule<const KEEP_COMMENTS: bool>(&self, stream: &mut TokenStream<'_, 's>) {
+    fn fast_forward_at_rule(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
         );
         let preserve_delimiters = !self.balanced.is_empty();
         stream.fast_forward_at_rule_if_buffer_empty(
-            KEEP_COMMENTS,
+            keep_comments,
             preserve_strings,
             preserve_delimiters,
             |ident| self.contains_icss_symbol(ident),
@@ -1749,10 +1723,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_special_value<const KEEP_COMMENTS: bool>(
+    fn fast_forward_special_value(
         &self,
         stream: &mut TokenStream<'_, 's>,
         property: PropertyKind,
+        keep_comments: bool,
     ) {
         // An animation name may be any top-level identifier, so the raw
         // scanner usually stops immediately. Continue tokenizing directly.
@@ -1767,7 +1742,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let preserve_delimiters = !self.balanced.is_empty();
         let icss_symbols = (!self.icss_symbols.is_empty()).then_some(&self.icss_symbols);
         stream.fast_forward_special_value_if_buffer_empty(
-            KEEP_COMMENTS,
+            keep_comments,
             preserve_strings,
             preserve_delimiters,
             property,
@@ -1845,31 +1820,45 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn classify_property(
         name: &str,
+        flags: TokenFlags,
         property_local_mode: bool,
     ) -> (PropertyKind, Option<GridPropertyKind>) {
-        if name.eq_ignore_ascii_case("composes") || name.eq_ignore_ascii_case("compose-with") {
+        if name.starts_with("--") {
+            return if property_local_mode {
+                (PropertyKind::CustomProperty, None)
+            } else {
+                (PropertyKind::Generic, None)
+            };
+        }
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let name = if flags.has_escape() {
+            let Some(name) = decode_css_keyword(name, &mut normalized) else {
+                return (PropertyKind::Generic, None);
+            };
+            name
+        } else {
+            let Some(name) = lowercase_ascii_keyword(name, &mut normalized) else {
+                return (PropertyKind::Generic, None);
+            };
+            name
+        };
+        if matches!(name, "composes" | "compose-with") {
             return (PropertyKind::Composes, None);
         }
         if !property_local_mode {
             return (PropertyKind::Generic, None);
         }
-        if name.starts_with("--") {
-            return (PropertyKind::CustomProperty, None);
-        }
-        if name.eq_ignore_ascii_case("animation")
-            || name.eq_ignore_ascii_case("animation-name")
-            || with_vendor_prefixed_eq(name, "animation", false)
-            || with_vendor_prefixed_eq(name, "animation-name", false)
-        {
+        let unprefixed = strip_vendor_prefix(name).unwrap_or(name);
+        if matches!(unprefixed, "animation" | "animation-name") {
             return (PropertyKind::Animation, None);
         }
-        if name.eq_ignore_ascii_case("list-style") || name.eq_ignore_ascii_case("list-style-type") {
+        if matches!(name, "list-style" | "list-style-type") {
             return (PropertyKind::ListStyle, None);
         }
-        if name.eq_ignore_ascii_case("font-palette") {
+        if name == "font-palette" {
             return (PropertyKind::FontPalette, None);
         }
-        if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("container-name") {
+        if matches!(name, "container" | "container-name") {
             return (PropertyKind::Container, None);
         }
         if let Some(grid) = grid_property_kind(name) {
@@ -1878,22 +1867,34 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         (PropertyKind::Generic, None)
     }
 
-    fn classify_at_rule(name: &str) -> AtRuleKind {
-        match name.len() {
-            6 if name.eq_ignore_ascii_case("@value") => AtRuleKind::Value,
-            6 if name.eq_ignore_ascii_case("@scope") => AtRuleKind::Scope,
-            7 if name.eq_ignore_ascii_case("@import") => AtRuleKind::Import,
-            8 if name.eq_ignore_ascii_case("@charset") => AtRuleKind::Charset,
-            9 if name.eq_ignore_ascii_case("@function") => AtRuleKind::Function,
-            9 if name.eq_ignore_ascii_case("@property") => AtRuleKind::Property,
-            10 if name.eq_ignore_ascii_case("@namespace") => AtRuleKind::Namespace,
-            10 if name.eq_ignore_ascii_case("@keyframes") => AtRuleKind::Keyframes,
-            10 if name.eq_ignore_ascii_case("@container") => AtRuleKind::Container,
-            14 if name.eq_ignore_ascii_case("@counter-style") => AtRuleKind::CounterStyle,
-            20 if name.eq_ignore_ascii_case("@font-palette-values") => {
-                AtRuleKind::FontPaletteValues
+    fn classify_at_rule(name: &str, flags: TokenFlags) -> AtRuleKind {
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let name = if flags.has_escape() {
+            let Some(name) = decode_css_keyword(name, &mut normalized) else {
+                return AtRuleKind::Other;
+            };
+            name
+        } else {
+            let Some(name) = lowercase_ascii_keyword(name, &mut normalized) else {
+                return AtRuleKind::Other;
+            };
+            name
+        };
+        match name {
+            "@value" => AtRuleKind::Value,
+            "@scope" => AtRuleKind::Scope,
+            "@import" => AtRuleKind::Import,
+            "@charset" => AtRuleKind::Charset,
+            "@function" => AtRuleKind::Function,
+            "@property" => AtRuleKind::Property,
+            "@namespace" => AtRuleKind::Namespace,
+            "@keyframes" => AtRuleKind::Keyframes,
+            "@container" => AtRuleKind::Container,
+            "@counter-style" => AtRuleKind::CounterStyle,
+            "@font-palette-values" => AtRuleKind::FontPaletteValues,
+            _ if name.strip_prefix('@').and_then(strip_vendor_prefix) == Some("keyframes") => {
+                AtRuleKind::Keyframes
             }
-            _ if with_vendor_prefixed_eq(name, "keyframes", true) => AtRuleKind::Keyframes,
             _ => AtRuleKind::Other,
         }
     }
@@ -2019,7 +2020,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             let prop_start = first.range.start;
             let prop_end = self.consume_icss_export_prop(stream, first)?;
-            let colon = stream.peek_significant_skipping_comments::<true>().token;
+            let colon = stream.peek_significant_skipping_comments(true).token;
             if colon.kind != TokenKind::Colon {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(colon.range.start, colon.range.end),
@@ -2070,7 +2071,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
         end = first.range.end;
         loop {
-            let token = stream.peek_significant_skipping_comments::<true>().token;
+            let token = stream.peek_significant_skipping_comments(true).token;
             if token.kind == TokenKind::Eof {
                 return None;
             }
@@ -2121,7 +2122,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(first.range.start);
         }
         loop {
-            let token = stream.peek::<true>().token;
+            let token = stream.peek(true).token;
             if token.kind == TokenKind::Eof {
                 return None;
             }
@@ -2131,7 +2132,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             ) {
                 return Some(token.range.start);
             }
-            stream.next::<true>();
+            stream.next(true);
         }
     }
 
@@ -2220,7 +2221,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     ..colon.prev_end as usize];
                 let raw = &parser.input[colon.end as usize..parser.params_end as usize];
                 value = if parser.first_colon_tokens_after > 0 {
-                    trim_slice(raw)
+                    trim_css_whitespace(raw)
                 } else {
                     raw
                 };
@@ -2229,7 +2230,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 local_name = &parser.input[first_start as usize..first_end as usize];
                 let raw = &parser.input[first_end as usize..parser.params_end as usize];
                 value = if parser.significant_count > 1 {
-                    trim_slice(raw)
+                    trim_css_whitespace(raw)
                 } else {
                     raw
                 };
@@ -2285,7 +2286,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             }
             let prop_start = first.range.start;
             let prop_end = self.consume_icss_export_prop(stream, first)?;
-            let colon = stream.peek_significant_skipping_comments::<true>().token;
+            let colon = stream.peek_significant_skipping_comments(true).token;
             if colon.kind != TokenKind::Colon {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(colon.range.start, colon.range.end),
@@ -2340,12 +2341,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             return Some(());
         }
         let end = name_token.range.end;
-        let next = stream.peek_significant_skipping_comments::<true>().token;
+        let next = stream.peek_significant_skipping_comments(true).token;
         let from = if next.kind == TokenKind::Ident
             && stream.slice(next.range.start, next.range.end)? == "from"
         {
             stream.next_parser_token();
-            let path = stream.peek_significant_skipping_comments::<true>().token;
+            let path = stream.peek_significant_skipping_comments(true).token;
             let path_start = path.range.start;
             let path_end = path.range.end;
             if !matches!(path.kind, TokenKind::QuotedString | TokenKind::Ident) {
@@ -2396,7 +2397,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 stream.slice(start + 2, end)?,
                 Range::new(start, end),
             ));
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning
                 .handle_warning(left_curly_warning(Range::new(
@@ -2477,7 +2478,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 });
         }
         if is_function {
-            let right_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+            let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
             if right_parenthesis.kind != TokenKind::RightParenthesis {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(right_parenthesis.range.start, right_parenthesis.range.end),
@@ -2497,7 +2498,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             mode_data.inside_mode_function -= 1;
             self.balanced.pop_without_moda_data();
         }
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_curly.range.start, left_curly.range.end),
@@ -2541,7 +2542,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 name: stream.slice(start, end)?,
                 range: Range::new(start, end),
             });
-        let left_curly = stream.peek_significant_skipping_comments::<true>().token;
+        let left_curly = stream.peek_significant_skipping_comments(true).token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_curly.range.start, left_curly.range.end),
@@ -2565,7 +2566,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         let start = name_token.range.start;
         let end = name_token.range.end;
         let ident = stream.slice(start, end)?;
-        if is_reserved_container_query_ident(ident) {
+        if is_reserved_container_query_ident(ident, name_token.flags) {
             return Some(());
         }
         if self.mode_data.as_ref().unwrap().is_current_local_mode() {
@@ -2656,7 +2657,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
 
         if is_function {
-            let right_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+            let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
             if right_parenthesis.kind != TokenKind::RightParenthesis {
                 self.handle_warning.handle_warning(Warning {
                     range: Range::new(
@@ -2684,7 +2685,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if name_token.kind == TokenKind::Function {
             return Some(());
         }
-        let left_parenthesis = stream.peek_significant_skipping_comments::<true>().token;
+        let left_parenthesis = stream.peek_significant_skipping_comments(true).token;
         if left_parenthesis.kind != TokenKind::LeftParenthesis {
             self.handle_warning.handle_warning(Warning {
                 range: Range::new(left_parenthesis.range.start, left_parenthesis.range.end),
@@ -2726,14 +2727,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         local_classes: SmallVec<[&'s str; 2]>,
         start: Pos,
     ) -> Option<()> {
-        let colon = stream.peek_significant_skipping_comments::<true>().token;
+        let colon = stream.peek_significant_skipping_comments(true).token;
         if colon.kind != TokenKind::Colon {
             return Some(());
         }
         stream.next_parser_token();
         let mut replacement_end = colon.range.end;
         loop {
-            let first = stream.peek_significant_skipping_comments::<true>().token;
+            let first = stream.peek_significant_skipping_comments(true).token;
             if first.kind == TokenKind::Eof {
                 break;
             }
@@ -2781,8 +2782,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         });
                         return Some(());
                     };
-                    let right_parenthesis =
-                        stream.peek_significant_skipping_comments::<true>().token;
+                    let right_parenthesis = stream.peek_significant_skipping_comments(true).token;
                     if right_parenthesis.kind != TokenKind::RightParenthesis {
                         self.handle_warning.handle_warning(Warning {
                             range: Range::new(
@@ -2803,7 +2803,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         Some("global"),
                         Range::new(global_start, item_end),
                     );
-                    delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                    delimiter = stream.peek_significant_skipping_comments(true).token;
                     continue;
                 }
 
@@ -2823,7 +2823,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 let ident = stream.slice(name_range.start, name_range.end)?;
                 if !names.is_empty() && ident.eq_ignore_ascii_case("from") {
                     stream.next_parser_token();
-                    let path = stream.peek_significant_skipping_comments::<true>().token;
+                    let path = stream.peek_significant_skipping_comments(true).token;
                     if matches!(
                         path.kind,
                         TokenKind::QuotedString | TokenKind::Ident | TokenKind::Function
@@ -2842,7 +2842,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         );
                         has_from = true;
                         stream.next_parser_token();
-                        delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                        delimiter = stream.peek_significant_skipping_comments(true).token;
                         break;
                     }
                     names.push(ident);
@@ -2853,7 +2853,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 names.push(ident);
                 item_end = name_range.end;
                 stream.next_parser_token();
-                delimiter = stream.peek_significant_skipping_comments::<true>().token;
+                delimiter = stream.peek_significant_skipping_comments(true).token;
             }
 
             if has_from {
@@ -3088,10 +3088,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        _flags: TokenFlags,
+        flags: TokenFlags,
     ) -> Option<()> {
         let name = stream.slice_trusted(start, end);
-        let kind = Self::classify_at_rule(name);
+        let kind = Self::classify_at_rule(name, flags);
         self.set_scan_context(stream, ScanContext::AtRule);
         if kind == AtRuleKind::Namespace {
             self.scope = Scope::AtNamespaceInvalid;
@@ -3337,24 +3337,33 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        _flags: TokenFlags,
+        flags: TokenFlags,
     ) -> Option<()> {
         let name = stream.slice_trusted(start, end);
-        let item = BalancedItem::new(name, start, end);
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let normalized_name = if flags.has_escape() {
+            decode_css_keyword(name, &mut normalized)
+        } else {
+            lowercase_ascii_keyword(name, &mut normalized)
+        };
+        let item = normalized_name.map_or_else(
+            || BalancedItem::new_other(start, end),
+            |name| BalancedItem::new_normalized(name, start, end),
+        );
         let at_import_top_level =
             matches!(self.scope, Scope::InAtImport(_)) && self.balanced.is_empty();
         self.balanced.push(item, self.mode_data.as_mut());
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            if at_import_top_level && name.eq_ignore_ascii_case("url(") {
+            if at_import_top_level && normalized_name == Some("url(") {
                 import_data.prelude.push(ImportPreludeNode::Url {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("layer(") {
+            } else if at_import_top_level && normalized_name == Some("layer(") {
                 import_data.prelude.push(ImportPreludeNode::Layer {
                     range: Range::new(start, end),
                 });
-            } else if at_import_top_level && name.eq_ignore_ascii_case("supports(") {
+            } else if at_import_top_level && normalized_name == Some("supports(") {
                 import_data.prelude.push(ImportPreludeNode::Supports {
                     range: Range::new(start, end),
                 });
@@ -3363,14 +3372,14 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 import_data.prelude.push(ImportPreludeNode::Other {
                     range: Range::new(start, end),
                 });
-            } else if name.eq_ignore_ascii_case("supports(") {
+            } else if normalized_name == Some("supports(") {
                 import_data.supports = ImportDataSupports::InSupports;
             }
         }
 
         if let Scope::InAtImport(ref mut import_data) = self.scope {
-            let layer_end = at_import_top_level && name.eq_ignore_ascii_case("layer(");
-            let supports_end = name.eq_ignore_ascii_case("supports(");
+            let layer_end = at_import_top_level && normalized_name == Some("layer(");
+            let supports_end = normalized_name == Some("supports(");
             if layer_end || supports_end {
                 let Some(close) = stream.fast_forward(TokenKind::RightParenthesis) else {
                     return Some(());
@@ -3401,7 +3410,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     range: Range::new(start, end - 1),
                 });
         }
-        if mode_data.is_current_local_mode() && name.eq_ignore_ascii_case("var(") {
+        if mode_data.is_current_local_mode() && normalized_name == Some("var(") {
             self.lex_local_var(stream)?;
         }
         Some(())
@@ -3484,7 +3493,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        _flags: TokenFlags,
+        flags: TokenFlags,
     ) -> Option<()> {
         match self.scope {
             Scope::InBlock => {
@@ -3496,7 +3505,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         .as_ref()
                         .is_some_and(ModeData::is_property_local_mode);
                     (self.property_kind, self.pending_grid_property) =
-                        Self::classify_property(ident, property_local_mode);
+                        Self::classify_property(ident, flags, property_local_mode);
                     self.pending_custom_property = (self.property_kind
                         == PropertyKind::CustomProperty)
                         .then_some(Range::new(start, end));
@@ -3544,7 +3553,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(animation) = &mut self.in_animation_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            animation.set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            animation.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
@@ -3552,8 +3565,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     if let Some(list_style) = &mut self.in_list_style_property {
                         // Not inside functions
                         if self.balanced.is_empty() {
-                            list_style
-                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            list_style.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
@@ -3563,15 +3579,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                         if self.balanced.is_empty()
                             || matches!(self.balanced.last(), Some(last) if matches!(last.kind, BalancedItemKind::PaletteMix))
                         {
-                            font_palette
-                                .set_rename(stream.slice(start, end)?, Range::new(start, end));
+                            font_palette.set_rename(
+                                stream.slice(start, end)?,
+                                flags,
+                                Range::new(start, end),
+                            );
                         }
                         return Some(());
                     }
 
                     if let Some(container) = &mut self.in_container_property {
                         if self.balanced.is_empty() {
-                            container.set_rename(ident, Range::new(start, end));
+                            container.set_rename(ident, flags, Range::new(start, end));
                             if let Some(range) = container.take_rename(self.balanced.len()) {
                                 self.dependency_context.push_dependency(
                                     Dependency::LocalContainerDecl {
@@ -3585,7 +3604,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     }
 
                     if self.in_grid_property.is_some() {
-                        if self.balanced.is_empty() && !is_reserved_grid_ident(ident) {
+                        if self.balanced.is_empty() && !is_reserved_grid_ident(ident, flags) {
                             self.dependency_context
                                 .push_dependency(Dependency::LocalGrid {
                                     name: ident,
@@ -3917,7 +3936,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        _flags: TokenFlags,
+        flags: TokenFlags,
     ) -> Option<()> {
         let name = stream.slice_trusted(start, end);
         if let Some(mode_data) = &mut self.mode_data {
@@ -3953,8 +3972,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                 mode_data.composes_local_classes.invalidate();
             }
         }
-        self.balanced
-            .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+        self.balanced.push(
+            BalancedItem::new(name, flags, start, end),
+            self.mode_data.as_mut(),
+        );
         Some(())
     }
 
@@ -3963,7 +3984,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         stream: &mut TokenStream<'_, 's>,
         start: Pos,
         end: Pos,
-        _flags: TokenFlags,
+        flags: TokenFlags,
     ) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
@@ -3998,8 +4019,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     });
                 }
             }
-            self.balanced
-                .push(BalancedItem::new(name, start, end), self.mode_data.as_mut());
+            self.balanced.push(
+                BalancedItem::new(name, flags, start, end),
+                self.mode_data.as_mut(),
+            );
             self.dependency_context
                 .push_dependency(Dependency::Replace {
                     content: "",

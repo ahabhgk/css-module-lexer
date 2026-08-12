@@ -1,3 +1,4 @@
+mod css_syntax;
 mod dependencies;
 mod dependency_types;
 mod lexer;

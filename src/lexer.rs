@@ -1,10 +1,16 @@
 use crate::Range;
+use crate::css_syntax::{
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment,
+    lowercase_ascii_keyword, strip_vendor_prefix,
+};
 use crate::dependencies::PropertyKind;
 use crate::dependencies::special_value_is_candidate;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::str;
+
+use bitflags::bitflags;
 
 const fn build_plain_ascii_name_byte_table() -> [bool; 256] {
     let mut table = [false; 256];
@@ -143,16 +149,18 @@ impl Token {
     }
 }
 
-/// Properties collected while scanning a token. They let dependency parsing
-/// skip escape/null checks for the overwhelmingly common plain-ASCII path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenFlags(u8);
+bitflags! {
+    /// Properties collected while scanning a token. They let dependency parsing
+    /// skip escape/null checks for the overwhelmingly common plain-ASCII path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TokenFlags: u8 {
+        const HAS_ESCAPE = 1 << 0;
+        const HAS_NULL = 1 << 1;
+        const IS_ASCII = 1 << 2;
+    }
+}
 
 impl TokenFlags {
-    pub const HAS_ESCAPE: Self = Self(1 << 0);
-    pub const HAS_NULL: Self = Self(1 << 1);
-    pub const IS_ASCII: Self = Self(1 << 2);
-
     #[inline]
     pub const fn ascii() -> Self {
         Self::IS_ASCII
@@ -160,37 +168,41 @@ impl TokenFlags {
 
     #[inline]
     pub const fn has_escape(self) -> bool {
-        self.0 & Self::HAS_ESCAPE.0 != 0
+        self.contains(Self::HAS_ESCAPE)
     }
 
     #[inline]
     pub const fn has_null(self) -> bool {
-        self.0 & Self::HAS_NULL.0 != 0
+        self.contains(Self::HAS_NULL)
     }
 
     #[inline]
     pub const fn is_ascii(self) -> bool {
-        self.0 & Self::IS_ASCII.0 != 0
+        self.contains(Self::IS_ASCII)
     }
 
     #[inline]
     fn mark_escape(&mut self) {
-        self.0 |= Self::HAS_ESCAPE.0;
+        self.insert(Self::HAS_ESCAPE);
     }
 
     #[inline]
     fn mark_null(&mut self) {
-        self.0 |= Self::HAS_NULL.0;
+        self.insert(Self::HAS_NULL);
     }
 
     #[inline]
     fn mark_non_ascii(&mut self) {
-        self.0 &= !Self::IS_ASCII.0;
+        self.remove(Self::IS_ASCII);
     }
 
     #[inline]
     fn merge(&mut self, other: Self) {
-        self.0 |= other.0;
+        let is_ascii = self.is_ascii() && other.is_ascii();
+        self.insert(other);
+        if !is_ascii {
+            self.mark_non_ascii();
+        }
     }
 }
 
@@ -254,10 +266,11 @@ impl<'s> Lexer<'s> {
     /// manufacturing tokens, and the scanner stops before dependency-bearing
     /// functions, ICSS symbols, selector-independent magic comments, or a
     /// declaration boundary.
-    fn fast_forward_generic_value<const STOP_AT_TOP_LEVEL_LEFT_CURLY: bool, F, C>(
+    fn fast_forward_generic_value<F, C>(
         &mut self,
         state: &mut GenericValueScanState,
         options: GenericValueScanOptions,
+        stop_at_top_level_left_curly: bool,
         mut is_candidate: F,
         mut is_comment_candidate: C,
         icss_symbols: Option<&FxHashSet<&str>>,
@@ -403,7 +416,7 @@ impl<'s> Lexer<'s> {
                     state.squares = state.squares.saturating_sub(1);
                     position += 1;
                 }
-                C_LEFT_CURLY if STOP_AT_TOP_LEVEL_LEFT_CURLY && !state.is_nested() => break,
+                C_LEFT_CURLY if stop_at_top_level_left_curly && !state.is_nested() => break,
                 C_LEFT_CURLY => {
                     if options.preserve_delimiters {
                         break;
@@ -472,6 +485,11 @@ impl<'s> Lexer<'s> {
             }
 
             if *square_depth > 0 {
+                if byte == C_REVERSE_SOLIDUS && self.is_valid_escape_at(position) {
+                    position = self.scan_escape(position);
+                    trivia_start = None;
+                    continue;
+                }
                 match byte {
                     C_QUOTATION_MARK | C_APOSTROPHE => {
                         position = self.scan_string(position, byte).1;
@@ -978,8 +996,8 @@ impl<'s> Lexer<'s> {
         let bytes = self.value;
         let mut end = start + 2;
         let mut flags = TokenFlags::ascii();
-        while end + 1 < bytes.len() {
-            if bytes[end] == C_ASTERISK && bytes[end + 1] == C_SOLIDUS {
+        while end < bytes.len() {
+            if bytes[end] == C_ASTERISK && bytes.get(end + 1) == Some(&C_SOLIDUS) {
                 return (TokenKind::Comment, end + 2, start + 2, end, flags);
             }
             if bytes[end] == 0 {
@@ -1055,8 +1073,15 @@ impl<'s> Lexer<'s> {
 
         let open_end = name_end + 1;
         let name = &self.value[start..name_end];
-        let is_url = name.eq_ignore_ascii_case(b"url")
-            || (name.contains(&C_REVERSE_SOLIDUS) && eq_css_ascii_case(name, b"url"));
+        // SAFETY: a scanned name starts and ends on UTF-8 boundaries.
+        let name = unsafe { str::from_utf8_unchecked(name) };
+        let mut normalized = [0; MAX_CSS_KEYWORD_LEN];
+        let normalized = if name_flags.has_escape() {
+            decode_css_keyword(name, &mut normalized)
+        } else {
+            lowercase_ascii_keyword(name, &mut normalized)
+        };
+        let is_url = normalized == Some("url");
         if is_url {
             let content_start = self.skip_white_space(open_end);
             if !matches!(
@@ -1186,6 +1211,25 @@ impl<'s> Lexer<'s> {
     }
 
     fn scan_numeric(&self, start: usize) -> (TokenKind, usize, usize, usize, TokenFlags) {
+        let end = self.scan_number_end(start);
+        if self.value.get(end) == Some(&C_PERCENTAGE) {
+            return (
+                TokenKind::Percentage,
+                end + 1,
+                start,
+                end + 1,
+                TokenFlags::ascii(),
+            );
+        }
+        if self.starts_ident_at(end) {
+            let (end, flags) = self.scan_name_with_flags(end);
+            return (TokenKind::Dimension, end, start, end, flags);
+        }
+        (TokenKind::Number, end, start, end, TokenFlags::ascii())
+    }
+
+    #[inline]
+    fn scan_number_end(&self, start: usize) -> usize {
         let mut end = start;
         if matches!(
             self.value.get(end),
@@ -1226,20 +1270,7 @@ impl<'s> Lexer<'s> {
                 end = exponent_start;
             }
         }
-        if self.value.get(end) == Some(&C_PERCENTAGE) {
-            return (
-                TokenKind::Percentage,
-                end + 1,
-                start,
-                end + 1,
-                TokenFlags::ascii(),
-            );
-        }
-        if self.starts_ident_at(end) {
-            let (end, flags) = self.scan_name_with_flags(end);
-            return (TokenKind::Dimension, end, start, end, flags);
-        }
-        (TokenKind::Number, end, start, end, TokenFlags::ascii())
+        end
     }
 
     #[inline]
@@ -1275,46 +1306,7 @@ impl<'s> Lexer<'s> {
 
     #[inline]
     fn scan_raw_numeric_end(&self, start: usize) -> Option<usize> {
-        let mut end = start;
-        if matches!(
-            self.value.get(end),
-            Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
-        ) {
-            end += 1;
-        }
-        while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-            end += 1;
-        }
-        if self.value.get(end) == Some(&C_FULL_STOP)
-            && self.value.get(end + 1).is_some_and(|byte| is_digit(*byte))
-        {
-            end += 1;
-            while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-                end += 1;
-            }
-        }
-        if matches!(self.value.get(end), Some(&C_LOWER_E) | Some(&C_UPPER_E)) {
-            let exponent_start = end;
-            let mut exponent_end = end + 1;
-            if matches!(
-                self.value.get(exponent_end),
-                Some(&C_PLUS_SIGN) | Some(&C_HYPHEN_MINUS)
-            ) {
-                exponent_end += 1;
-            }
-            if self
-                .value
-                .get(exponent_end)
-                .is_some_and(|byte| is_digit(*byte))
-            {
-                end = exponent_end + 1;
-                while self.value.get(end).is_some_and(|byte| is_digit(*byte)) {
-                    end += 1;
-                }
-            } else {
-                end = exponent_start;
-            }
-        }
+        let end = self.scan_number_end(start);
         if self.value.get(end) == Some(&C_PERCENTAGE) {
             return Some(end + 1);
         }
@@ -1333,16 +1325,16 @@ impl<'s> Lexer<'s> {
 
     #[inline]
     fn scan_name(&self, position: usize) -> usize {
-        self.scan_name_impl::<false>(position).0
+        self.scan_name_impl(position, false).0
     }
 
     #[inline]
     fn scan_name_with_flags(&self, position: usize) -> (usize, TokenFlags) {
-        self.scan_name_impl::<true>(position)
+        self.scan_name_impl(position, true)
     }
 
     #[inline]
-    fn scan_name_impl<const TRACK_FLAGS: bool>(&self, mut position: usize) -> (usize, TokenFlags) {
+    fn scan_name_impl(&self, mut position: usize, track_flags: bool) -> (usize, TokenFlags) {
         let bytes = self.value;
         let mut flags = TokenFlags::ascii();
         while position < bytes.len() {
@@ -1351,7 +1343,7 @@ impl<'s> Lexer<'s> {
                 if PLAIN_ASCII_NAME_BYTE[byte as usize] {
                     position += 1;
                 } else if byte == 0 {
-                    if TRACK_FLAGS {
+                    if track_flags {
                         flags.mark_null();
                     }
                     position += 1;
@@ -1366,7 +1358,7 @@ impl<'s> Lexer<'s> {
             let byte = bytes[position];
             if byte == C_REVERSE_SOLIDUS {
                 if self.is_valid_escape_at(position) {
-                    if TRACK_FLAGS {
+                    if track_flags {
                         flags.mark_escape();
                         if bytes.get(position + 1).is_some_and(|next| !next.is_ascii()) {
                             flags.mark_non_ascii();
@@ -1379,7 +1371,7 @@ impl<'s> Lexer<'s> {
             } else if byte.is_ascii() {
                 break;
             } else {
-                if TRACK_FLAGS {
+                if track_flags {
                     flags.mark_non_ascii();
                 }
                 position += self.utf8_width_at(position);
@@ -1534,123 +1526,18 @@ impl GenericValueScanState {
 
 #[inline]
 fn is_dependency_value_function(name: &str) -> bool {
-    name.eq_ignore_ascii_case("url")
-        || name.eq_ignore_ascii_case("var")
-        || name.eq_ignore_ascii_case("image-set")
-        || ["-webkit-", "-moz-", "-ms-", "-o-"]
-            .into_iter()
-            .any(|prefix| {
-                name.strip_prefix(prefix)
-                    .is_some_and(|name| name.eq_ignore_ascii_case("image-set"))
-            })
+    let mut lowercase = [0; MAX_CSS_KEYWORD_LEN];
+    let Some(name) = lowercase_ascii_keyword(name, &mut lowercase) else {
+        return name.starts_with("--");
+    };
+    matches!(name, "url" | "var" | "image-set")
+        || strip_vendor_prefix(name) == Some("image-set")
         || name.starts_with("--")
-}
-
-fn eq_css_ascii_case(input: &[u8], expected: &[u8]) -> bool {
-    let mut input_position = 0;
-    let mut expected_position = 0;
-    while input_position < input.len() {
-        let byte = if input[input_position] == C_REVERSE_SOLIDUS {
-            input_position += 1;
-            let Some(&first) = input.get(input_position) else {
-                return false;
-            };
-            if first.is_ascii_hexdigit() {
-                let mut value = 0u32;
-                let mut digits = 0;
-                while let Some(&digit) = input.get(input_position) {
-                    if digits == 6 || !digit.is_ascii_hexdigit() {
-                        break;
-                    }
-                    value = value * 16 + hex_digit_value(digit) as u32;
-                    input_position += 1;
-                    digits += 1;
-                }
-                if input
-                    .get(input_position)
-                    .is_some_and(|byte| is_white_space(*byte))
-                {
-                    input_position += 1;
-                    if input.get(input_position - 1) == Some(&C_CARRIAGE_RETURN)
-                        && input.get(input_position) == Some(&C_LINE_FEED)
-                    {
-                        input_position += 1;
-                    }
-                }
-                let Ok(byte) = u8::try_from(value) else {
-                    return false;
-                };
-                if byte == 0 {
-                    return false;
-                }
-                byte
-            } else {
-                if !first.is_ascii() || is_new_line(first) {
-                    return false;
-                }
-                input_position += 1;
-                first
-            }
-        } else {
-            let byte = input[input_position];
-            if !byte.is_ascii() || byte == 0 {
-                return false;
-            }
-            input_position += 1;
-            byte
-        };
-        let Some(expected_byte) = expected.get(expected_position) else {
-            return false;
-        };
-        if !byte.eq_ignore_ascii_case(expected_byte) {
-            return false;
-        }
-        expected_position += 1;
-    }
-    expected_position == expected.len()
-}
-
-fn hex_digit_value(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => unreachable!("hex digit checked by caller"),
-    }
 }
 
 #[inline(always)]
 fn never_fast_forward_candidate(_: &str) -> bool {
     false
-}
-
-fn is_css_modules_pure_magic_comment(input: &str) -> bool {
-    let input = trim_slice(input);
-    let Some(keyword) = input.strip_prefix("cssmodules-pure-") else {
-        return false;
-    };
-    ["ignore", "no-check"].into_iter().any(|expected| {
-        keyword.strip_prefix(expected).is_some_and(|rest| {
-            rest.is_empty()
-                || rest
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| is_white_space(*byte))
-        })
-    })
-}
-
-fn trim_slice(input: &str) -> &str {
-    let bytes = input.as_bytes();
-    let mut start = 0usize;
-    let mut end = bytes.len();
-    while start < end && is_white_space(bytes[start]) {
-        start += 1;
-    }
-    while end > start && is_white_space(bytes[end - 1]) {
-        end -= 1;
-    }
-    &input[start..end]
 }
 
 impl<'a, 's> TokenStream<'a, 's> {
@@ -1666,11 +1553,11 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline(always)]
-    pub(crate) fn next<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+    pub(crate) fn next(&mut self, keep_comments: bool) -> TokenWithTrivia {
         let token = if let Some(token) = self.buffered.pop_front() {
             token
         } else {
-            self.read_significant::<KEEP_COMMENTS>()
+            self.read_significant(keep_comments)
         };
         debug_assert!(
             token.token.range.start >= self.consumed,
@@ -1700,7 +1587,7 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// ownership for all subgrammars.
     #[inline]
     pub(crate) fn next_parser_token(&mut self) -> TokenWithTrivia {
-        let mut item = self.next::<true>();
+        let mut item = self.next(true);
         if item.token.kind != TokenKind::Comment {
             return item;
         }
@@ -1712,7 +1599,7 @@ impl<'a, 's> TokenStream<'a, 's> {
             .or(Some(item.token.range.start));
         let mut has_white_space = item.leading.has_white_space;
         loop {
-            item = self.next::<true>();
+            item = self.next(true);
             has_white_space |= item.leading.has_white_space;
             if item.token.kind == TokenKind::Comment {
                 continue;
@@ -1729,9 +1616,9 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn peek<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+    pub(crate) fn peek(&mut self, keep_comments: bool) -> TokenWithTrivia {
         if self.buffered.is_empty() {
-            let item = self.read_significant::<KEEP_COMMENTS>();
+            let item = self.read_significant(keep_comments);
             self.buffered.push_back(item);
         }
         *self.buffered.front().unwrap()
@@ -1742,14 +1629,14 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// unchanged: `next` later returns the same tokens in the same order.
     #[inline]
     pub(crate) fn peek_parser_token(&mut self) -> TokenWithTrivia {
-        self.peek::<true>();
+        self.peek(true);
         let mut leading_start = None;
         let mut first_comment_start = None;
         let mut has_white_space = false;
         let mut index = 0usize;
         loop {
             if index == self.buffered.len() {
-                let item = self.read_significant::<true>();
+                let item = self.read_significant(true);
                 self.buffered.push_back(item);
             }
             let item = self.buffered[index];
@@ -1776,17 +1663,18 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// Peek at the next significant token, leaving any skipped comments in
     /// the buffer for `next` to consume in source order.
     #[inline]
-    pub(crate) fn peek_significant_skipping_comments<const KEEP_COMMENTS: bool>(
+    pub(crate) fn peek_significant_skipping_comments(
         &mut self,
+        keep_comments: bool,
     ) -> TokenWithTrivia {
-        self.peek::<KEEP_COMMENTS>();
+        self.peek(keep_comments);
         for item in &self.buffered {
             if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
                 return *item;
             }
         }
         loop {
-            let item = self.read_significant::<KEEP_COMMENTS>();
+            let item = self.read_significant(keep_comments);
             self.buffered.push_back(item);
             if !matches!(item.token.kind, TokenKind::Comment | TokenKind::BadComment) {
                 return item;
@@ -1811,7 +1699,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value(
             &mut self.generic_value_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1819,6 +1707,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 preserve_delimiters,
                 property: None,
             },
+            false,
             &mut is_candidate,
             &mut is_comment_candidate,
             None,
@@ -1835,7 +1724,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value(
             &mut self.generic_value_state,
             GenericValueScanOptions {
                 keep_comments: false,
@@ -1843,6 +1732,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 preserve_delimiters,
                 property: None,
             },
+            false,
             never_fast_forward_candidate,
             never_fast_forward_candidate,
             None,
@@ -1865,7 +1755,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        let candidate = self.lexer.fast_forward_generic_value::<true, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value(
             &mut self.at_rule_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1873,6 +1763,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 preserve_delimiters,
                 property: None,
             },
+            true,
             &mut is_candidate,
             &mut is_comment_candidate,
             None,
@@ -1897,7 +1788,7 @@ impl<'a, 's> TokenStream<'a, 's> {
         if !self.buffered.is_empty() {
             return;
         }
-        let candidate = self.lexer.fast_forward_generic_value::<false, _, _>(
+        let candidate = self.lexer.fast_forward_generic_value(
             &mut self.special_value_state,
             GenericValueScanOptions {
                 keep_comments,
@@ -1905,6 +1796,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 preserve_delimiters,
                 property: Some(property),
             },
+            false,
             never_fast_forward_candidate,
             is_css_modules_pure_magic_comment,
             icss_symbols,
@@ -2056,7 +1948,7 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline(always)]
-    fn read_significant<const KEEP_COMMENTS: bool>(&mut self) -> TokenWithTrivia {
+    fn read_significant(&mut self, keep_comments: bool) -> TokenWithTrivia {
         let start = self.lexer.scan_pos();
         let mut end = start;
         let mut first_comment_start = None;
@@ -2069,7 +1961,7 @@ impl<'a, 's> TokenStream<'a, 's> {
                 end = token.range.end;
                 continue;
             }
-            if !KEEP_COMMENTS && matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
+            if !keep_comments && matches!(token.kind, TokenKind::Comment | TokenKind::BadComment) {
                 first_comment_start.get_or_insert(token.range.start);
                 end = token.range.end;
                 continue;
