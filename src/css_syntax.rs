@@ -50,6 +50,60 @@ pub(crate) fn is_css_modules_pure_magic_comment(input: &str) -> bool {
     })
 }
 
+/// Whether a CSS identifier starts with two logical hyphens.
+///
+/// The common literal spelling exits immediately. Escaped prefixes are decoded
+/// only far enough to inspect the first two code points, without allocating.
+pub(crate) fn is_dashed_ident(input: &str) -> bool {
+    if input.starts_with("--") {
+        return true;
+    }
+    let bytes = input.as_bytes();
+    let Some((first, position)) = next_css_code_point(bytes, 0) else {
+        return false;
+    };
+    first == b'-' as u32
+        && next_css_code_point(bytes, position).is_some_and(|(second, _)| second == b'-' as u32)
+}
+
+fn next_css_code_point(input: &[u8], position: usize) -> Option<(u32, usize)> {
+    let &first = input.get(position)?;
+    if first != b'\\' {
+        return Some((first as u32, position + 1));
+    }
+
+    let mut position = position + 1;
+    let &first = input.get(position)?;
+    if !first.is_ascii_hexdigit() {
+        if matches!(first, b'\n' | b'\r' | 0x0C) {
+            return None;
+        }
+        return Some((first as u32, position + 1));
+    }
+
+    let mut value = 0u32;
+    let mut digits = 0;
+    while let Some(&digit) = input.get(position) {
+        if digits == 6 || !digit.is_ascii_hexdigit() {
+            break;
+        }
+        value = value * 16 + hex_digit_value(digit) as u32;
+        position += 1;
+        digits += 1;
+    }
+    if input
+        .get(position)
+        .is_some_and(|byte| is_css_space_byte(*byte))
+    {
+        let whitespace = input[position];
+        position += 1;
+        if whitespace == b'\r' && input.get(position) == Some(&b'\n') {
+            position += 1;
+        }
+    }
+    Some((value, position))
+}
+
 /// Lowercase a keyword that does not contain CSS escapes.
 pub(crate) fn lowercase_ascii_keyword<'a>(
     input: &str,

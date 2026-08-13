@@ -1,6 +1,6 @@
 use crate::Range;
 use crate::css_syntax::{
-    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment,
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment, is_dashed_ident,
     lowercase_ascii_keyword, strip_vendor_prefix,
 };
 use crate::dependencies::PropertyKind;
@@ -233,6 +233,8 @@ pub struct TokenWithTrivia {
 pub struct Lexer<'s> {
     value: &'s [u8],
     scan_pos: Pos,
+    collect_dashed_idents: bool,
+    dashed_ident_occurrences: Vec<Range>,
 }
 
 impl<'s> Lexer<'s> {
@@ -241,6 +243,39 @@ impl<'s> Lexer<'s> {
         Self {
             value: value.as_bytes(),
             scan_pos: 0,
+            collect_dashed_idents: false,
+            dashed_ident_occurrences: Vec::new(),
+        }
+    }
+
+    pub(crate) fn set_collect_dashed_idents(&mut self, enabled: bool) {
+        self.collect_dashed_idents = enabled;
+    }
+
+    pub(crate) fn reserve_dashed_ident_occurrences(&mut self, additional: usize) {
+        self.dashed_ident_occurrences.reserve(additional);
+    }
+
+    pub(crate) fn take_dashed_ident_occurrences(&mut self) -> Vec<Range> {
+        std::mem::take(&mut self.dashed_ident_occurrences)
+    }
+
+    pub(crate) fn discard_last_dashed_ident(&mut self, range: Range) {
+        if self.dashed_ident_occurrences.last() == Some(&range) {
+            self.dashed_ident_occurrences.pop();
+        }
+    }
+
+    #[inline]
+    fn record_dashed_ident(&mut self, kind: TokenKind, range: Range) {
+        if !self.collect_dashed_idents || !matches!(kind, TokenKind::Ident | TokenKind::Function) {
+            return;
+        }
+        let value = &self.value[range.start as usize..range.end as usize];
+        // SAFETY: token value ranges always lie on UTF-8 boundaries.
+        let value = unsafe { str::from_utf8_unchecked(value) };
+        if is_dashed_ident(value) {
+            self.dashed_ident_occurrences.push(range);
         }
     }
 
@@ -328,6 +363,7 @@ impl<'s> Lexer<'s> {
                 let flags = TokenFlags::ascii();
                 let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
                 let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
+                let is_dashed = self.collect_dashed_idents && is_dashed_ident(name);
                 let is_candidate = !flags.has_escape()
                     && (is_candidate(name)
                         || options.property.is_some_and(|property| {
@@ -347,6 +383,10 @@ impl<'s> Lexer<'s> {
                         position = end;
                     }
                     break;
+                }
+                if is_dashed {
+                    self.dashed_ident_occurrences
+                        .push(Range::new(position as Pos, end as Pos));
                 }
                 if is_function {
                     state.parentheses += 1;
@@ -524,6 +564,15 @@ impl<'s> Lexer<'s> {
                 // to the regular tokenizer so it can emit `Function`.
                 if self.value.get(end) == Some(&C_LEFT_PARENTHESIS) {
                     break;
+                }
+                if self.collect_dashed_idents {
+                    let name = &self.value[position..end];
+                    // SAFETY: scanned names start and end on UTF-8 boundaries.
+                    let name = unsafe { str::from_utf8_unchecked(name) };
+                    if is_dashed_ident(name) {
+                        self.dashed_ident_occurrences
+                            .push(Range::new(position as Pos, end as Pos));
+                    }
                 }
                 invalidates_composes = true;
                 trivia_start = None;
@@ -974,12 +1023,14 @@ impl<'s> Lexer<'s> {
             "scan_pos moved backward from {start} to {}",
             self.scan_pos
         );
-        Token::with_flags(
+        let token = Token::with_flags(
             kind,
             Range::new(start as Pos, end as Pos),
             Range::new(value_start as Pos, value_end as Pos),
             flags,
-        )
+        );
+        self.record_dashed_ident(token.kind, token.value_range);
+        token
     }
 
     #[inline]

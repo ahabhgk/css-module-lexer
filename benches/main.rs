@@ -1,5 +1,8 @@
 use codspeed_criterion_compat::*;
-use css_module_lexer::{Lexer, Mode, TokenKind, collect_dependencies, lex_dependencies};
+use css_module_lexer::{
+    CollectOptions, Lexer, Mode, TokenKind, collect_dependencies,
+    collect_dependencies_with_options, lex_dependencies,
+};
 
 const BOOTSTRAP: &str = include_str!("../fixtures/bootstrap.min.css");
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");
@@ -20,6 +23,16 @@ const COMMENT_SEPARATED_MODE: &str = r#"
 "#;
 const ESCAPE_HEAVY_IDENTIFIER: &str = r#"
     .a\31 23\20name, #\66 00d { --custom\2d property: url(https:\2f\2fexample.com\2fimage.png); }
+"#;
+const DASHED_IDENT_HEAVY: &str = r#"
+    .theme {
+        --foreground: #111;
+        --background: #fff;
+        color: var(--foreground);
+        background: var(--background);
+        border-color: --foreground;
+        filter: --theme-filter(contrast(1.1));
+    }
 "#;
 const RUN_MICRO_BENCHES: &str = "CSS_MODULE_LEXER_RUN_MICRO_BENCHES";
 
@@ -62,6 +75,24 @@ fn benchmark(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    let dashed_ident_heavy = DASHED_IDENT_HEAVY.repeat(512);
+    let mut dashed_idents = c.benchmark_group("dashed_idents");
+    dashed_idents.bench_function("disabled", |b| {
+        b.iter(|| collect_dependencies(black_box(&dashed_ident_heavy), Mode::Local))
+    });
+    dashed_idents.bench_function("enabled", |b| {
+        b.iter(|| {
+            collect_dependencies_with_options(
+                black_box(&dashed_ident_heavy),
+                Mode::Local,
+                CollectOptions {
+                    collect_dashed_idents: true,
+                },
+            )
+        })
+    });
+    dashed_idents.finish();
 
     if !micro_benchmarks_enabled() {
         return;

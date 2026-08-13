@@ -12,8 +12,8 @@ use crate::css_syntax::{
     lowercase_ascii_keyword, strip_vendor_prefix, trim_css_whitespace,
 };
 use crate::dependency_types::{
-    Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
-    WarningKind,
+    CollectOptions, Dependency, DependencyContext, Mode, Range, UrlRangeKind,
+    ValueAtRuleImportItem, Warning, WarningKind,
 };
 use crate::lexer::Token;
 use crate::lexer::TokenFlags;
@@ -1308,18 +1308,24 @@ pub struct LexDependencies<'s, W> {
     icss_symbol_max_len: usize,
     pending_custom_property: Option<Range>,
     pending_grid_property: Option<GridPropertyKind>,
+    collect_options: CollectOptions,
     handle_warning: W,
 }
 
 impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     pub fn new(handle_warning: W, mode: Mode) -> Self {
-        Self::with_context(DependencyContext::new(), handle_warning, mode)
+        Self::new_with_options(handle_warning, mode, CollectOptions::default())
+    }
+
+    pub fn new_with_options(handle_warning: W, mode: Mode, options: CollectOptions) -> Self {
+        Self::with_context(DependencyContext::new(), handle_warning, mode, options)
     }
 
     pub(crate) fn with_context(
         dependency_context: DependencyContext<'s>,
         handle_warning: W,
         mode: Mode,
+        options: CollectOptions,
     ) -> Self {
         Self {
             dependency_context,
@@ -1348,6 +1354,9 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             icss_symbol_max_len: 0,
             pending_custom_property: None,
             pending_grid_property: None,
+            collect_options: CollectOptions {
+                collect_dashed_idents: options.collect_dashed_idents && mode != Mode::Css,
+            },
             handle_warning,
         }
     }
@@ -1381,12 +1390,36 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             .mode_data
             .as_ref()
             .map_or(Mode::Css, ModeData::default_mode);
+        source.reserve_dashed_ident_occurrences(
+            DependencyContext::estimated_dashed_ident_capacity(
+                source.source_end() as usize,
+                mode,
+                self.collect_options,
+            ),
+        );
+        self.dependency_context.reserve_estimated_capacity(
+            source.source_end() as usize,
+            mode,
+            self.collect_options,
+        );
+        {
+            let mut stream = TokenStream::from_lexer(source);
+            let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
+            let has_mode = self.mode_data.is_some();
+            self.lex_streaming_inner(&mut stream, keep_comments, has_mode);
+        }
         self.dependency_context
-            .reserve_estimated_capacity(source.source_end() as usize, mode);
-        let mut stream = TokenStream::from_lexer(source);
-        let keep_comments = self.mode_data.as_ref().is_some_and(ModeData::is_pure_mode);
-        let has_mode = self.mode_data.is_some();
-        self.lex_streaming_inner(&mut stream, keep_comments, has_mode);
+            .set_dashed_ident_occurrences(source.take_dashed_ident_occurrences());
+    }
+
+    #[inline]
+    fn update_dashed_ident_collection(&self, stream: &mut TokenStream<'_, 's>) {
+        let enabled = self.collect_options.collect_dashed_idents
+            && self
+                .mode_data
+                .as_ref()
+                .is_some_and(ModeData::is_current_local_mode);
+        stream.lexer_mut().set_collect_dashed_idents(enabled);
     }
 
     #[inline(always)]
@@ -1397,6 +1430,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         has_mode: bool,
     ) {
         loop {
+            self.update_dashed_ident_collection(stream);
             let item = stream.next(keep_comments);
             let token = item.token;
             if token.kind == TokenKind::Eof {
@@ -1642,6 +1676,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
                     _ => {}
                 }
             }
+            self.update_dashed_ident_collection(stream);
             match self.scan_context {
                 ScanContext::Selector if self.selector_fast_forward_enabled => {
                     self.fast_forward_selector(stream, keep_comments, has_mode);
@@ -2363,6 +2398,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         } else {
             None
         };
+        if from.is_some_and(|from| from.trim_matches(['\'', '"']) == "global") {
+            stream
+                .lexer_mut()
+                .discard_last_dashed_ident(Range::new(start, end));
+        }
         self.dependency_context
             .push_dependency(Dependency::LocalVar {
                 name: stream.slice(start + 2, end)?,
