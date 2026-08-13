@@ -13,7 +13,7 @@ fn streaming_tokenizer_consumes_one_to_six_hex_escape_digits() {
         r"\12345 ",
         r"\123456 ",
     ] {
-        let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+        let mut lexer = Lexer::new(input, ());
         let token = lexer.next_token();
         assert_eq!(token.kind, TokenKind::Ident);
         assert_eq!(token_text(input, token), input);
@@ -24,7 +24,7 @@ fn streaming_tokenizer_consumes_one_to_six_hex_escape_digits() {
 #[test]
 fn streaming_tokenizer_keeps_consecutive_comments_distinct() {
     let input = "/** first **//** second **/ \tfoo";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let first = lexer.next_token();
     let second = lexer.next_token();
     let whitespace = lexer.next_token();
@@ -36,7 +36,7 @@ fn streaming_tokenizer_keeps_consecutive_comments_distinct() {
     assert_eq!(whitespace.kind, TokenKind::WhiteSpace);
     assert_eq!(ident.kind, TokenKind::Ident);
 
-    let mut stream_lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut stream_lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut stream_lexer);
     let significant = stream.next_parser_token();
     assert_eq!(significant.token.kind, TokenKind::Ident);
@@ -47,15 +47,15 @@ fn streaming_tokenizer_keeps_consecutive_comments_distinct() {
 
 #[test]
 fn streaming_tokenizer_reports_eof_tokens_after_unterminated_inputs() {
-    let mut ident = Lexer::new("ident", DashedIdentCollector::default());
+    let mut ident = Lexer::new("ident", ());
     assert_eq!(ident.next_token().kind, TokenKind::Ident);
     assert_eq!(ident.next_token().kind, TokenKind::Eof);
 
-    let mut string = Lexer::new("'unterminated", DashedIdentCollector::default());
+    let mut string = Lexer::new("'unterminated", ());
     assert_eq!(string.next_token().kind, TokenKind::BadString);
     assert_eq!(string.next_token().kind, TokenKind::Eof);
 
-    let mut comment = Lexer::new("/* unterminated", DashedIdentCollector::default());
+    let mut comment = Lexer::new("/* unterminated", ());
     assert_eq!(comment.next_token().kind, TokenKind::BadComment);
     assert_eq!(comment.next_token().kind, TokenKind::Eof);
 }
@@ -63,7 +63,7 @@ fn streaming_tokenizer_reports_eof_tokens_after_unterminated_inputs() {
 #[test]
 fn streaming_tokenizer_does_not_treat_string_comments_as_trivia() {
     let input = r#""/* not a comment */""#;
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let token = lexer.next_token();
     assert_eq!(token.kind, TokenKind::QuotedString);
     assert_eq!(token_text(input, token), input);
@@ -73,7 +73,7 @@ fn streaming_tokenizer_does_not_treat_string_comments_as_trivia() {
 #[test]
 fn streaming_tokenizer_scans_escaped_url_content_as_one_token() {
     let input = r"url(https:\2f\2fexample.com\2fimage.png)";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let token = lexer.next_token();
     assert_eq!(token.kind, TokenKind::Url);
     assert_eq!(token_text(input, token), input);
@@ -86,36 +86,36 @@ fn streaming_tokenizer_scans_escaped_url_content_as_one_token() {
 
 #[test]
 fn streaming_tokenizer_marks_token_flags() {
-    let mut plain = Lexer::new("plain", DashedIdentCollector::default());
+    let mut plain = Lexer::new("plain", ());
     let plain = plain.next_token();
     assert!(plain.flags.is_ascii());
     assert!(!plain.flags.has_escape());
     assert!(!plain.flags.has_null());
 
-    let mut escaped = Lexer::new(r"a\2db", DashedIdentCollector::default());
+    let mut escaped = Lexer::new(r"a\2db", ());
     let escaped = escaped.next_token();
     assert!(escaped.flags.is_ascii());
     assert!(escaped.flags.has_escape());
     assert!(!escaped.flags.has_null());
 
-    let mut nul = Lexer::new("a\0b", DashedIdentCollector::default());
+    let mut nul = Lexer::new("a\0b", ());
     let nul = nul.next_token();
     assert!(nul.flags.is_ascii());
     assert!(!nul.flags.has_escape());
     assert!(nul.flags.has_null());
 
-    let mut unicode = Lexer::new("café", DashedIdentCollector::default());
+    let mut unicode = Lexer::new("café", ());
     let unicode = unicode.next_token();
     assert!(!unicode.flags.is_ascii());
     assert!(!unicode.flags.has_escape());
     assert!(!unicode.flags.has_null());
 
-    let mut unicode_url = Lexer::new("url(café)", DashedIdentCollector::default());
+    let mut unicode_url = Lexer::new("url(café)", ());
     let unicode_url = unicode_url.next_token();
     assert_eq!(unicode_url.kind, TokenKind::Url);
     assert!(!unicode_url.flags.is_ascii());
 
-    let mut unterminated_comment = Lexer::new("/*\0", DashedIdentCollector::default());
+    let mut unterminated_comment = Lexer::new("/*\0", ());
     let unterminated_comment = unterminated_comment.next_token();
     assert_eq!(unterminated_comment.kind, TokenKind::BadComment);
     assert!(unterminated_comment.flags.has_null());
@@ -124,12 +124,12 @@ fn streaming_tokenizer_marks_token_flags() {
 #[test]
 fn streaming_tokenizer_handles_escaped_url_names_and_string_continuations() {
     let input = r"u\72l(foo)";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     assert_eq!(lexer.next_token().kind, TokenKind::Url);
     assert_eq!(lexer.next_token().kind, TokenKind::Eof);
 
     let input: String = ['"', 'a', '\\', '\n', 'b', '"'].into_iter().collect();
-    let mut lexer = Lexer::new(&input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(&input, ());
     let token = lexer.next_token();
     assert_eq!(token.kind, TokenKind::QuotedString);
     assert_eq!(token_text(&input, token), input);
@@ -138,7 +138,7 @@ fn streaming_tokenizer_handles_escaped_url_names_and_string_continuations() {
 #[test]
 fn token_stream_preserves_nested_value_at_rule_punctuation() {
     let input = "@value (foo:bar, func(a,b; c)) from \"theme.css\";";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     let mut kinds = Vec::new();
     loop {
@@ -176,7 +176,7 @@ fn token_stream_preserves_nested_value_at_rule_punctuation() {
 #[test]
 fn token_stream_folds_trivia_and_preserves_pure_comments() {
     let input = " \t/** first **/foo";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     let item = stream.next(false);
     assert_eq!(item.token.kind, TokenKind::Ident);
@@ -184,7 +184,7 @@ fn token_stream_folds_trivia_and_preserves_pure_comments() {
     assert_eq!(item.leading.first_comment_start, Some(2));
 
     let input = "/** magic **/ foo";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     assert_eq!(stream.next(true).token.kind, TokenKind::Comment);
     let item = stream.next(true);
@@ -194,7 +194,7 @@ fn token_stream_folds_trivia_and_preserves_pure_comments() {
 
 #[test]
 fn token_stream_peeks_past_comments_without_rescanning() {
-    let mut lexer = Lexer::new("local/**/.foo", DashedIdentCollector::default());
+    let mut lexer = Lexer::new("local/**/.foo", ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
     let next = stream.peek_significant_skipping_comments(true);
@@ -228,7 +228,7 @@ fn token_stream_cursors_are_monotonic_and_cover_the_input() {
         ".a { background: url(\"./a.png\"); }",
         ".a { color: rgb(1, 2, 3); }",
     ] {
-        let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+        let mut lexer = Lexer::new(input, ());
         let mut stream = TokenStream::from_lexer(&mut lexer);
         let mut previous_scan = 0;
         let mut previous_consumed = 0;
@@ -272,7 +272,7 @@ fn token_stream_cursors_are_monotonic_and_cover_the_input() {
 
 #[test]
 fn token_stream_single_peek_does_not_rescan() {
-    let mut lexer = Lexer::new("color:red;", DashedIdentCollector::default());
+    let mut lexer = Lexer::new("color:red;", ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
     assert_eq!(stream.next(true).token.kind, TokenKind::Colon);
@@ -292,7 +292,7 @@ fn token_stream_single_peek_does_not_rescan() {
 fn token_stream_comment_separated_mode_stays_buffered_in_source_order() {
     // `:local/**/.foo` keeps the comment and `.foo` in the buffer so the
     // dependency scanner consumes them exactly once in source order.
-    let mut lexer = Lexer::new(":local/**/.foo", DashedIdentCollector::default());
+    let mut lexer = Lexer::new(":local/**/.foo", ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     assert_eq!(stream.next(true).token.kind, TokenKind::Colon);
     assert_eq!(stream.next(true).token.kind, TokenKind::Ident);
@@ -313,7 +313,7 @@ fn token_stream_comment_separated_mode_stays_buffered_in_source_order() {
 #[test]
 fn generic_value_fast_forward_keeps_raw_depth_across_candidates() {
     let input = "calc(1px + imported) url(a.png);";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
 
     stream.fast_forward_generic_value_if_buffer_empty(
@@ -339,7 +339,7 @@ fn generic_value_fast_forward_keeps_raw_depth_across_candidates() {
 #[test]
 fn generic_value_fast_forward_buffers_plain_ascii_candidate_once() {
     let input = "red imported blue;";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
 
     assert_eq!(stream.consumed_pos(), stream.lexer().scan_pos());
@@ -363,7 +363,7 @@ fn generic_value_fast_forward_buffers_plain_ascii_candidate_once() {
 #[test]
 fn fast_forward_skips_plain_nesting() {
     let input = "foo(bar())";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     let open = stream.next(false).token;
     assert_eq!(open.kind, TokenKind::Function);
@@ -380,7 +380,7 @@ fn fast_forward_skips_plain_nesting() {
 #[test]
 fn fast_forward_skips_mixed_brackets() {
     let input = "foo([a{b}])";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     let open = stream.next(false).token;
     assert_eq!(open.kind, TokenKind::Function);
@@ -394,7 +394,7 @@ fn fast_forward_skips_mixed_brackets() {
 #[test]
 fn fast_forward_ignores_brackets_inside_strings_and_comments() {
     let input = "foo(\")\" /* ) */ )";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(
@@ -407,7 +407,7 @@ fn fast_forward_ignores_brackets_inside_strings_and_comments() {
 #[test]
 fn fast_forward_skips_escaped_closing_bracket() {
     let input = r"foo(a\)b)";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(
@@ -420,7 +420,7 @@ fn fast_forward_skips_escaped_closing_bracket() {
 #[test]
 fn fast_forward_returns_none_on_unclosed_function() {
     let input = "foo(bar";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
@@ -432,7 +432,7 @@ fn fast_forward_returns_none_on_unclosed_function() {
 #[test]
 fn fast_forward_returns_none_on_unbalanced_closing_bracket() {
     let input = "foo(]";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);
@@ -443,7 +443,7 @@ fn fast_forward_returns_none_on_unbalanced_closing_bracket() {
 #[test]
 fn fast_forward_tracks_next_token_range() {
     let input = "foo(bar) baz";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(
@@ -458,7 +458,7 @@ fn fast_forward_tracks_next_token_range() {
 #[test]
 fn fast_forward_skips_non_ascii_boundaries() {
     let input = "foo(中)文)";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(
@@ -474,7 +474,7 @@ fn fast_forward_skips_non_ascii_boundaries() {
 #[test]
 fn fast_forward_stops_at_top_level_semicolon() {
     let input = "supports(display: flex; display: grid)";
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut stream = TokenStream::from_lexer(&mut lexer);
     stream.next(false);
     assert_eq!(stream.fast_forward(TokenKind::RightParenthesis), None);

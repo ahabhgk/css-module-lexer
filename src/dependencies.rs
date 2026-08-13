@@ -3,23 +3,63 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use crate::DashedIdentCollector;
 use crate::HandleWarning;
 use crate::Lexer;
 use crate::Pos;
 use crate::css_syntax::{
     MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_magic_comment,
-    is_css_modules_pure_magic_comment, is_css_space_byte, is_css_white_space_char,
+    is_css_modules_pure_magic_comment, is_css_space_byte, is_css_white_space_char, is_dashed_ident,
     lowercase_ascii_keyword, strip_vendor_prefix, trim_css_whitespace,
 };
 use crate::dependency_types::{
     Dependency, DependencyContext, Mode, Range, UrlRangeKind, ValueAtRuleImportItem, Warning,
     WarningKind,
 };
+use crate::lexer::LexerVisitor;
 use crate::lexer::Token;
 use crate::lexer::TokenFlags;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenStream;
+
+/// Collects dashed identifiers while the dependency parser is in local mode.
+#[derive(Debug, Default)]
+pub struct DashedIdentCollector {
+    occurrences: Vec<Range>,
+    enabled: bool,
+}
+
+impl DashedIdentCollector {
+    #[inline(always)]
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.occurrences.reserve(additional);
+    }
+
+    fn take(&mut self) -> Vec<Range> {
+        std::mem::take(&mut self.occurrences)
+    }
+
+    fn discard_last(&mut self, range: Range) {
+        if self.occurrences.last() == Some(&range) {
+            self.occurrences.pop();
+        }
+    }
+}
+
+impl LexerVisitor for DashedIdentCollector {
+    #[inline(always)]
+    fn visit_ident(&mut self, name: &str, range: Range) {
+        if self.enabled && is_dashed_ident(name) {
+            self.occurrences.push(range);
+        }
+    }
+}
+
+type DependencyLexer<'s> = Lexer<'s, DashedIdentCollector>;
+type DependencyTokenStream<'a, 's> = TokenStream<'a, 's, DashedIdentCollector>;
 
 #[derive(Debug)]
 enum Scope<'s> {
@@ -642,7 +682,7 @@ impl<'s> ValueAtRuleStream<'s> {
     /// commas, mirroring the legacy aligned-token behavior.
     fn parse_paren_items(&mut self, context: &mut DependencyContext<'s>, start: Pos, end: Pos) {
         let slice = &self.input[start as usize..end as usize];
-        let mut lexer = Lexer::new(slice, DashedIdentCollector::default());
+        let mut lexer = Lexer::new(slice, ());
         let mut tokens: SmallVec<[Token; 8]> = SmallVec::new();
         loop {
             let token = lexer.next_token();
@@ -859,7 +899,10 @@ struct ComposesLocalClasses<'s> {
 }
 
 impl<'s> ComposesLocalClasses<'s> {
-    pub fn get_valid_local_classes(&mut self, lexer: &Lexer<'s>) -> Option<SmallVec<[&'s str; 2]>> {
+    pub fn get_valid_local_classes(
+        &mut self,
+        lexer: &DependencyLexer<'s>,
+    ) -> Option<SmallVec<[&'s str; 2]>> {
         if let SingleLocalClass::Single(range) = &self.is_single {
             let mut local_classes = self.local_classes.clone();
             local_classes.push(lexer.slice(range.start, range.end)?);
@@ -900,7 +943,7 @@ impl<'s> ComposesLocalClasses<'s> {
         self.local_classes.clear();
     }
 
-    pub fn find_comma(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+    pub fn find_comma(&mut self, lexer: &DependencyLexer<'s>) -> Option<()> {
         if let SingleLocalClass::Single(range) = &self.is_single {
             self.local_classes
                 .push(lexer.slice(range.start, range.end)?);
@@ -1362,7 +1405,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn set_scan_context(&mut self, stream: &mut TokenStream<'_, 's>, scan_context: ScanContext) {
+    fn set_scan_context(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        scan_context: ScanContext,
+    ) {
         if self.scan_context == scan_context {
             return;
         }
@@ -1376,15 +1423,18 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     /// Drive dependency extraction from the forward token stream.
-    pub fn lex_streaming(&mut self, source: &mut Lexer<'s>) {
+    pub fn lex_streaming(&mut self, source: &mut DependencyLexer<'s>) {
         self.selector_fast_forward_enabled = source.source_end() >= 256;
         let mode = self
             .mode_data
             .as_ref()
             .map_or(Mode::Css, ModeData::default_mode);
-        source.reserve_dashed_ident_occurrences(
-            DependencyContext::estimated_dashed_ident_capacity(source.source_end() as usize, mode),
-        );
+        let source_len = source.source_end() as usize;
+        source
+            .visitor_mut()
+            .reserve(DependencyContext::estimated_dashed_ident_capacity(
+                source_len, mode,
+            ));
         self.dependency_context
             .reserve_estimated_capacity(source.source_end() as usize, mode);
         {
@@ -1394,22 +1444,22 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
             self.lex_streaming_inner(&mut stream, keep_comments, has_mode);
         }
         self.dependency_context
-            .set_dashed_ident_occurrences(source.take_dashed_ident_occurrences());
+            .set_dashed_ident_occurrences(source.visitor_mut().take());
     }
 
     #[inline]
-    fn update_dashed_ident_collection(&self, stream: &mut TokenStream<'_, 's>) {
+    fn update_dashed_ident_collection(&self, stream: &mut DependencyTokenStream<'_, 's>) {
         let enabled = self
             .mode_data
             .as_ref()
             .is_some_and(ModeData::is_current_local_mode);
-        stream.lexer_mut().set_collect_dashed_idents(enabled);
+        stream.lexer_mut().visitor_mut().set_enabled(enabled);
     }
 
     #[inline(always)]
     fn lex_streaming_inner(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         keep_comments: bool,
         has_mode: bool,
     ) {
@@ -1684,7 +1734,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     #[inline]
     fn fast_forward_selector(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         keep_comments: bool,
         has_mode: bool,
     ) {
@@ -1703,7 +1753,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_generic_value(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
+    fn fast_forward_generic_value(
+        &self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        keep_comments: bool,
+    ) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
@@ -1726,7 +1780,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     }
 
     #[inline]
-    fn fast_forward_at_rule(&self, stream: &mut TokenStream<'_, 's>, keep_comments: bool) {
+    fn fast_forward_at_rule(
+        &self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        keep_comments: bool,
+    ) {
         let preserve_strings = matches!(
             self.balanced.last(),
             Some(last) if matches!(last.kind, BalancedItemKind::Url | BalancedItemKind::ImageSet)
@@ -1744,7 +1802,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
     #[inline]
     fn fast_forward_special_value(
         &self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         property: PropertyKind,
         keep_comments: bool,
     ) {
@@ -1804,7 +1862,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.icss_symbols.insert(value);
     }
 
-    fn enter_property_value(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn enter_property_value(&mut self, stream: &mut DependencyTokenStream<'_, 's>) -> Option<()> {
         match self.property_kind {
             PropertyKind::Animation => self.enter_animation_property(),
             PropertyKind::ListStyle => self.enter_list_style_property(),
@@ -1918,7 +1976,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn get_media(&self, lexer: &Lexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
+    fn get_media(&self, lexer: &DependencyLexer<'s>, start: Pos, end: Pos) -> Option<&'s str> {
         let media = lexer.slice(start, end)?;
         let bytes = media.as_bytes();
         let mut position = 0;
@@ -1942,7 +2000,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(media)
     }
 
-    fn lex_charset_at_rule(&mut self, stream: &mut TokenStream<'_, 's>, start: Pos) -> Option<()> {
+    fn lex_charset_at_rule(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        start: Pos,
+    ) -> Option<()> {
         let string = stream.next_parser_token().token;
         if string.kind != TokenKind::QuotedString {
             return Some(());
@@ -2003,7 +2065,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         self.in_grid_property = None;
     }
 
-    fn lex_icss_import(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_icss_import(&mut self, stream: &mut DependencyTokenStream<'_, 's>) -> Option<()> {
         let (start, end) = self.consume_icss_import_path(stream)?;
         let right_parenthesis = stream.next_parser_token().token;
         if right_parenthesis.kind != TokenKind::RightParenthesis {
@@ -2078,7 +2140,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn consume_icss_import_path(&self, stream: &mut TokenStream<'_, 's>) -> Option<(Pos, Pos)> {
+    fn consume_icss_import_path(
+        &self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+    ) -> Option<(Pos, Pos)> {
         let first = stream.next_parser_token().token;
         if first.kind == TokenKind::Eof {
             return None;
@@ -2106,7 +2171,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn consume_icss_export_prop(
         &self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         first: Token,
     ) -> Option<Pos> {
         if matches!(
@@ -2133,7 +2198,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn consume_icss_value(&self, stream: &mut TokenStream<'_, 's>, first: Token) -> Option<Pos> {
+    fn consume_icss_value(
+        &self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        first: Token,
+    ) -> Option<Pos> {
         if matches!(
             first.kind,
             TokenKind::RightCurlyBracket | TokenKind::Semicolon
@@ -2155,7 +2224,11 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         }
     }
 
-    fn lex_value_at_rule(&mut self, stream: &mut TokenStream<'_, 's>, start: Pos) -> Option<()> {
+    fn lex_value_at_rule(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+        start: Pos,
+    ) -> Option<()> {
         let input = stream.slice_trusted(0, stream.source_end());
         let checkpoint = self
             .dependency_context
@@ -2284,7 +2357,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_icss_export(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_icss_export(&mut self, stream: &mut DependencyTokenStream<'_, 's>) -> Option<()> {
         let left_curly = stream.next_parser_token().token;
         if left_curly.kind != TokenKind::LeftCurlyBracket {
             self.handle_warning.handle_warning(Warning {
@@ -2345,7 +2418,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_local_var(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_local_var(&mut self, stream: &mut DependencyTokenStream<'_, 's>) -> Option<()> {
         let name_token = stream.next_parser_token().token;
         let start = name_token.range.start;
         if name_token.kind != TokenKind::Ident
@@ -2385,7 +2458,8 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         if from.is_some_and(|from| from.trim_matches(['\'', '"']) == "global") {
             stream
                 .lexer_mut()
-                .discard_last_dashed_ident(Range::new(start, end));
+                .visitor_mut()
+                .discard_last(Range::new(start, end));
         }
         self.dependency_context
             .push_dependency(Dependency::LocalVar {
@@ -2398,7 +2472,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn lex_local_dashed_ident_decl(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         local_decl_dependency: impl FnOnce(&'s str, Range) -> Dependency<'s>,
         dashed_warning: impl FnOnce(Range) -> Warning<'s>,
         left_curly_warning: impl FnOnce(Range) -> Warning<'s>,
@@ -2433,7 +2507,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_local_keyframes_decl(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_local_keyframes_decl(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+    ) -> Option<()> {
         let mut is_function = false;
         let first = stream.next_parser_token().token;
         let name_token = if first.kind == TokenKind::Colon {
@@ -2535,7 +2612,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_local_keyframes_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+    fn handle_local_keyframes_dependency(&mut self, lexer: &DependencyLexer<'s>) -> Option<()> {
         let animation = self.in_animation_property.as_mut().unwrap();
         if let Some(range) = animation.take_rename(self.balanced.len()) {
             self.dependency_context
@@ -2548,7 +2625,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_local_counter_style_decl(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_local_counter_style_decl(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+    ) -> Option<()> {
         let name_token = stream.next_parser_token().token;
         let start = name_token.range.start;
         if name_token.kind != TokenKind::Ident {
@@ -2579,7 +2659,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_local_container_at_rule(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_local_container_at_rule(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+    ) -> Option<()> {
         let name_token = stream.next_parser_token().token;
         if name_token.kind == TokenKind::LeftParenthesis {
             return Some(());
@@ -2603,7 +2686,10 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn lex_local_function_decl(&mut self, stream: &mut TokenStream<'_, 's>) -> Option<()> {
+    fn lex_local_function_decl(
+        &mut self,
+        stream: &mut DependencyTokenStream<'_, 's>,
+    ) -> Option<()> {
         let mut is_function = false;
         let first = stream.next_parser_token().token;
         let name_token = if first.kind == TokenKind::Colon {
@@ -2721,7 +2807,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_local_counter_style_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+    fn handle_local_counter_style_dependency(&mut self, lexer: &DependencyLexer<'s>) -> Option<()> {
         let list_style = self.in_list_style_property.as_mut().unwrap();
         if let Some(range) = list_style.take_rename(self.balanced.len()) {
             self.dependency_context
@@ -2733,7 +2819,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_local_font_palette_dependency(&mut self, lexer: &Lexer<'s>) -> Option<()> {
+    fn handle_local_font_palette_dependency(&mut self, lexer: &DependencyLexer<'s>) -> Option<()> {
         let font_palette = self.in_font_palette_property.as_mut().unwrap();
         if let Some(range) = font_palette.take_rename(self.balanced.len()) {
             self.dependency_context
@@ -2747,7 +2833,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn lex_composes(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         local_classes: SmallVec<[&'s str; 2]>,
         start: Pos,
     ) -> Option<()> {
@@ -2968,7 +3054,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 }
 
 impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
-    fn handle_comment(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+    fn handle_comment(
+        &mut self,
+        lexer: &mut DependencyLexer<'s>,
+        start: Pos,
+        end: Pos,
+    ) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };
@@ -2990,7 +3081,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_url(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        lexer: &mut DependencyLexer<'s>,
         start: Pos,
         end: Pos,
         content_start: Pos,
@@ -3031,7 +3122,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_string(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        lexer: &mut DependencyLexer<'s>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -3109,7 +3200,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_at_keyword(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -3205,7 +3296,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_semicolon(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+    fn handle_semicolon(
+        &mut self,
+        lexer: &mut DependencyLexer<'s>,
+        start: Pos,
+        end: Pos,
+    ) -> Option<()> {
         match self.scope {
             Scope::InAtImport(ref import_data) => {
                 let Some(url) = import_data.url else {
@@ -3358,7 +3454,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_function(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -3440,7 +3536,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_left_parenthesis(&mut self, _: &mut Lexer, start: Pos, end: Pos) -> Option<()> {
+    fn handle_left_parenthesis(
+        &mut self,
+        _: &mut DependencyLexer<'s>,
+        start: Pos,
+        end: Pos,
+    ) -> Option<()> {
         self.balanced
             .push(BalancedItem::new_other(start, end), self.mode_data.as_mut());
         Some(())
@@ -3448,7 +3549,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_right_parenthesis(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        lexer: &mut DependencyLexer<'s>,
         leading_start: Pos,
         start: Pos,
         end: Pos,
@@ -3514,7 +3615,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_ident(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -3705,7 +3806,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_class(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        lexer: &mut DependencyLexer<'s>,
         start: Pos,
         end: Pos,
         _flags: TokenFlags,
@@ -3745,7 +3846,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_id(
         &mut self,
-        lexer: &mut Lexer<'s>,
+        lexer: &mut DependencyLexer<'s>,
         start: Pos,
         end: Pos,
         _flags: TokenFlags,
@@ -3784,7 +3885,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_left_curly_bracket(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         _: Pos,
     ) -> Option<()> {
@@ -3884,7 +3985,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_right_curly_bracket(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         _: Pos,
         end: Pos,
     ) -> Option<()> {
@@ -3957,7 +4058,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_pseudo_function(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -4005,7 +4106,7 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
 
     fn handle_pseudo_class(
         &mut self,
-        stream: &mut TokenStream<'_, 's>,
+        stream: &mut DependencyTokenStream<'_, 's>,
         start: Pos,
         end: Pos,
         flags: TokenFlags,
@@ -4073,7 +4174,12 @@ impl<'s, W: HandleWarning<'s>> LexDependencies<'s, W> {
         Some(())
     }
 
-    fn handle_comma(&mut self, lexer: &mut Lexer<'s>, start: Pos, end: Pos) -> Option<()> {
+    fn handle_comma(
+        &mut self,
+        lexer: &mut DependencyLexer<'s>,
+        start: Pos,
+        end: Pos,
+    ) -> Option<()> {
         let Some(mode_data) = &mut self.mode_data else {
             return Some(());
         };

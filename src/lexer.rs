@@ -1,6 +1,6 @@
 use crate::Range;
 use crate::css_syntax::{
-    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment, is_dashed_ident,
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment,
     lowercase_ascii_keyword, strip_vendor_prefix,
 };
 use crate::dependencies::PropertyKind;
@@ -233,81 +233,35 @@ pub trait LexerVisitor {
     fn visit_ident(&mut self, name: &str, range: Range);
 }
 
-/// Collects dashed identifier occurrences reported by [`Lexer`].
-///
-/// `scan_pos` is colocated here so this object occupies 32 bytes and `Lexer`
-/// remains 48 bytes on 64-bit targets. Keeping the cursor separately would
-/// leave this object's tail padding unused and grow `Lexer` to 56 bytes.
-#[derive(Debug, Default)]
-pub struct DashedIdentCollector {
-    dashed_ident_occurrences: Vec<Range>,
-    scan_pos: Pos,
-    collect_dashed_idents: bool,
-}
-
-impl DashedIdentCollector {
+impl LexerVisitor for () {
     #[inline(always)]
-    fn set_enabled(&mut self, enabled: bool) {
-        self.collect_dashed_idents = enabled;
-    }
-
-    fn reserve(&mut self, additional: usize) {
-        self.dashed_ident_occurrences.reserve(additional);
-    }
-
-    fn take(&mut self) -> Vec<Range> {
-        std::mem::take(&mut self.dashed_ident_occurrences)
-    }
-
-    fn discard_last(&mut self, range: Range) {
-        if self.dashed_ident_occurrences.last() == Some(&range) {
-            self.dashed_ident_occurrences.pop();
-        }
-    }
-}
-
-impl LexerVisitor for DashedIdentCollector {
-    #[inline(always)]
-    fn visit_ident(&mut self, name: &str, range: Range) {
-        if self.collect_dashed_idents && is_dashed_ident(name) {
-            self.dashed_ident_occurrences.push(range);
-        }
-    }
+    fn visit_ident(&mut self, _name: &str, _range: Range) {}
 }
 
 #[derive(Debug)]
-pub struct Lexer<'s> {
+pub struct Lexer<'s, V: LexerVisitor = ()> {
     value: &'s [u8],
-    visitor: DashedIdentCollector,
+    scan_pos: Pos,
+    visitor: V,
 }
 
-impl<'s> Lexer<'s> {
-    pub fn new(value: &'s str, visitor: DashedIdentCollector) -> Self {
+impl<'s, V: LexerVisitor> Lexer<'s, V> {
+    pub fn new(value: &'s str, visitor: V) -> Self {
         assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
             value: value.as_bytes(),
+            scan_pos: 0,
             visitor,
         }
     }
 
-    pub(crate) fn set_collect_dashed_idents(&mut self, enabled: bool) {
-        self.visitor.set_enabled(enabled);
-    }
-
-    pub(crate) fn reserve_dashed_ident_occurrences(&mut self, additional: usize) {
-        self.visitor.reserve(additional);
-    }
-
-    pub(crate) fn take_dashed_ident_occurrences(&mut self) -> Vec<Range> {
-        self.visitor.take()
-    }
-
-    pub(crate) fn discard_last_dashed_ident(&mut self, range: Range) {
-        self.visitor.discard_last(range);
+    #[inline]
+    pub(crate) fn visitor_mut(&mut self) -> &mut V {
+        &mut self.visitor
     }
 
     #[inline]
-    fn record_dashed_ident(&mut self, kind: TokenKind, range: Range) {
+    fn visit_ident(&mut self, kind: TokenKind, range: Range) {
         if !matches!(kind, TokenKind::Ident | TokenKind::Function) {
             return;
         }
@@ -352,7 +306,7 @@ impl<'s> Lexer<'s> {
         F: FnMut(&str) -> bool,
         C: FnMut(&str) -> bool,
     {
-        let mut position = self.visitor.scan_pos as usize;
+        let mut position = self.scan_pos as usize;
         let scan_start = position;
         let mut candidate_token = None;
         while position < self.value.len() {
@@ -508,9 +462,9 @@ impl<'s> Lexer<'s> {
                 _ => position += 1,
             }
         }
-        self.visitor.scan_pos = position as Pos;
+        self.scan_pos = position as Pos;
         debug_assert!(
-            self.visitor.scan_pos >= scan_start as Pos,
+            self.scan_pos >= scan_start as Pos,
             "fast_forward moved scan_pos backward from {scan_start} to {position}"
         );
         candidate_token
@@ -530,7 +484,7 @@ impl<'s> Lexer<'s> {
     where
         C: FnMut(&str) -> bool,
     {
-        let mut position = self.visitor.scan_pos as usize;
+        let mut position = self.scan_pos as usize;
         let scan_start = position;
         let mut invalidates_composes = false;
         let mut trivia_start = None;
@@ -664,9 +618,9 @@ impl<'s> Lexer<'s> {
             }
         }
 
-        self.visitor.scan_pos = position as Pos;
+        self.scan_pos = position as Pos;
         debug_assert!(
-            self.visitor.scan_pos >= scan_start as Pos,
+            self.scan_pos >= scan_start as Pos,
             "selector fast-forward moved scan_pos backward from {scan_start} to {position}"
         );
         invalidates_composes
@@ -694,7 +648,7 @@ impl<'s> Lexer<'s> {
             | TokenKind::RightCurlyBracket => {}
             _ => unreachable!("fast_forward accepts only closing bracket kinds"),
         }
-        let open_start = self.visitor.scan_pos;
+        let open_start = self.scan_pos;
         let mut stack: SmallVec<[TokenKind; 8]> = SmallVec::new();
         stack.push(end);
         let mut position = open_start as usize;
@@ -739,9 +693,9 @@ impl<'s> Lexer<'s> {
                     stack.pop();
                     position += 1;
                     if stack.is_empty() {
-                        self.visitor.scan_pos = position as Pos;
+                        self.scan_pos = position as Pos;
                         debug_assert!(
-                            self.visitor.scan_pos >= open_start as Pos,
+                            self.scan_pos >= open_start as Pos,
                             "fast_forward moved scan_pos backward from {open_start} to {position}"
                         );
                         return Some(Range::new(open_start, position as Pos));
@@ -769,7 +723,7 @@ impl<'s> Lexer<'s> {
         }
         // SAFETY: Lexer-generated positions always delimit complete tokens or
         // source fragments and therefore stay on UTF-8 code point boundaries.
-        Some(unsafe { Self::slice_unchecked(self.value, &range) })
+        Some(unsafe { slice_unchecked(self.value, &range) })
     }
 
     #[inline(always)]
@@ -777,9 +731,11 @@ impl<'s> Lexer<'s> {
         debug_assert!(start <= end && end <= self.value.len() as Pos);
         // SAFETY: Token ranges and parser positions originate from this
         // lexer, so they delimit valid UTF-8 source boundaries.
-        unsafe { Self::slice_unchecked(self.value, &Range::new(start, end)) }
+        unsafe { slice_unchecked(self.value, &Range::new(start, end)) }
     }
+}
 
+impl Lexer<'_, ()> {
     pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
         let start = range.start as usize;
         let end = range.end as usize;
@@ -791,25 +747,25 @@ impl<'s> Lexer<'s> {
             return None;
         }
         // SAFETY: The range was checked against the original `str` above.
-        Some(unsafe { Self::slice_unchecked(input.as_bytes(), range) })
-    }
-
-    unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
-        unsafe {
-            let value = input.get_unchecked(range.start as usize..range.end as usize);
-            str::from_utf8_unchecked(value)
-        }
+        Some(unsafe { slice_unchecked(input.as_bytes(), range) })
     }
 }
 
-impl Lexer<'_> {
+unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
+    unsafe {
+        let value = input.get_unchecked(range.start as usize..range.end as usize);
+        str::from_utf8_unchecked(value)
+    }
+}
+
+impl<V: LexerVisitor> Lexer<'_, V> {
     #[inline]
     pub(crate) fn scan_pos(&self) -> Pos {
-        self.visitor.scan_pos
+        self.scan_pos
     }
 }
 
-impl<'s> Lexer<'s> {
+impl<'s, V: LexerVisitor> Lexer<'s, V> {
     /// Return the next CSS token without allocating or decoding its value.
     ///
     /// `TokenKind::Eof` is returned after the input is exhausted. Unterminated
@@ -817,10 +773,10 @@ impl<'s> Lexer<'s> {
     /// `Bad*` token kinds, so EOF and tokenizer errors are never conflated.
     #[inline]
     pub fn next_token(&mut self) -> Token {
-        let start = self.visitor.scan_pos as usize;
+        let start = self.scan_pos as usize;
         let len = self.value.len();
         if start >= len {
-            self.visitor.scan_pos = len as Pos;
+            self.scan_pos = len as Pos;
             return Token::new(
                 TokenKind::Eof,
                 Range::new(len as Pos, len as Pos),
@@ -1048,11 +1004,11 @@ impl<'s> Lexer<'s> {
             ),
         };
 
-        self.visitor.scan_pos = end as Pos;
+        self.scan_pos = end as Pos;
         debug_assert!(
-            self.visitor.scan_pos >= start as Pos,
+            self.scan_pos >= start as Pos,
             "scan_pos moved backward from {start} to {}",
-            self.visitor.scan_pos
+            self.scan_pos
         );
         let token = Token::with_flags(
             kind,
@@ -1060,7 +1016,7 @@ impl<'s> Lexer<'s> {
             Range::new(value_start as Pos, value_end as Pos),
             flags,
         );
-        self.record_dashed_ident(token.kind, token.value_range);
+        self.visit_ident(token.kind, token.value_range);
         token
     }
 
@@ -1568,8 +1524,8 @@ impl<'s> Lexer<'s> {
 /// when the buffer is empty; it never moves the scanner backwards, so every
 /// source range is tokenized at most once and every token is consumed at most
 /// once.
-pub(crate) struct TokenStream<'a, 's> {
-    lexer: &'a mut Lexer<'s>,
+pub(crate) struct TokenStream<'a, 's, V: LexerVisitor = ()> {
+    lexer: &'a mut Lexer<'s, V>,
     consumed: Pos,
     buffered: VecDeque<TokenWithTrivia>,
     generic_value_state: GenericValueScanState,
@@ -1622,8 +1578,8 @@ fn never_fast_forward_candidate(_: &str) -> bool {
     false
 }
 
-impl<'a, 's> TokenStream<'a, 's> {
-    pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s>) -> Self {
+impl<'a, 's, V: LexerVisitor> TokenStream<'a, 's, V> {
+    pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s, V>) -> Self {
         Self {
             lexer,
             consumed: 0,
@@ -2000,12 +1956,12 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn lexer(&self) -> &Lexer<'s> {
+    pub(crate) fn lexer(&self) -> &Lexer<'s, V> {
         self.lexer
     }
 
     #[inline]
-    pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s> {
+    pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s, V> {
         self.lexer
     }
 

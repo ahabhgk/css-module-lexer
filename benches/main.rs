@@ -1,7 +1,5 @@
 use codspeed_criterion_compat::*;
-use css_module_lexer::{
-    DashedIdentCollector, Lexer, Mode, TokenKind, collect_dependencies, lex_dependencies,
-};
+use css_module_lexer::{Lexer, Mode, TokenKind, collect_dependencies, lex_dependencies};
 
 const BOOTSTRAP: &str = include_str!("../fixtures/bootstrap.min.css");
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");
@@ -26,7 +24,7 @@ const ESCAPE_HEAVY_IDENTIFIER: &str = r#"
 const RUN_MICRO_BENCHES: &str = "CSS_MODULE_LEXER_RUN_MICRO_BENCHES";
 
 fn scan_tokens(input: &str) -> usize {
-    let mut lexer = Lexer::new(input, DashedIdentCollector::default());
+    let mut lexer = Lexer::new(input, ());
     let mut count = 0;
     loop {
         let token = lexer.next_token();

@@ -3,6 +3,7 @@ mod dependencies;
 mod dependency_types;
 mod lexer;
 
+pub use dependencies::DashedIdentCollector;
 pub use dependencies::LexDependencies;
 pub use dependencies::ModeData;
 pub use dependency_types::Dependency;
@@ -16,10 +17,7 @@ pub use dependency_types::UrlRangeKind;
 pub use dependency_types::ValueAtRuleImportItem;
 pub use dependency_types::Warning;
 pub use dependency_types::WarningKind;
-pub use lexer::{
-    DashedIdentCollector, Lexer, LexerVisitor, Pos, Token, TokenFlags, TokenKind, TokenWithTrivia,
-    Trivia,
-};
+pub use lexer::{Lexer, LexerVisitor, Pos, Token, TokenFlags, TokenKind, TokenWithTrivia, Trivia};
 
 pub trait HandleWarning<'s> {
     fn handle_warning(&mut self, warning: Warning<'s>);
