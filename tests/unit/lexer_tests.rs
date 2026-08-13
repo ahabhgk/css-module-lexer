@@ -1,4 +1,25 @@
 use super::*;
+
+#[derive(Default)]
+struct TestFastForwardVisitor {
+    candidate: Option<&'static str>,
+    idents: Vec<Range>,
+}
+
+impl FastForwardVisitor for TestFastForwardVisitor {
+    fn is_ident_candidate(&self, ident: &str, _property: Option<PropertyKind>) -> bool {
+        self.candidate == Some(ident)
+    }
+
+    fn is_comment_candidate(&self, _comment: &str) -> bool {
+        false
+    }
+
+    fn on_ident(&mut self, range: Range, _ident: &str) {
+        self.idents.push(range);
+    }
+}
+
 fn token_text(input: &str, token: Token) -> &str {
     Lexer::slice_range(input, &token.range).unwrap()
 }
@@ -315,22 +336,21 @@ fn generic_value_fast_forward_keeps_raw_depth_across_candidates() {
     let input = "calc(1px + imported) url(a.png);";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
+    let mut visitor = TestFastForwardVisitor {
+        candidate: Some("imported"),
+        ..Default::default()
+    };
 
-    stream.fast_forward_generic_value_if_buffer_empty(
-        false,
-        false,
-        false,
-        |ident| ident == "imported",
-        |_| false,
-    );
+    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, &mut visitor);
     assert_eq!(stream.consumed_pos(), 11);
     assert_eq!(stream.next(false).token.kind, TokenKind::Ident);
 
-    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, |_| false, |_| false);
+    visitor.candidate = None;
+    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, &mut visitor);
     assert_eq!(stream.consumed_pos(), 21);
     assert_eq!(stream.next(false).token.kind, TokenKind::Url);
 
-    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, |_| false, |_| false);
+    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, &mut visitor);
     assert_eq!(stream.byte_at(stream.consumed_pos()), Some(b';'));
     assert_eq!(stream.next(false).token.kind, TokenKind::Semicolon);
     assert_eq!(stream.next(false).token.kind, TokenKind::Eof);
@@ -341,15 +361,13 @@ fn generic_value_fast_forward_buffers_plain_ascii_candidate_once() {
     let input = "red imported blue;";
     let mut lexer = Lexer::new(input);
     let mut stream = TokenStream::from_lexer(&mut lexer);
+    let mut visitor = TestFastForwardVisitor {
+        candidate: Some("imported"),
+        ..Default::default()
+    };
 
     assert_eq!(stream.consumed_pos(), stream.lexer().scan_pos());
-    stream.fast_forward_generic_value_if_buffer_empty(
-        false,
-        false,
-        false,
-        |ident| ident == "imported",
-        |_| false,
-    );
+    stream.fast_forward_generic_value_if_buffer_empty(false, false, false, &mut visitor);
     assert_eq!(stream.consumed_pos(), 4);
     assert_eq!(stream.lexer().scan_pos(), 12);
 
