@@ -5,7 +5,6 @@ mod lexer;
 
 pub use dependencies::LexDependencies;
 pub use dependencies::ModeData;
-pub use dependency_types::CollectOptions;
 pub use dependency_types::Dependency;
 pub use dependency_types::DependencyContext;
 pub use dependency_types::DependencyIndex;
@@ -46,17 +45,9 @@ pub fn lex_dependencies<'s>(
 }
 
 pub fn collect_dependencies(input: &str, mode: Mode) -> (DependencyContext<'_>, Vec<Warning<'_>>) {
-    collect_dependencies_with_options(input, mode, CollectOptions::default())
-}
-
-pub fn collect_dependencies_with_options(
-    input: &str,
-    mode: Mode,
-    options: CollectOptions,
-) -> (DependencyContext<'_>, Vec<Warning<'_>>) {
     let mut warnings = Vec::with_capacity(estimate_warning_capacity(input.len(), mode));
     let mut lexer = Lexer::new(input);
-    let mut visitor = LexDependencies::new_with_options(|v| warnings.push(v), mode, options);
+    let mut visitor = LexDependencies::new(|v| warnings.push(v), mode);
     visitor.lex_streaming(&mut lexer);
     (visitor.into_dependency_context(), warnings)
 }

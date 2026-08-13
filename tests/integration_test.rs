@@ -1,9 +1,7 @@
-use css_module_lexer::CollectOptions;
 use css_module_lexer::Dependency;
 use css_module_lexer::Mode;
 use css_module_lexer::WarningKind;
 use css_module_lexer::collect_dependencies;
-use css_module_lexer::collect_dependencies_with_options;
 
 const RSPACK_CSS_MODULES: &str = include_str!("../fixtures/rspack-css-modules.css");
 
@@ -15,15 +13,12 @@ fn dashed_ident_slices<'a>(input: &'a str, ranges: &[css_module_lexer::Range]) -
 }
 
 #[test]
-fn dashed_ident_collection_is_opt_in_and_disabled_for_css_mode() {
+fn dashed_ident_collection_is_enabled_for_modules_and_disabled_for_css_mode() {
     let input = ".local { --token: var(--token); }";
-    let (default_context, _) = collect_dependencies(input, Mode::Local);
-    assert!(default_context.dashed_ident_occurrences().is_empty());
+    let (module_context, _) = collect_dependencies(input, Mode::Local);
+    assert_eq!(module_context.dashed_ident_occurrences().len(), 2);
 
-    let options = CollectOptions {
-        collect_dashed_idents: true,
-    };
-    let (css_context, _) = collect_dependencies_with_options(input, Mode::Css, options);
+    let (css_context, _) = collect_dependencies(input, Mode::Css);
     assert!(css_context.dashed_ident_occurrences().is_empty());
 }
 
@@ -45,13 +40,7 @@ fn dashed_ident_collection_uses_the_single_token_pass() {
         @value --value-token: red;
         :export { --export-token: red; }
     "#;
-    let (context, warnings) = collect_dependencies_with_options(
-        input,
-        Mode::Local,
-        CollectOptions {
-            collect_dashed_idents: true,
-        },
-    );
+    let (context, warnings) = collect_dependencies(input, Mode::Local);
     assert!(warnings.is_empty());
     assert_eq!(
         dashed_ident_slices(input, context.dashed_ident_occurrences()),
@@ -72,13 +61,7 @@ fn dashed_ident_collection_uses_the_single_token_pass() {
 #[test]
 fn dashed_ident_collection_preserves_escaped_ranges() {
     let input = r#".local { \2d\2d token: var(\2d\2d token); }"#;
-    let (context, warnings) = collect_dependencies_with_options(
-        input,
-        Mode::Local,
-        CollectOptions {
-            collect_dashed_idents: true,
-        },
-    );
+    let (context, warnings) = collect_dependencies(input, Mode::Local);
     assert!(!warnings.is_empty());
     assert_eq!(
         dashed_ident_slices(input, context.dashed_ident_occurrences()),

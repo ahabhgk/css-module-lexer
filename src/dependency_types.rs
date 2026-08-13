@@ -122,11 +122,6 @@ pub enum Mode {
     Css,
 }
 
-#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq)]
-pub struct CollectOptions {
-    pub collect_dashed_idents: bool,
-}
-
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct ValueAtRuleImportItem<'s> {
     local_name: &'s str,
@@ -323,13 +318,8 @@ impl<'s> DependencyContext<'s> {
         Self::default()
     }
 
-    pub(crate) fn reserve_estimated_capacity(
-        &mut self,
-        input_len: usize,
-        mode: Mode,
-        options: CollectOptions,
-    ) {
-        let estimate = DependencyContextCapacity::estimate(input_len, mode, options);
+    pub(crate) fn reserve_estimated_capacity(&mut self, input_len: usize, mode: Mode) {
+        let estimate = DependencyContextCapacity::estimate(input_len, mode);
         reserve_estimated_capacity(&mut self.dependencies, estimate.dependencies);
         reserve_estimated_capacity(
             &mut self.import_attributes,
@@ -374,12 +364,8 @@ impl<'s> DependencyContext<'s> {
         self.dashed_ident_occurrences = occurrences;
     }
 
-    pub(crate) fn estimated_dashed_ident_capacity(
-        input_len: usize,
-        mode: Mode,
-        options: CollectOptions,
-    ) -> usize {
-        DependencyContextCapacity::estimate(input_len, mode, options).dashed_ident_occurrences
+    pub(crate) fn estimated_dashed_ident_capacity(input_len: usize, mode: Mode) -> usize {
+        DependencyContextCapacity::estimate(input_len, mode).dashed_ident_occurrences
     }
 
     pub fn import_attributes(
@@ -510,14 +496,14 @@ struct DependencyContextCapacity {
 }
 
 impl DependencyContextCapacity {
-    fn estimate(input_len: usize, mode: Mode, options: CollectOptions) -> Self {
+    fn estimate(input_len: usize, mode: Mode) -> Self {
         let dependency_denominator = match mode {
             Mode::Local | Mode::Pure => 32,
             Mode::Global => 80,
             Mode::Css => 4096,
         };
         let dependencies = estimate_capacity(input_len, dependency_denominator, 4, 8192);
-        let dashed_ident_occurrences = if options.collect_dashed_idents && mode != Mode::Css {
+        let dashed_ident_occurrences = if mode != Mode::Css {
             estimate_capacity(input_len, 64, 2, 8192)
         } else {
             0
