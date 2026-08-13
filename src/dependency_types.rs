@@ -322,10 +322,6 @@ impl<'s> DependencyContext<'s> {
         let estimate = DependencyContextCapacity::estimate(input_len, mode);
         reserve_estimated_capacity(&mut self.dependencies, estimate.dependencies);
         reserve_estimated_capacity(
-            &mut self.dashed_ident_occurrences,
-            estimate.dashed_ident_occurrences,
-        );
-        reserve_estimated_capacity(
             &mut self.import_attributes,
             estimate.import_attributes as usize,
         );
@@ -364,14 +360,12 @@ impl<'s> DependencyContext<'s> {
         &self.dashed_ident_occurrences
     }
 
-    pub(crate) fn push_dashed_ident_occurrence(&mut self, range: Range) {
-        self.dashed_ident_occurrences.push(range);
+    pub(crate) fn set_dashed_ident_occurrences(&mut self, occurrences: Vec<Range>) {
+        self.dashed_ident_occurrences = occurrences;
     }
 
-    pub(crate) fn discard_last_dashed_ident_occurrence(&mut self, range: Range) {
-        if self.dashed_ident_occurrences.last() == Some(&range) {
-            self.dashed_ident_occurrences.pop();
-        }
+    pub(crate) fn estimated_dashed_ident_capacity(input_len: usize, mode: Mode) -> usize {
+        DependencyContextCapacity::estimate(input_len, mode).dashed_ident_occurrences
     }
 
     pub fn import_attributes(

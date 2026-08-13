@@ -1,8 +1,11 @@
 use crate::Range;
 use crate::css_syntax::{
-    MAX_CSS_KEYWORD_LEN, decode_css_keyword, lowercase_ascii_keyword, strip_vendor_prefix,
+    MAX_CSS_KEYWORD_LEN, decode_css_keyword, is_css_modules_pure_magic_comment, is_dashed_ident,
+    lowercase_ascii_keyword, strip_vendor_prefix,
 };
 use crate::dependencies::PropertyKind;
+use crate::dependencies::special_value_is_candidate;
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::str;
@@ -226,27 +229,92 @@ pub struct TokenWithTrivia {
     pub leading: Trivia,
 }
 
-pub(crate) trait FastForwardVisitor {
-    fn is_ident_candidate(&self, ident: &str, property: Option<PropertyKind>) -> bool;
+pub trait LexerVisitor {
+    fn visit_ident(&mut self, name: &str, range: Range);
+}
 
-    fn is_comment_candidate(&self, comment: &str) -> bool;
+/// Collects dashed identifier occurrences reported by [`Lexer`].
+///
+/// `scan_pos` is colocated here so this object occupies 32 bytes and `Lexer`
+/// remains 48 bytes on 64-bit targets. Keeping the cursor separately would
+/// leave this object's tail padding unused and grow `Lexer` to 56 bytes.
+#[derive(Debug, Default)]
+pub struct DashedIdentCollector {
+    dashed_ident_occurrences: Vec<Range>,
+    scan_pos: Pos,
+    collect_dashed_idents: bool,
+}
 
-    fn on_ident(&mut self, range: Range, ident: &str);
+impl DashedIdentCollector {
+    #[inline(always)]
+    fn set_enabled(&mut self, enabled: bool) {
+        self.collect_dashed_idents = enabled;
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.dashed_ident_occurrences.reserve(additional);
+    }
+
+    fn take(&mut self) -> Vec<Range> {
+        std::mem::take(&mut self.dashed_ident_occurrences)
+    }
+
+    fn discard_last(&mut self, range: Range) {
+        if self.dashed_ident_occurrences.last() == Some(&range) {
+            self.dashed_ident_occurrences.pop();
+        }
+    }
+}
+
+impl LexerVisitor for DashedIdentCollector {
+    #[inline(always)]
+    fn visit_ident(&mut self, name: &str, range: Range) {
+        if self.collect_dashed_idents && is_dashed_ident(name) {
+            self.dashed_ident_occurrences.push(range);
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Lexer<'s> {
     value: &'s [u8],
-    scan_pos: Pos,
+    visitor: DashedIdentCollector,
 }
 
 impl<'s> Lexer<'s> {
-    pub fn new(value: &'s str) -> Self {
+    pub fn new(value: &'s str, visitor: DashedIdentCollector) -> Self {
         assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
             value: value.as_bytes(),
-            scan_pos: 0,
+            visitor,
         }
+    }
+
+    pub(crate) fn set_collect_dashed_idents(&mut self, enabled: bool) {
+        self.visitor.set_enabled(enabled);
+    }
+
+    pub(crate) fn reserve_dashed_ident_occurrences(&mut self, additional: usize) {
+        self.visitor.reserve(additional);
+    }
+
+    pub(crate) fn take_dashed_ident_occurrences(&mut self) -> Vec<Range> {
+        self.visitor.take()
+    }
+
+    pub(crate) fn discard_last_dashed_ident(&mut self, range: Range) {
+        self.visitor.discard_last(range);
+    }
+
+    #[inline]
+    fn record_dashed_ident(&mut self, kind: TokenKind, range: Range) {
+        if !matches!(kind, TokenKind::Ident | TokenKind::Function) {
+            return;
+        }
+        let value = &self.value[range.start as usize..range.end as usize];
+        // SAFETY: token value ranges always lie on UTF-8 boundaries.
+        let value = unsafe { str::from_utf8_unchecked(value) };
+        self.visitor.visit_ident(value, range);
     }
 
     #[inline]
@@ -271,15 +339,20 @@ impl<'s> Lexer<'s> {
     /// manufacturing tokens, and the scanner stops before dependency-bearing
     /// functions, ICSS symbols, selector-independent magic comments, or a
     /// declaration boundary.
-    fn fast_forward_generic_value<V: FastForwardVisitor>(
+    fn fast_forward_generic_value<F, C>(
         &mut self,
         state: &mut GenericValueScanState,
         options: GenericValueScanOptions,
         stop_at_top_level_left_curly: bool,
-        check_ident_candidates: bool,
-        visitor: &mut V,
-    ) -> Option<PrescannedIdent> {
-        let mut position = self.scan_pos as usize;
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+        icss_symbols: Option<&FxHashSet<&str>>,
+    ) -> Option<PrescannedIdent>
+    where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
+        let mut position = self.visitor.scan_pos as usize;
         let scan_start = position;
         let mut candidate_token = None;
         while position < self.value.len() {
@@ -299,7 +372,7 @@ impl<'s> Lexer<'s> {
                     }
                     if content.get(first) == Some(&b'c') {
                         let content = unsafe { str::from_utf8_unchecked(content) };
-                        if visitor.is_comment_candidate(content) {
+                        if is_comment_candidate(content) {
                             break;
                         }
                     }
@@ -329,8 +402,10 @@ impl<'s> Lexer<'s> {
                 let name = unsafe { str::from_utf8_unchecked(&self.value[position..end]) };
                 let is_function = self.value.get(end) == Some(&C_LEFT_PARENTHESIS);
                 let is_candidate = !flags.has_escape()
-                    && check_ident_candidates
-                    && visitor.is_ident_candidate(name, options.property);
+                    && (is_candidate(name)
+                        || options.property.is_some_and(|property| {
+                            special_value_is_candidate(property, name, icss_symbols)
+                        }));
                 if flags.has_escape()
                     || is_candidate
                     || (is_function && is_dependency_value_function(name))
@@ -346,7 +421,8 @@ impl<'s> Lexer<'s> {
                     }
                     break;
                 }
-                visitor.on_ident(Range::new(position as Pos, end as Pos), name);
+                self.visitor
+                    .visit_ident(name, Range::new(position as Pos, end as Pos));
                 if is_function {
                     state.parentheses += 1;
                     position = end + 1;
@@ -432,9 +508,9 @@ impl<'s> Lexer<'s> {
                 _ => position += 1,
             }
         }
-        self.scan_pos = position as Pos;
+        self.visitor.scan_pos = position as Pos;
         debug_assert!(
-            self.scan_pos >= scan_start as Pos,
+            self.visitor.scan_pos >= scan_start as Pos,
             "fast_forward moved scan_pos backward from {scan_start} to {position}"
         );
         candidate_token
@@ -444,14 +520,17 @@ impl<'s> Lexer<'s> {
     /// Attribute selectors remain opaque across calls through `square_depth`;
     /// the scanner stops before dependency candidates and structural tokens so
     /// the normal token stream remains the sole owner of parser state changes.
-    pub(crate) fn fast_forward_selector<V: FastForwardVisitor>(
+    pub(crate) fn fast_forward_selector<C>(
         &mut self,
         square_depth: &mut u32,
         keep_comments: bool,
         has_mode: bool,
-        visitor: &mut V,
-    ) -> bool {
-        let mut position = self.scan_pos as usize;
+        mut is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
+        let mut position = self.visitor.scan_pos as usize;
         let scan_start = position;
         let mut invalidates_composes = false;
         let mut trivia_start = None;
@@ -471,7 +550,7 @@ impl<'s> Lexer<'s> {
                     let content = &self.value[position + 2..end.saturating_sub(2)];
                     // SAFETY: comments are slices of the original UTF-8 input.
                     let content = unsafe { str::from_utf8_unchecked(content) };
-                    if visitor.is_comment_candidate(content) {
+                    if is_comment_candidate(content) {
                         break;
                     }
                 }
@@ -524,7 +603,8 @@ impl<'s> Lexer<'s> {
                 let name = &self.value[position..end];
                 // SAFETY: scanned names start and end on UTF-8 boundaries.
                 let name = unsafe { str::from_utf8_unchecked(name) };
-                visitor.on_ident(Range::new(position as Pos, end as Pos), name);
+                self.visitor
+                    .visit_ident(name, Range::new(position as Pos, end as Pos));
                 invalidates_composes = true;
                 trivia_start = None;
                 position = end;
@@ -584,9 +664,9 @@ impl<'s> Lexer<'s> {
             }
         }
 
-        self.scan_pos = position as Pos;
+        self.visitor.scan_pos = position as Pos;
         debug_assert!(
-            self.scan_pos >= scan_start as Pos,
+            self.visitor.scan_pos >= scan_start as Pos,
             "selector fast-forward moved scan_pos backward from {scan_start} to {position}"
         );
         invalidates_composes
@@ -614,7 +694,7 @@ impl<'s> Lexer<'s> {
             | TokenKind::RightCurlyBracket => {}
             _ => unreachable!("fast_forward accepts only closing bracket kinds"),
         }
-        let open_start = self.scan_pos;
+        let open_start = self.visitor.scan_pos;
         let mut stack: SmallVec<[TokenKind; 8]> = SmallVec::new();
         stack.push(end);
         let mut position = open_start as usize;
@@ -659,9 +739,9 @@ impl<'s> Lexer<'s> {
                     stack.pop();
                     position += 1;
                     if stack.is_empty() {
-                        self.scan_pos = position as Pos;
+                        self.visitor.scan_pos = position as Pos;
                         debug_assert!(
-                            self.scan_pos >= open_start as Pos,
+                            self.visitor.scan_pos >= open_start as Pos,
                             "fast_forward moved scan_pos backward from {open_start} to {position}"
                         );
                         return Some(Range::new(open_start, position as Pos));
@@ -725,7 +805,7 @@ impl<'s> Lexer<'s> {
 impl Lexer<'_> {
     #[inline]
     pub(crate) fn scan_pos(&self) -> Pos {
-        self.scan_pos
+        self.visitor.scan_pos
     }
 }
 
@@ -737,10 +817,10 @@ impl<'s> Lexer<'s> {
     /// `Bad*` token kinds, so EOF and tokenizer errors are never conflated.
     #[inline]
     pub fn next_token(&mut self) -> Token {
-        let start = self.scan_pos as usize;
+        let start = self.visitor.scan_pos as usize;
         let len = self.value.len();
         if start >= len {
-            self.scan_pos = len as Pos;
+            self.visitor.scan_pos = len as Pos;
             return Token::new(
                 TokenKind::Eof,
                 Range::new(len as Pos, len as Pos),
@@ -968,18 +1048,20 @@ impl<'s> Lexer<'s> {
             ),
         };
 
-        self.scan_pos = end as Pos;
+        self.visitor.scan_pos = end as Pos;
         debug_assert!(
-            self.scan_pos >= start as Pos,
+            self.visitor.scan_pos >= start as Pos,
             "scan_pos moved backward from {start} to {}",
-            self.scan_pos
+            self.visitor.scan_pos
         );
-        Token::with_flags(
+        let token = Token::with_flags(
             kind,
             Range::new(start as Pos, end as Pos),
             Range::new(value_start as Pos, value_end as Pos),
             flags,
-        )
+        );
+        self.record_dashed_ident(token.kind, token.value_range);
+        token
     }
 
     #[inline]
@@ -1535,6 +1617,11 @@ fn is_dependency_value_function(name: &str) -> bool {
         || name.starts_with("--")
 }
 
+#[inline(always)]
+fn never_fast_forward_candidate(_: &str) -> bool {
+    false
+}
+
 impl<'a, 's> TokenStream<'a, 's> {
     pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s>) -> Self {
         Self {
@@ -1680,13 +1767,17 @@ impl<'a, 's> TokenStream<'a, 's> {
     /// The position of the next yet-untokenized source byte. The buffer may
     /// still hold tokens; callers must drain `next` before fast-forwarding.
     #[inline]
-    pub(crate) fn fast_forward_generic_value_if_buffer_empty<V: FastForwardVisitor>(
+    pub(crate) fn fast_forward_generic_value_if_buffer_empty<F, C>(
         &mut self,
         keep_comments: bool,
         preserve_strings: bool,
         preserve_delimiters: bool,
-        visitor: &mut V,
-    ) {
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
         if !self.buffered.is_empty() {
             return;
         }
@@ -1699,20 +1790,18 @@ impl<'a, 's> TokenStream<'a, 's> {
                 property: None,
             },
             false,
-            true,
-            visitor,
+            &mut is_candidate,
+            &mut is_comment_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
 
     #[inline]
-    pub(crate) fn fast_forward_generic_value_without_candidates_if_buffer_empty<
-        V: FastForwardVisitor,
-    >(
+    pub(crate) fn fast_forward_generic_value_without_candidates_if_buffer_empty(
         &mut self,
         preserve_strings: bool,
         preserve_delimiters: bool,
-        visitor: &mut V,
     ) {
         if !self.buffered.is_empty() {
             return;
@@ -1726,20 +1815,25 @@ impl<'a, 's> TokenStream<'a, 's> {
                 property: None,
             },
             false,
-            false,
-            visitor,
+            never_fast_forward_candidate,
+            never_fast_forward_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
 
     #[inline]
-    pub(crate) fn fast_forward_at_rule_if_buffer_empty<V: FastForwardVisitor>(
+    pub(crate) fn fast_forward_at_rule_if_buffer_empty<F, C>(
         &mut self,
         keep_comments: bool,
         preserve_strings: bool,
         preserve_delimiters: bool,
-        visitor: &mut V,
-    ) {
+        mut is_candidate: F,
+        mut is_comment_candidate: C,
+    ) where
+        F: FnMut(&str) -> bool,
+        C: FnMut(&str) -> bool,
+    {
         if !self.buffered.is_empty() {
             return;
         }
@@ -1752,8 +1846,9 @@ impl<'a, 's> TokenStream<'a, 's> {
                 property: None,
             },
             true,
-            true,
-            visitor,
+            &mut is_candidate,
+            &mut is_comment_candidate,
+            None,
         );
         self.finish_value_fast_forward(candidate);
     }
@@ -1764,13 +1859,13 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn fast_forward_special_value_if_buffer_empty<V: FastForwardVisitor>(
+    pub(crate) fn fast_forward_special_value_if_buffer_empty(
         &mut self,
         keep_comments: bool,
         preserve_strings: bool,
         preserve_delimiters: bool,
         property: PropertyKind,
-        visitor: &mut V,
+        icss_symbols: Option<&FxHashSet<&str>>,
     ) {
         if !self.buffered.is_empty() {
             return;
@@ -1784,8 +1879,9 @@ impl<'a, 's> TokenStream<'a, 's> {
                 property: Some(property),
             },
             false,
-            true,
-            visitor,
+            never_fast_forward_candidate,
+            is_css_modules_pure_magic_comment,
+            icss_symbols,
         );
         self.finish_value_fast_forward(candidate);
     }
@@ -1816,13 +1912,16 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn fast_forward_selector_if_buffer_empty<V: FastForwardVisitor>(
+    pub(crate) fn fast_forward_selector_if_buffer_empty<C>(
         &mut self,
         square_depth: &mut u32,
         keep_comments: bool,
         has_mode: bool,
-        visitor: &mut V,
-    ) -> bool {
+        is_comment_candidate: C,
+    ) -> bool
+    where
+        C: FnMut(&str) -> bool,
+    {
         if !self.buffered.is_empty() {
             return false;
         }
@@ -1862,9 +1961,12 @@ impl<'a, 's> TokenStream<'a, 's> {
                 probe += 1;
             }
         }
-        let invalidates_composes =
-            self.lexer
-                .fast_forward_selector(square_depth, keep_comments, has_mode, visitor);
+        let invalidates_composes = self.lexer.fast_forward_selector(
+            square_depth,
+            keep_comments,
+            has_mode,
+            is_comment_candidate,
+        );
         self.consumed = self.lexer.scan_pos();
         invalidates_composes
     }
