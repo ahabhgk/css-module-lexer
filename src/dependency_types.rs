@@ -306,6 +306,7 @@ pub enum Dependency<'s> {
 #[derive(Debug, Clone, Default)]
 pub struct DependencyContext<'s> {
     dependencies: Vec<Dependency<'s>>,
+    dashed_ident_occurrences: Vec<Range>,
     import_attributes: Vec<ImportAttributes<'s>>,
     composes_local_classes: Vec<&'s str>,
     composes_names: Vec<&'s str>,
@@ -353,6 +354,18 @@ impl<'s> DependencyContext<'s> {
 
     pub fn dependencies(&self) -> &[Dependency<'s>] {
         &self.dependencies
+    }
+
+    pub fn dashed_ident_occurrences(&self) -> &[Range] {
+        &self.dashed_ident_occurrences
+    }
+
+    pub(crate) fn set_dashed_ident_occurrences(&mut self, occurrences: Vec<Range>) {
+        self.dashed_ident_occurrences = occurrences;
+    }
+
+    pub(crate) fn estimated_dashed_ident_capacity(input_len: usize, mode: Mode) -> usize {
+        DependencyContextCapacity::estimate(input_len, mode).dashed_ident_occurrences
     }
 
     pub fn import_attributes(
@@ -451,6 +464,7 @@ impl<'s> DependencyContext<'s> {
 impl PartialEq for DependencyContext<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.dependencies == other.dependencies
+            && self.dashed_ident_occurrences == other.dashed_ident_occurrences
             && self.import_attributes == other.import_attributes
             && self.composes_local_classes == other.composes_local_classes
             && self.composes_names == other.composes_names
@@ -463,6 +477,7 @@ impl Eq for DependencyContext<'_> {}
 impl Hash for DependencyContext<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.dependencies.hash(state);
+        self.dashed_ident_occurrences.hash(state);
         self.import_attributes.hash(state);
         self.composes_local_classes.hash(state);
         self.composes_names.hash(state);
@@ -473,6 +488,7 @@ impl Hash for DependencyContext<'_> {
 #[derive(Debug, Clone, Copy, Default)]
 struct DependencyContextCapacity {
     dependencies: usize,
+    dashed_ident_occurrences: usize,
     import_attributes: u16,
     composes_local_classes: u16,
     composes_names: u16,
@@ -487,6 +503,11 @@ impl DependencyContextCapacity {
             Mode::Css => 4096,
         };
         let dependencies = estimate_capacity(input_len, dependency_denominator, 4, 8192);
+        let dashed_ident_occurrences = if mode != Mode::Css {
+            estimate_capacity(input_len, 64, 2, 8192)
+        } else {
+            0
+        };
         let import_attributes = estimate_capacity(input_len, 8192, 2, 1024);
         let (composes_local_classes, composes_names, value_at_rule_import_items) = match mode {
             Mode::Local | Mode::Pure => (
@@ -503,6 +524,7 @@ impl DependencyContextCapacity {
         };
         Self {
             dependencies,
+            dashed_ident_occurrences,
             import_attributes: import_attributes as u16,
             composes_local_classes: composes_local_classes as u16,
             composes_names: composes_names as u16,

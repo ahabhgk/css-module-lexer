@@ -229,19 +229,46 @@ pub struct TokenWithTrivia {
     pub leading: Trivia,
 }
 
-#[derive(Debug)]
-pub struct Lexer<'s> {
-    value: &'s [u8],
-    scan_pos: Pos,
+pub trait LexerVisitor {
+    fn visit_ident(&mut self, name: &str, range: Range);
 }
 
-impl<'s> Lexer<'s> {
-    pub fn new(value: &'s str) -> Self {
+impl LexerVisitor for () {
+    #[inline(always)]
+    fn visit_ident(&mut self, _name: &str, _range: Range) {}
+}
+
+#[derive(Debug)]
+pub struct Lexer<'s, V: LexerVisitor = ()> {
+    value: &'s [u8],
+    scan_pos: Pos,
+    visitor: V,
+}
+
+impl<'s, V: LexerVisitor> Lexer<'s, V> {
+    pub fn new(value: &'s str, visitor: V) -> Self {
         assert!(value.len() <= Pos::MAX as usize, "CSS input is too large");
         Self {
             value: value.as_bytes(),
             scan_pos: 0,
+            visitor,
         }
+    }
+
+    #[inline]
+    pub(crate) fn visitor_mut(&mut self) -> &mut V {
+        &mut self.visitor
+    }
+
+    #[inline]
+    fn visit_ident(&mut self, kind: TokenKind, range: Range) {
+        if !matches!(kind, TokenKind::Ident | TokenKind::Function) {
+            return;
+        }
+        let value = &self.value[range.start as usize..range.end as usize];
+        // SAFETY: token value ranges always lie on UTF-8 boundaries.
+        let value = unsafe { str::from_utf8_unchecked(value) };
+        self.visitor.visit_ident(value, range);
     }
 
     #[inline]
@@ -348,6 +375,8 @@ impl<'s> Lexer<'s> {
                     }
                     break;
                 }
+                self.visitor
+                    .visit_ident(name, Range::new(position as Pos, end as Pos));
                 if is_function {
                     state.parentheses += 1;
                     position = end + 1;
@@ -525,6 +554,11 @@ impl<'s> Lexer<'s> {
                 if self.value.get(end) == Some(&C_LEFT_PARENTHESIS) {
                     break;
                 }
+                let name = &self.value[position..end];
+                // SAFETY: scanned names start and end on UTF-8 boundaries.
+                let name = unsafe { str::from_utf8_unchecked(name) };
+                self.visitor
+                    .visit_ident(name, Range::new(position as Pos, end as Pos));
                 invalidates_composes = true;
                 trivia_start = None;
                 position = end;
@@ -689,7 +723,7 @@ impl<'s> Lexer<'s> {
         }
         // SAFETY: Lexer-generated positions always delimit complete tokens or
         // source fragments and therefore stay on UTF-8 code point boundaries.
-        Some(unsafe { Self::slice_unchecked(self.value, &range) })
+        Some(unsafe { slice_unchecked(self.value, &range) })
     }
 
     #[inline(always)]
@@ -697,9 +731,11 @@ impl<'s> Lexer<'s> {
         debug_assert!(start <= end && end <= self.value.len() as Pos);
         // SAFETY: Token ranges and parser positions originate from this
         // lexer, so they delimit valid UTF-8 source boundaries.
-        unsafe { Self::slice_unchecked(self.value, &Range::new(start, end)) }
+        unsafe { slice_unchecked(self.value, &Range::new(start, end)) }
     }
+}
 
+impl Lexer<'_, ()> {
     pub fn slice_range<'a>(input: &'a str, range: &Range) -> Option<&'a str> {
         let start = range.start as usize;
         let end = range.end as usize;
@@ -711,25 +747,25 @@ impl<'s> Lexer<'s> {
             return None;
         }
         // SAFETY: The range was checked against the original `str` above.
-        Some(unsafe { Self::slice_unchecked(input.as_bytes(), range) })
-    }
-
-    unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
-        unsafe {
-            let value = input.get_unchecked(range.start as usize..range.end as usize);
-            str::from_utf8_unchecked(value)
-        }
+        Some(unsafe { slice_unchecked(input.as_bytes(), range) })
     }
 }
 
-impl Lexer<'_> {
+unsafe fn slice_unchecked<'a>(input: &'a [u8], range: &Range) -> &'a str {
+    unsafe {
+        let value = input.get_unchecked(range.start as usize..range.end as usize);
+        str::from_utf8_unchecked(value)
+    }
+}
+
+impl<V: LexerVisitor> Lexer<'_, V> {
     #[inline]
     pub(crate) fn scan_pos(&self) -> Pos {
         self.scan_pos
     }
 }
 
-impl<'s> Lexer<'s> {
+impl<'s, V: LexerVisitor> Lexer<'s, V> {
     /// Return the next CSS token without allocating or decoding its value.
     ///
     /// `TokenKind::Eof` is returned after the input is exhausted. Unterminated
@@ -974,12 +1010,14 @@ impl<'s> Lexer<'s> {
             "scan_pos moved backward from {start} to {}",
             self.scan_pos
         );
-        Token::with_flags(
+        let token = Token::with_flags(
             kind,
             Range::new(start as Pos, end as Pos),
             Range::new(value_start as Pos, value_end as Pos),
             flags,
-        )
+        );
+        self.visit_ident(token.kind, token.value_range);
+        token
     }
 
     #[inline]
@@ -1486,8 +1524,8 @@ impl<'s> Lexer<'s> {
 /// when the buffer is empty; it never moves the scanner backwards, so every
 /// source range is tokenized at most once and every token is consumed at most
 /// once.
-pub(crate) struct TokenStream<'a, 's> {
-    lexer: &'a mut Lexer<'s>,
+pub(crate) struct TokenStream<'a, 's, V: LexerVisitor = ()> {
+    lexer: &'a mut Lexer<'s, V>,
     consumed: Pos,
     buffered: VecDeque<TokenWithTrivia>,
     generic_value_state: GenericValueScanState,
@@ -1540,8 +1578,8 @@ fn never_fast_forward_candidate(_: &str) -> bool {
     false
 }
 
-impl<'a, 's> TokenStream<'a, 's> {
-    pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s>) -> Self {
+impl<'a, 's, V: LexerVisitor> TokenStream<'a, 's, V> {
+    pub(crate) fn from_lexer(lexer: &'a mut Lexer<'s, V>) -> Self {
         Self {
             lexer,
             consumed: 0,
@@ -1918,12 +1956,12 @@ impl<'a, 's> TokenStream<'a, 's> {
     }
 
     #[inline]
-    pub(crate) fn lexer(&self) -> &Lexer<'s> {
+    pub(crate) fn lexer(&self) -> &Lexer<'s, V> {
         self.lexer
     }
 
     #[inline]
-    pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s> {
+    pub(crate) fn lexer_mut(&mut self) -> &mut Lexer<'s, V> {
         self.lexer
     }
 

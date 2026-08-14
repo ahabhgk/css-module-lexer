@@ -24,7 +24,7 @@ const ESCAPE_HEAVY_IDENTIFIER: &str = r#"
 const RUN_MICRO_BENCHES: &str = "CSS_MODULE_LEXER_RUN_MICRO_BENCHES";
 
 fn scan_tokens(input: &str) -> usize {
-    let mut lexer = Lexer::new(input);
+    let mut lexer = Lexer::new(input, ());
     let mut count = 0;
     loop {
         let token = lexer.next_token();

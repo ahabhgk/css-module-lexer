@@ -35,12 +35,17 @@ fn estimated_capacities_are_reserved_eagerly_and_cover_fixtures() {
                 <= estimate.value_at_rule_import_items as usize
         );
     }
+
+    let estimate = DependencyContextCapacity::estimate(RSPACK.len(), Mode::Local);
+    let (context, _) = collect_dependencies(RSPACK, Mode::Local);
+    assert!(context.dashed_ident_occurrences.capacity() >= estimate.dashed_ident_occurrences);
+    assert!(context.dashed_ident_occurrences.len() <= estimate.dashed_ident_occurrences);
 }
 
 #[test]
 #[cfg(target_pointer_width = "64")]
 fn dependency_keeps_rare_import_payload_out_of_hot_storage() {
-    assert_eq!(std::mem::size_of::<DependencyContext<'static>>(), 120);
+    assert_eq!(std::mem::size_of::<DependencyContext<'static>>(), 144);
     assert_eq!(std::mem::size_of::<Dependency<'static>>(), 48);
     assert_eq!(std::mem::size_of::<ImportAttributes<'static>>(), 48);
 }
